@@ -1,0 +1,112 @@
+/* Ambersight design tokens. Source: "Ambersight: Design Requirements". */
+/* SPDX-License-Identifier: AGPL-3.0-only */
+
+:root {
+  --orange-50: #fff4ec;
+  --orange-100: #ffe4d1;
+  --orange-200: #ffc7a3;
+  --orange-400: #ff8a3d;
+  --orange-500: #f26b1d;
+  --orange-600: #d9560f;
+  --orange-700: #b3440b;
+  --orange-800: #8a350c;
+  --orange-900: #5c250a;
+
+  --paper: #fffcf8;
+  --surface: #ffffff;
+  --line: #eadfd5;
+  --ink: #2b211b;
+  --ink-muted: #6e6259;
+  --critical: #c2361b;
+  --healthy: #2f7548;
+
+  --accent: var(--orange-500); /* strokes, focus, sparklines: never text */
+  --accent-text: var(--orange-700);
+  --warning-text: var(--orange-700);
+  --button: var(--orange-700);
+  --button-hover: var(--orange-800);
+  --chip: var(--orange-100);
+  --chip-text: var(--orange-900);
+  --row-tint: var(--orange-50);
+
+  --font: 'Inter Variable', Inter, system-ui, sans-serif;
+  --mono: ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, monospace;
+  --radius-card: 12px;
+  --radius-control: 8px;
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #1c1612;
+    --surface: #251e19;
+    --line: #3a2f28;
+    --ink: #f5ede6;
+    --ink-muted: #b5a79c;
+    --critical: #ff6b4e;
+    --healthy: #6bc08a;
+    --accent: var(--orange-400);
+    --accent-text: var(--orange-400);
+    --warning-text: var(--orange-400);
+    --button: var(--orange-400);
+    --button-hover: var(--orange-200);
+    --chip: #3d2a1d;
+    --chip-text: var(--orange-200);
+    --row-tint: #2b211b;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 400 16px/24px var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, p { margin: 0; }
+h2 { font-size: 20px; line-height: 28px; font-weight: 600; }
+
+a { color: var(--accent-text); }
+a:hover { color: var(--button-hover); }
+
+button, input { font: inherit; color: inherit; }
+
+button {
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  cursor: pointer;
+}
+button:hover { border-color: var(--ink-muted); }
+button.primary { background: var(--button); border-color: var(--button); color: #fff; font-weight: 600; }
+button.primary:hover { background: var(--button-hover); border-color: var(--button-hover); }
+@media (prefers-color-scheme: dark) { button.primary { color: #1c1612; } }
+button:disabled { opacity: 0.6; cursor: default; }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.mono { font-family: var(--mono); font-size: 14px; }
+.muted { color: var(--ink-muted); }
+.num { font-variant-numeric: tabular-nums; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+}
+
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .draw path { stroke-dasharray: 120; stroke-dashoffset: 120; animation: draw 400ms ease-out forwards; }
+}
+@keyframes draw { to { stroke-dashoffset: 0; } }

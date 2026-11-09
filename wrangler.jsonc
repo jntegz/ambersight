@@ -1,0 +1,46 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "ambersight",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-11-09",
+
+  // The dashboard UI is built by Vite into ./dist and served as static assets.
+  // Only /api/* reaches the Worker, so page views cost almost nothing.
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+
+  // History, findings, settings and sessions. Created automatically on first deploy.
+  "d1_databases": [
+    { "binding": "DB", "database_name": "ambersight", "migrations_dir": "migrations" }
+  ],
+
+  // One Cron Trigger, hourly. The Free plan allows 5 per account; Ambersight uses 1.
+  "triggers": { "crons": ["0 * * * *"] },
+
+  // Ambersight's own previews must never be public.
+  "workers_dev": true,
+  "preview_urls": false,
+
+  // Ambersight does not need its own logs; keep them off so it costs nothing.
+  "observability": { "enabled": false },
+
+  "vars": {
+    // "free" or "paid". Free enables the 100,000 requests/day budget guard.
+    "PLAN": "free",
+    // Sender for alerts and the weekly digest, on a domain with Email Routing enabled.
+    "EMAIL_FROM": "",
+    // Verified recipient(s), comma-separated. Must match send_email below.
+    "DIGEST_TO": "",
+    // Optional: pin the account if the token can see more than one.
+    "CF_ACCOUNT_ID": ""
+  }
+
+  // E-mail digest (optional). Uncomment and put your verified address here:
+  // "send_email": [
+  //   { "name": "EMAIL", "allowed_destination_addresses": ["you@example.com"] }
+  // ]
+}
