@@ -26,24 +26,31 @@ You have a dozen Workers, maybe fifty. One is quietly burning through the free p
 
 The Cloudflare dashboard shows you each Worker on its own. **Ambersight shows you the fleet** and tells you which Workers need attention, and why, in plain sentences.
 
-It runs as **one Worker in your own Cloudflare account**. Every hour it reads your Workers' settings and metrics with a read-only API token, runs 39 checks, and gives you a ranked list of what to fix. Alerts go to e-mail, Slack, Discord, Telegram or any webhook.
+It runs as **one Worker in your own Cloudflare account**. Every hour it reads your Workers' settings and metrics with a read-only API token, runs 74 checks, and gives you a ranked list of what to fix. One install can watch every account the token can see. Alerts go to e-mail, Slack, Discord, Telegram or any webhook.
 
-- **On the Free plan**, the risk is an outage. Past 100,000 requests in a day, every Worker in the account answers with Error 1027 until midnight UTC. Ambersight warns you at 70% and again at 90%, with the time you will hit the limit at today's pace.
-- **On Workers Paid**, the risk is the bill. There is no hard spending cap, so a loop, a retry storm or a crawler is billed for every hour it runs. Ambersight compares each Worker's last hour with its usual hour and alerts you at 5x, for requests, CPU time, subrequests and D1, KV, R2, Queues and Durable Object operations.
+- **On the Free plan**, the risk is an outage. Past 100,000 requests in a day, every Worker in the account answers with Error 1027 until midnight UTC, and the same goes for 1,000 KV writes, 5 million D1 rows read and the other daily limits. Ambersight warns you at 70% and again at 90% of each one, with the time you will hit it at today's pace.
+- **On Workers Paid**, the risk is the bill. There is no hard spending cap, so a loop, a retry storm or a crawler is billed for every hour it runs. Ambersight compares each Worker's last hour with its usual hour and alerts you at 5x, for requests, CPU time, subrequests and D1, KV, R2, Queues and Durable Object operations. It also catches Durable Object or Queue work that runs while nobody uses the app, and shows the estimated bill in dollars.
 
 ## What it catches
 
 | | Ambersight tells you when… |
 | --- | --- |
-| **Free plan budget** | you are on track to hit today's 100,000-request limit (Error 1027), and roughly when. |
-| **Runaway usage** | requests, CPU time, subrequests, D1, KV, R2, Queues or Durable Objects jump to 5x their usual hourly level. On Workers Paid there is no spending cap, so this is the alert that saves money. |
+| **Free plan limits** | you are on track to hit today's 100,000-request limit (Error 1027), or any other daily limit: D1 rows, KV reads and writes, Durable Objects, Queues, Workflows, Workers AI. And roughly when. |
+| **Storage caps** | a D1 database nears 500 MB (Free) or its 10 GB hard cap (Paid), or KV, R2 or Durable Object storage nears the account limit. |
+| **Runaway usage** | requests, CPU time, subrequests, D1, KV, R2, Queues or Durable Objects jump to 5x their usual hourly level, or a brand-new Worker bursts. On Workers Paid there is no spending cap, so this is the alert that saves money. |
+| **Idle loops** | Durable Objects, a queue or a database stay busy for hours while the Workers using them get almost no requests: an alarm or retry loop. |
+| **Cost** | on Workers Paid: the estimated bill so far this month, the month-end forecast, the costliest Workers, and dollars on every runaway alert. |
 | **Errors and limits** | error rates pass 2% or 10%, or triple a Worker's own baseline; invocations hit CPU or memory limits; p99 CPU gets close to the free plan's 10 ms. |
 | **Cron health** | scheduled runs are missed or fail, a cron gets close to its CPU limit, or you are running out of Cron Triggers. |
-| **Bad deploys** | a problem starts right after a deploy. The timeline marks the deploy and the finding names it. |
+| **Bad deploys** | a problem starts right after a deploy, or a gradual rollout is left split for days. The timeline marks the deploy, and also shows audit log changes and Cloudflare's own notifications. |
+| **Config drift** | a binding or secret disappears after a deploy, staging and production differ, or a Worker nears 64 variables. |
+| **Pages** | a Pages deploy fails, or a project's `pages.dev` address skips the WAF of its custom domain. |
+| **Security** | a member or API token is added, a certificate is about to expire or stuck, or a DNS record points at a deleted Pages project anyone could claim. |
 | **Deprecations** | a Worker still uses Service Worker syntax, an old compatibility date, the legacy usage model, Workers Sites or redundant flags. |
 | **Exposure** | preview URLs are public, a forgotten `workers.dev` hostname still answers, or (optional) a URL is not behind Cloudflare Access. |
 | **Zombies and orphans** | Workers with no traffic or never deployed; KV, D1, R2 and Queues bound to nothing; routes and service bindings that point at deleted Workers. |
-| **Log costs** | a busy Worker logs every request at 100% sampling (Workers Logs are billed by volume from 1 December 2026), or Logpush is still on. |
+| **Log costs** | a busy Worker logs every request at 100% sampling (logs are billed per GB from 1 December 2026), the Free plan's 0.5 GB a day will run out, Logpush is still on, or a D1 query reads millions of rows to return a few. |
+| **Ambersight itself** | its API token is about to expire, or scans keep failing. |
 
 The [full list of checks](docs/checks.md) has every threshold, ID and fix.
 
@@ -55,7 +62,9 @@ This is what a finding looks like (demo fleet):
 
 Every finding comes with the evidence, a suggested fix and a link to the Cloudflare docs. Findings from the same check are grouped, so fourteen Workers with public preview URLs are one row with one fix, not fourteen. Critical and warning come first; info-level housekeeping stays folded away. Acknowledge or snooze one finding or a whole group, or stop a check you don't care about.
 
-Also included: groups and tags, per-Worker thresholds, include and exclude rules, a weekly or daily digest in your time zone, quiet hours, and a **Self-cost** panel that shows exactly what Ambersight itself uses.
+Also included: several accounts in one install with an "All accounts" view, groups and tags, per-Worker thresholds, include and exclude rules, a daily, weekly or monthly digest in your time zone (with a client digest per account), a printable client report, quiet hours, and a **Self-cost** panel that shows exactly what Ambersight itself uses.
+
+**Optional and free**, each off until you uncomment it in `wrangler.jsonc`: a scan queue that scans every account on time, a plain-language digest summary from Workers AI, PDF reports through Browser Rendering, and Cloudflare Turnstile on the sign-in page. See [configuration.md](docs/configuration.md#optional-bindings).
 
 ## Screenshots
 
@@ -95,9 +104,9 @@ Both start with the same step.
 
 ### Step 1: Create a read-only API token
 
-[**Open the pre-filled token form**](https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22account_analytics%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22d1%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_r2%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22queues%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_routes%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22billing%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22access%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22api_tokens%22%2C%22type%22%3A%22read%22%7D%5D&accountId=*&zoneId=all&name=Ambersight%20read-only). Check that every permission says **Read**, click **Continue to summary**, then **Create Token**. Copy the token now; Cloudflare shows it only once.
+[**Open the pre-filled token form**](https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22account_analytics%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22d1%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_r2%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22queues%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_routes%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22billing%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22page%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22ssl_and_certificates%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22access%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22api_tokens%22%2C%22type%22%3A%22read%22%7D%5D&accountId=*&zoneId=all&name=Ambersight%20read-only). Check that every permission says **Read**, click **Continue to summary**, then **Create Token**. Copy the token now; Cloudflare shows it only once.
 
-The form opens with the token set to **All accounts** and **All zones**. If you belong to several Cloudflare accounts, the setup wizard asks which one to watch. You can also narrow the token to that account before you create it.
+The form opens with the token set to **All accounts** and **All zones**. If you belong to several Cloudflare accounts, the setup wizard asks which ones to watch. You can also narrow the token to those accounts before you create it.
 
 <details>
 <summary>Prefer to create the token by hand? These are the permissions.</summary>
@@ -111,11 +120,14 @@ The form opens with the token set to **All accounts** and **All zones**. If you 
 | Account | Account Settings | Read | Finding your account ID |
 | Account | Workers KV Storage, D1, Workers R2 Storage, Queues | Read | Zombie and storage checks |
 | Zone | Workers Routes, Zone | Read | Exposure checks and orphaned routes |
+| Account | Cloudflare Pages | Read | Pages checks (failed deploys, `pages.dev` exposure, dangling DNS to Pages) |
+| Zone | SSL and Certificates, DNS | Read | Certificate and dangling-DNS checks |
+| Account | Notifications | Read | Optional: Cloudflare's own notifications on the timeline. Not in the pre-filled link (it has no short key); add it by hand. |
 | Account | Billing | Read | Detecting Free or Paid automatically. Without it, Ambersight uses `PLAN` from `wrangler.jsonc`; you can also set the plan in **Settings › General**. |
 | Account | Access: Apps and Policies | Read | The Access coverage check (off by default) |
 | User | API Tokens | Read | Letting the setup wizard prove the token has no write scopes |
 
-Do not add any **Edit** permission. If the token can see several accounts, the setup wizard lets you choose one. To fix the choice in config instead, set `CF_ACCOUNT_ID` in `wrangler.jsonc` under `vars`.
+Do not add any **Edit** permission. If the token can see several accounts, the setup wizard lets you tick the ones to watch. To fix the choice in config instead, set `CF_ACCOUNT_ID` in `wrangler.jsonc` under `vars` (comma-separated for several).
 </details>
 
 ### A. Deploy button
@@ -243,8 +255,9 @@ Nothing, on the Workers Free plan. With 30 Workers:
 
 - **Cron Triggers:** 1 of your 5. It fires every 15 minutes but only scans at the interval you choose (hourly by default); the other runs stop after one D1 read.
 - **Requests:** about 100 cron runs plus a few hundred dashboard API calls a day. That is well under 1% of the 100,000 daily requests. Page views are static assets and do not count.
-- **Subrequests:** under 45 per scan, within the free limit of 50.
-- **D1 and CPU:** a small fraction of the free allowance. Its own logs are off.
+- **Subrequests:** at most 42 per scan, within the free limit of 50. A typical hourly scan uses fewer than 10.
+- **D1 and CPU:** about 10 D1 calls per scan and a small fraction of the free allowance. Its own logs are off.
+- **Optional extras:** the scan queue, Workers AI summary and PDF reports each stay well inside their own free allowances; see [configuration.md](docs/configuration.md#optional-bindings).
 
 The **Self-cost** panel in Settings shows the measured numbers for your account.
 
@@ -273,7 +286,7 @@ No. Ambersight reads what Cloudflare already records: the Workers API, the Graph
 <details>
 <summary><b>Does any of my data leave my Cloudflare account?</b></summary>
 
-No, apart from what you set up yourself. Ambersight talks only to `api.cloudflare.com` and, for the optional update notice, to `api.github.com` to read the latest release number (no account data is sent). Alerts go only to the e-mail address and webhook you configure. There is no telemetry.
+No, apart from what you set up yourself. Ambersight talks only to `api.cloudflare.com` and, for the optional update notice, to `api.github.com` to read the latest release number (no account data is sent). Two more hosts are contacted only if you turn them on: Cloudflare's public status page `www.cloudflarestatus.com` (the incidents check, off by default) and `challenges.cloudflare.com` (Turnstile on the sign-in page). Alerts go only to the e-mail address and webhook you configure. There is no telemetry.
 </details>
 
 <details>
@@ -303,7 +316,7 @@ Probably not. A few Cloudflare analytics datasets (for example scheduled invocat
 <details>
 <summary><b>Can I monitor several Cloudflare accounts?</b></summary>
 
-Not from one install yet; that is planned for v1.0. For now, deploy one Ambersight per account (each uses 1 Cron Trigger in that account). If one token can see several accounts, the setup wizard asks which one to watch.
+Yes. If the token can see several accounts, tick the ones to watch in the setup wizard or **Settings › Accounts**. The header gets an account switcher and an **All accounts** view, each account can have its own label and plan, and each can get its own digest by e-mail (handy for clients). Each cron run scans the most overdue account, so with 8 accounts each is scanned about every 2 hours. Add the free scan queue to scan them all on time ([configuration.md](docs/configuration.md#optional-bindings)).
 </details>
 
 <details>
@@ -340,7 +353,7 @@ No. It is an independent open-source project built on Cloudflare's public APIs. 
 
 ## Documentation
 
-- [Checks](docs/checks.md): all 39 checks, with thresholds, IDs and fixes
+- [Checks](docs/checks.md): all 74 checks, with thresholds, IDs and fixes
 - [How it works](docs/how-it-works.md): what one scan does, what it stores and how it stays inside the free plan
 - [Alerts](docs/alerts.md): channels, defaults, the digest and message formats
 - [Configuration](docs/configuration.md): `wrangler.jsonc`, secrets and every `config.json` field

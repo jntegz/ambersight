@@ -40,9 +40,37 @@ The token is missing the matching Read permission (*Workers KV Storage*, *D1*, *
 
 The token is missing *Zone › Workers Routes Read* or *Zone › Zone Read*, or it is limited to some zones. The exposure and orphan checks see only what the token can read.
 
-### "Routes: N zones not checked this run."
+### "N zone checks will run on the next scans."
 
-One scan reads routes for up to 20 zones. With more zones, the rest are read on later scans, and the routes already stored for them are kept in the meantime.
+Routes, certificates and DNS records are read zone by zone, a few per scan, so each zone is read at least once a day. With many zones the first scans fill this in over a few hours; what is already stored is kept in the meantime. The optional scan queue finishes them in one go.
+
+### "Certificates unavailable for …" or "DNS records unavailable for …"
+
+The token is missing *SSL and Certificates Read* or *DNS Read*. The certificate and dangling-DNS checks are skipped until you add them, or switch off **Settings › Checks › Security**.
+
+### "Pages projects unavailable: …"
+
+The token is missing *Pages Read* (the key `page` in the token template). Add it, or switch off **Settings › Checks › Pages**.
+
+### "Audit log unavailable: …"
+
+The audit log needs *Account Settings Read*, which the pre-filled token already has. Ambersight tries again a day later.
+
+### "Cloudflare notifications unavailable: …"
+
+The token is missing *Notifications Read*. It has no short key for the pre-filled token link, so add it by hand under **My Profile › API Tokens › Edit**, or switch off **Settings › Checks › Cloudflare notifications**. Ambersight asks again once a day.
+
+### "Storage sizes unavailable: d1, kv …" or "D1 query insights unavailable."
+
+A GraphQL dataset was not available for the account. The storage-cap or expensive-query checks for those products wait until it is.
+
+### Workers AI or Workflow limits never show
+
+Those numbers come from GraphQL datasets that Ambersight reads only when a Worker binds Workers AI or a Workflow. The Workers AI dataset is not in Cloudflare's documentation; if the account does not have it, Ambersight retries once a day and the rest of the checks keep working.
+
+### "The last N scans failed: …"
+
+Shown on the overview after a scan fails, with Cloudflare's error. The most common causes are an expired or revoked token (check `health:token-expiry` and **My Profile › API Tokens**) and an account the token can no longer see. After 3 failures in a row, Ambersight sends one alert a day.
 
 ### "N Workers will get their details on the next runs."
 

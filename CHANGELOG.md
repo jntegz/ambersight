@@ -2,6 +2,31 @@
 
 All notable changes to Ambersight. Each version here has a matching [GitHub release](https://github.com/jntegz/ambersight/releases), which is what the update notice in the dashboard reads.
 
+## 0.2.0 (unreleased)
+
+Everything here is built on free Cloudflare features and keeps the read-only token. See [docs/research/free-cloudflare-features.md](docs/research/free-cloudflare-features.md) for why each one was chosen.
+
+- **Several accounts in one install.** Tick the accounts to watch in the setup wizard or **Settings › Accounts**; an account switcher and an **All accounts** view appear. Each account can have its own label, plan and client digest. Existing installs keep their history (migration 0005).
+- **74 checks** (from 39):
+  - every free daily limit, not just requests: D1 rows, KV reads/writes/deletes/lists, Durable Objects, Queues, Workflows, Workers AI;
+  - storage caps for D1 (per database and per account), KV, R2 and Durable Objects;
+  - idle loops (Durable Object alarm or Queue retry loops with no traffic) and bursts on new Workers;
+  - Pages failed deploys and `pages.dev` exposure;
+  - audit log: new members and API tokens;
+  - certificates expiring, failed or stuck; DNS records pointing at deleted Pages projects or Workers;
+  - stuck gradual rollouts; config drift (bindings that disappeared, staging vs production, the 64-variable limit);
+  - expensive D1 queries; subrequests close to 50 per invocation on Free;
+  - log volume under the per-GB pricing from 1 December 2026;
+  - Ambersight's own API token expiring; `nodejs_compat` as a redundant flag from 2026-08-04.
+- **Estimated bill** on Workers Paid: month to date, month-end forecast, costliest Workers, and dollars on runaway findings.
+- **Timeline** adds Cloudflare's own notifications, the audit log, Pages deploys, and (opt-in) Cloudflare status incidents; deploy authors are filled in from the audit log.
+- **Digest**: monthly frequency, free-limit headroom, biggest traffic changes, estimated bill, a section per account, client digests per account.
+- **Client report** per account for 7 or 30 days, printable, or as a PDF with Browser Rendering.
+- **Alerts**: an alert after 3 failed scans in a row; an optional note when Cloudflare reports an active incident.
+- **Zones** are read on a cursor, so all of them are covered instead of the first 20.
+- **Optional, free bindings**, all off by default: a scan queue (every account on time, large fleets in one go), a Workers AI digest summary, PDF reports, and Turnstile on sign-in.
+- The pre-filled token link adds Pages, SSL and Certificates, and DNS Read.
+
 ## 0.1.0 (2026-11-09)
 
 The first public release.

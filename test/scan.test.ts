@@ -9,7 +9,8 @@ import { runScan } from '../src/worker/scan';
 import { sendAlerts, sendWebhook } from '../src/worker/notify';
 import { setupStatus } from '../src/worker/setup';
 import { createD1 } from './d1';
-import { fakeFetch, fleet, NOW, type FakeOptions } from './fixtures';
+import { fakeFetch, fleet, NEXT_RELEASE, NOW, type FakeOptions } from './fixtures';
+import { VERSION } from '../src/worker/version';
 
 function env(over: Partial<Env> = {}) {
   const sent: { to: string | string[]; subject: string; text?: string }[] = [];
@@ -86,7 +87,7 @@ describe('first scan of a small fleet', () => {
     expect(o.workers.find((w) => w.name === 'api')?.groups).toEqual(['client-a']);
     expect(o.workers.find((w) => w.name === 'api')?.entryPoints).toEqual(['example.com/*']);
     expect(o.workers.find((w) => w.name === 'legacy')?.entryPoints).toEqual(['legacy.me.workers.dev']);
-    expect(o.update).toEqual({ current: '0.1.0', latest: 'v0.2.0', url: 'https://github.com/x/releases/v0.2.0' });
+    expect(o.update).toEqual({ current: VERSION, latest: NEXT_RELEASE, url: `https://github.com/x/releases/${NEXT_RELEASE}` });
     expect(o.workers[0].spark24).toHaveLength(24);
 
     const tl = await buildTimeline(e, 'acc1');

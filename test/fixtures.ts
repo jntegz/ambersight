@@ -1,8 +1,11 @@
 // Recorded-style Cloudflare API responses for a small fleet, served by a fake fetch.
 // Shapes follow the public API docs; they are not captured from a live account.
 // SPDX-License-Identifier: AGPL-3.0-only
+import { VERSION } from '../src/worker/version';
 
 export const NOW = new Date('2026-11-09T12:20:00Z');
+/** A release one minor version ahead of the running one, for the update notice. */
+export const NEXT_RELEASE = `v${VERSION.split('.')[0]}.${Number(VERSION.split('.')[1]) + 1}.0`;
 const ok = (result: unknown) => new Response(JSON.stringify({ success: true, result, errors: [] }), { headers: { 'Content-Type': 'application/json' } });
 const gql = (data: unknown) => new Response(JSON.stringify({ data, errors: null }), { headers: { 'Content-Type': 'application/json' } });
 
@@ -67,7 +70,7 @@ export function fakeFetch(opts: FakeOptions = {}) {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
     const path = url.pathname.replace('/client/v4', '');
     calls.push(`${init?.method ?? 'GET'} ${url.hostname}${path}`);
-    if (url.hostname === 'api.github.com') return new Response(JSON.stringify({ tag_name: 'v0.2.0', html_url: 'https://github.com/x/releases/v0.2.0' }));
+    if (url.hostname === 'api.github.com') return new Response(JSON.stringify({ tag_name: NEXT_RELEASE, html_url: `https://github.com/x/releases/${NEXT_RELEASE}` }));
     if (url.hostname === 'hooks.slack.com') return new Response('ok');
     if (path === '/graphql') {
       const q = JSON.parse(String(init?.body)).query as string;

@@ -1,20 +1,27 @@
 # Checks
 
-Ambersight runs 39 checks on every scan. Each one below lists the ID you see in the dashboard and in `config.json`, how severe it is, exactly when it fires, and what to do about it. The numbers are the defaults. Most of them can be changed globally, per group or per Worker (see [configuration.md](configuration.md)).
+Ambersight runs 74 checks. Each one below lists the ID you see in the dashboard and in `config.json`, how severe it is, exactly when it fires, and what to do about it. The numbers are the defaults. Most of them can be changed globally, per group or per Worker (see [configuration.md](configuration.md)).
 
 Every finding in the dashboard carries the evidence behind it, a suggested fix and a link to the matching Cloudflare docs page. When the problem goes away, the finding resolves on its own at the next scan.
 
 **Severity** decides where a finding goes. By default, critical findings are e-mailed right away, and everything else waits for the digest. See [alerts.md](alerts.md).
 
 - [Free plan budget](#free-plan-budget)
+- [Free plan daily limits](#free-plan-daily-limits)
+- [Storage caps](#storage-caps)
 - [Runaway usage](#runaway-usage)
+- [Idle loops and new bursts](#idle-loops-and-new-bursts)
 - [Storage and log costs](#storage-and-log-costs)
 - [Errors and limits](#errors-and-limits)
 - [Cron health](#cron-health)
-- [Bad deploys](#bad-deploys)
+- [Bad deploys and rollouts](#bad-deploys)
 - [Deprecations](#deprecations)
 - [Exposure](#exposure)
 - [Zombies and orphans](#zombies-and-orphans)
+- [Pages](#pages)
+- [Security](#security)
+- [Config drift](#config-drift)
+- [Ambersight's own health](#ambersights-own-health)
 - [Switching checks off](#switching-checks-off)
 - [Which permission each group needs](#which-permission-each-group-needs)
 
@@ -30,6 +37,37 @@ On the Workers Free plan, an account gets 100,000 requests per UTC day across al
 
 Threshold settings: `budgetWarn` (0.7), `budgetCritical` (0.9).
 
+## Free plan daily limits
+
+The Free plan has more daily limits than requests, and every one is **per account**: spreading the work over several Workers does not help. Past a limit, calls of that kind fail until 00:00 UTC. Each check projects when the account runs out at today's pace. The numbers come from the same GraphQL queries Ambersight already makes (D1 rows, KV operations by type), so most cost no extra API calls. Hidden on Workers Paid, except Workers AI.
+
+| Check | Limit per day | Severity | What to do |
+| --- | --- | --- | --- |
+| `budget:free-daily-d1-rows-read` | 5,000,000 rows read | Warning at 70%, critical at 90% | Find the query reading the most rows (see `usage:d1-inefficient-query`). Usually a missing index. |
+| `budget:free-daily-d1-rows-written` | 100,000 rows written | Same | Look for a write in a hot path or a loop. |
+| `budget:free-daily-kv-reads` | 100,000 reads | Same | Cache in memory or with the Cache API. |
+| `budget:free-daily-kv-writes` | 1,000 writes | Same | KV is built for reads. Batch writes, or move write-heavy data to D1 or Durable Objects. |
+| `budget:free-daily-kv-deletes` | 1,000 deletes | Same | Use expiring keys (TTL) instead of deleting. |
+| `budget:free-daily-kv-lists` | 1,000 list requests | Same | Keep an index key instead of listing. |
+| `budget:free-daily-do-requests` | 100,000 Durable Object requests | Same | Look for chatty clients or alarms that fire too often. |
+| `budget:free-daily-queue-ops` | 10,000 Queue operations | Same | Batch messages; check for a consumer that retries every message. |
+| `budget:free-daily-workflow-steps` | 3,000 Workflow steps | Same | Combine small steps. |
+| `budget:free-daily-ai-neurons` | 10,000 Workers AI neurons | Same on Free. On Paid, info once the free allocation is used, since the rest is billed. | Use a smaller model or cache answers. |
+
+Threshold settings: `budgetWarn` (0.7), `budgetCritical` (0.9), shared with the request budget. The Workers AI dataset is not in Cloudflare's documentation, so that check may say the data is unavailable.
+
+## Storage caps
+
+Read once a day with the inventory: the size of each D1 database, KV namespace and R2 bucket, and the Durable Object total.
+
+| Check | Limit | Severity | What to do |
+| --- | --- | --- | --- |
+| `budget:storage-d1-db` | 500 MB per database on Free, 10 GB on Paid (a hard cap) | Warning at 80%, critical at 95% | A full database rejects writes. Delete old rows, split the data, or move large values to R2. |
+| `budget:storage-d1-account` | 5 GB on Free, 1 TB on Paid | Same | Same. |
+| `budget:storage-kv-account` | 1 GB on Free | Same | Delete what you no longer need, or use expiring keys. |
+| `budget:storage-do-account` | 5 GB on Free | Same | Delete old objects' storage with `deleteAll()`. |
+| `budget:storage-r2-account` | 10 GB free | Warning | Past 10 GB, R2 is billed rather than blocked. Set lifecycle rules. |
+
 ## Runaway usage
 
 These compare a Worker's **last full hour** with its **median hour over the past 7 days**. A Worker needs 72 hours of history before they apply, so a new install stays quiet for its first three days. Each one also has a floor, so a Worker that goes from 3 requests to 30 does not raise an alarm.
@@ -44,6 +82,18 @@ Workers Paid has no hard spending cap. A loop, a retry storm or a crawler is bil
 
 Threshold setting: `runawayMultiplier` (5).
 
+## Idle loops and new bursts
+
+The 5x baseline needs three days of history and cannot see a loop that starts on day one, or work that runs while nobody uses the app. These cover both.
+
+| Check | Severity | Fires when | What to do |
+| --- | --- | --- | --- |
+| `usage:idle-loop-do`, `-queues`, `-d1`, `-kv`, `-r2` | Critical on Paid, warning on Free | For each of the last 3 full hours, a Durable Object namespace, queue, database, namespace or bucket did at least 2,000 operations while the Workers bound to it served fewer than 1 request per 100 operations. On Paid the finding gives the cost per hour. | This is the shape of an alarm that always sets the next alarm, a queue consumer that fails and retries every message, or a cron that never finishes. Find it before it runs all night. |
+| `runaway:new-worker-burst` | Critical on Paid, warning on Free | A Worker with under 72 hours of history served at least 50,000 requests in the last hour. | If the traffic is not expected, look for a loop or a crawler. |
+| `usage:new-resource-burst-<kind>` | Same | A resource with under 72 hours of history had at least 100,000 operations in the last hour. | Look for a loop reading or writing in a hot path. |
+
+Threshold settings: `newWorkerHourlyRequests` (50,000), `newResourceHourlyOps` (100,000).
+
 ## Storage and log costs
 
 The same 5x rule as runaway usage, applied to storage operations and Durable Objects. The finding names the resource and the first Worker bound to it. Cloudflare's own usage notifications do not cover these operations.
@@ -55,7 +105,9 @@ The same 5x rule as runaway usage, applied to storage operations and Durable Obj
 | `usage:ops-spike-r2` | Critical | R2 operations on one bucket: same rule. | Same. |
 | `usage:ops-spike-queues` | Critical | Queue operations on one queue: same rule. | Check for a consumer that fails and retries every message. |
 | `usage:ops-spike-do` | Critical | Durable Object requests: same rule. | Look for an alarm or a client that reconnects in a loop. |
-| `usage:logs-full-sampling` | Info | A Worker has logs on at 100% sampling and serves at least 10,000 requests a day. | Workers Logs are billed by volume from 1 December 2026. Lower `head_sampling_rate` if you do not need every request. |
+| `usage:logs-full-sampling` | Info | A Worker has logs on at 100% sampling and serves at least 10,000 requests a day. The finding estimates GB a month, and on Paid the cost past the included 50 GB. | From 1 December 2026, logs and traces are billed per GB. Lower `head_sampling_rate` if you do not need every request. |
+| `usage:logs-free-allowance` | Info at 70% of 0.5 GB a day, warning above it | Free plan only. The estimated log volume of all Workers is close to or over the 0.5 GB a day that Free accounts ingest from 1 December 2026. Past it, logs stop being stored until 00:00 UTC; the finding says around what time. | Lower `head_sampling_rate` on the busiest Workers, so the logs you need are kept. The estimate assumes about 1.5 KB per event. |
+| `usage:d1-inefficient-query` | Info, warning at 100 million rows read a day | Once a day: a D1 query read at least 1 million rows in 24 hours, and at least 100 rows for every row it returned. The finding shows the query, with its parameters as `?`. | Add an index on the columns in its `WHERE` or `ORDER BY`. D1 bills rows read. |
 | `usage:logpush-on` | Info | Logpush is on for a Worker. | Make sure the destination, and what it costs, is still wanted. |
 
 ## Errors and limits
@@ -66,6 +118,7 @@ The same 5x rule as runaway usage, applied to storage operations and Durable Obj
 | `errors:error-baseline` | Warning | The 24-hour error rate is 3x what the Worker had in the 6 days before, with at least 10 errors and a rate of at least 0.5%. Not raised when `error-rate` already fired. | Something changed. Check recent deploys, then the most frequent exception. This catches a Worker that normally runs at 0.1% and is now at 0.8%, which the fixed 2% line would miss. |
 | `errors:resource-limit` | Warning | Any invocation hit the CPU or memory limit in the last 24 hours. | Profile the slow path, or move heavy work to a Queue or a Workflow. |
 | `errors:cpu-near-limit` | Info | Free plan only. The p99 CPU time is at least 80% of the 10 ms limit, and nothing has hit the limit yet. | Requests over the limit fail with Error 1102. Trim CPU work before traffic grows. |
+| `errors:subrequests-near-limit` | Warning | Free plan only. Over 24 hours, invocations made 40 or more subrequests on average (Free allows 50 per invocation). | Only the average is known, so some invocations are probably over the limit already, and the 51st fetch throws. Batch calls, cache results, or move fan-out work to a Queue. |
 
 Threshold settings: `errorWarn` (0.02), `errorCritical` (0.1), `errorBaselineMultiplier` (3), `cpuShareWarn` (0.8).
 
@@ -93,6 +146,14 @@ This is not a separate check. When `errors:error-rate`, `errors:error-baseline` 
 
 Threshold setting: `deployWindowMinutes` (60). Turn the timeline module off to stop it.
 
+The timeline also shows Cloudflare's own notifications (alert history, needs *Notifications Read*), audit log entries for Workers, routes, DNS, certificates, Access, members and tokens, each Pages project's latest deploy, and, if you turn it on, Cloudflare status incidents. A deploy with no author takes it from the audit log.
+
+| Check | Severity | Fires when | What to do |
+| --- | --- | --- | --- |
+| `deploys:stuck-rollout` | Warning | A Worker's latest deployment still splits traffic between versions (a gradual rollout) after 24 hours. | Finish the rollout with `wrangler versions deploy` at 100%, or roll back. While traffic is split, errors are hard to compare. |
+
+Threshold setting: `rolloutMaxHours` (24).
+
 ## Deprecations
 
 | Check | Severity | Fires when | What to do |
@@ -101,7 +162,7 @@ Threshold setting: `deployWindowMinutes` (60). Turn the timeline module off to s
 | `deprecation:old-compat-date` | Warning | The `compatibility_date` is 12 months old or more. | Read the compatibility flags changelog since that date, update the date and test. |
 | `deprecation:legacy-usage-model` | Warning | The Worker reports the `bundled` or `unbound` usage model. | Both were replaced by Standard pricing. Remove `usage_model` from your Wrangler config and redeploy. |
 | `deprecation:workers-sites` | Warning | The Worker has a `__STATIC_CONTENT` binding, meaning it serves files with Workers Sites. | Move to Workers Static Assets: replace the `[site]` block with an `assets` directory. |
-| `deprecation:redundant-flags` | Info | A compatibility flag does nothing at the Worker's compatibility date because its behaviour became the default. Today this covers `nodejs_compat_v2` from 2024-09-23. | Remove the flag from `compatibility_flags`. |
+| `deprecation:redundant-flags` | Info | A compatibility flag does nothing at the Worker's compatibility date because its behaviour became the default. Today this covers `nodejs_compat_v2` from 2024-09-23, and `nodejs_compat` from 2026-08-04, when Node.js compatibility became the default. | Remove the flag from `compatibility_flags`. |
 
 Threshold setting: `compatAgeMonths` (12).
 
@@ -113,6 +174,7 @@ Threshold setting: `compatAgeMonths` (12).
 | `exposure:preview-urls` | Warning | Every version of the Worker gets a public preview URL. | Set `preview_urls = false` unless you share previews on purpose. To fix the whole group at once: **Workers & Pages › Protect all Workers › Enable Access › Previews only**. |
 | `exposure:workers-dev-duplicate` | Warning | The Worker answers on `workers.dev` and also on a route or custom domain. | Requests on `workers.dev` skip your zone settings, such as WAF rules and Access. Set `workers_dev = false` if you do not use it. |
 | `exposure:workers-dev-public` | Info | The Worker answers only on `workers.dev`. | Fine if you meant it. Set `workers_dev = false` for internal Workers. |
+| `exposure:pages-dev-public` | Info | A Pages project has a custom domain, and its `*.pages.dev` address still answers. | Requests to `pages.dev` skip your zone's WAF, bot and rate-limiting rules. Redirect it to your domain with a Bulk Redirect, or put it behind Cloudflare Access. |
 | `exposure:not-behind-access` | Warning. **Off by default.** | A public URL of the Worker (route, custom domain or `workers.dev`) is not covered by a Cloudflare Access application. | Ignore it for public sites. For internal tools, add a self-hosted Access application for those hostnames. |
 
 Only Workers with a `fetch` handler count for the `workers.dev` checks. For the Access check, an application scoped to a path covers only that path, so it does not count, and `*.example.com` covers subdomains but not `example.com` itself. Turn the check on in **Settings › Checks**. It needs the *Access: Apps and Policies Read* permission.
@@ -138,13 +200,53 @@ The unbound checks wait until Ambersight has read every Worker's bindings at lea
 
 Threshold setting: `zombieDays` (30).
 
+## Pages
+
+Read once a day with the inventory (needs *Pages Read*). Pages Functions count toward the same 100,000 daily requests as Workers; the overview's Pages section shows each project's function requests.
+
+| Check | Severity | Fires when | What to do |
+| --- | --- | --- | --- |
+| `pages:deploy-failed` | Warning for production, info for previews | The latest deploy of a Pages project failed. | Read the build log in Workers & Pages. The site keeps serving the last deploy that worked. |
+
+## Security
+
+| Check | Severity | Fires when | What to do |
+| --- | --- | --- | --- |
+| `security:member-change` | Warning (info for a removal) | The audit log shows an account member added, changed or removed in the last 7 days. | If you did not expect it, check **Manage Account › Members**. Acknowledge it once you have. |
+| `security:token-created` | Info | The audit log shows a new API token in the last 7 days. | If you did not expect it, review its permissions under API Tokens. |
+| `security:cert-expiring` | Warning at 7 days, critical at 2 | An active edge certificate expires soon. Managed certificates renew about 30 days ahead, so this one is not renewing. | Check its validation in **SSL/TLS › Edge Certificates**. Upload a renewed one if it is a custom certificate. |
+| `security:cert-failed` | Critical when expired, otherwise warning | A certificate pack is expired or timed out, and no other active pack covers its hostnames. | Visitors see TLS errors. Check DNS validation records, CAA records and whether the hostname is still proxied. |
+| `security:cert-pending` | Warning | A certificate is stuck in validation with an error. | Fix the error shown, usually a missing TXT record or a CAA record that blocks the certificate authority. |
+| `security:dangling-pages` | Critical | A DNS record points at `<name>.pages.dev`, and the account has no Pages project of that name. | Anyone can create a project with that name and serve content on your hostname. Delete the record. |
+| `security:dangling-workers-dev` | Warning | A DNS record points at `<worker>.<your-subdomain>.workers.dev`, and that Worker no longer exists. | Requests to the hostname fail. Delete the record or deploy the Worker again. |
+
+The audit log is read every scan (it needs *Account Settings Read*, which the token already has). Certificates and DNS records are read per zone on a rotating cursor, a few zones per scan, each zone at least once a day (*SSL and Certificates Read*, *DNS Read*). The dangling Pages check waits until the Pages project list has loaded once, so a missing permission cannot make every record look dangling.
+
+## Config drift
+
+| Check | Severity | Fires when | What to do |
+| --- | --- | --- | --- |
+| `drift:binding-removed` | Warning | A binding, variable or secret that a Worker had at the last read is gone, and still missing. Raised for 7 days. | Usually a deploy dropped it: variables and secrets set only in the dashboard are replaced by the next `wrangler deploy` unless they are in your config (or kept with `--keep-vars`). |
+| `drift:env-mismatch` | Info | A Worker named like `api-staging`, `api-dev`, `api-preview` or `staging-api` has binding names that `api` does not, or the other way round. | Compare the two configs. Secrets are compared by name only; their values are never read. |
+| `drift:vars-near-limit` | Info at 58, warning at 64 | A Worker has close to the 64 environment variables and secrets allowed. | Group related settings into one JSON variable, or move configuration to KV. |
+
+## Ambersight's own health
+
+These cannot be switched off: a monitor that has gone blind should say so.
+
+| Check | Severity | Fires when | What to do |
+| --- | --- | --- | --- |
+| `health:token-expiry` | Warning at 14 days, critical at 3 | Ambersight's API token has an expiry date that is close. | Extend the token or create a new read-only one, then update `CF_API_TOKEN`. |
+
+After 3 failed scans in a row, Ambersight also sends one alert a day on the channel set for critical alerts, and the overview shows the last error. A scan that fails cannot store a finding, so this alert has none behind it.
+
 ---
 
 ## Switching checks off
 
 There are three levels:
 
-- **A whole group.** **Settings › Checks** has a switch for usage, errors, cron, deprecations, exposure, zombies and the deploy timeline.
+- **A whole group.** **Settings › Checks** has a switch for usage, errors, cron, deprecations, exposure, zombies, the deploy timeline, cost, Cloudflare notifications, Pages, security, config drift and Cloudflare incidents.
 - **One check.** From any finding group in the overview, switch that check off. It shows up under **Settings › Checks › Switched off from the overview**, where you can turn it back on. In `config.json` this is the `mutedChecks` list, using the IDs above.
 - **One finding.** Acknowledge it, or snooze it for 7, 30 or 90 days. **Acknowledge all** and **Snooze all** work on a whole group.
 
@@ -159,5 +261,10 @@ When you switch a check off, its open findings resolve, the same as if you had f
 | Storage and log costs, unbound storage | Workers KV Storage, D1, Workers R2 Storage, Queues |
 | Exposure, orphaned routes and domains | Workers Routes, Zone |
 | Access coverage | Access: Apps and Policies |
+| Pages | Pages Read (key `page`) |
+| Certificates | SSL and Certificates Read |
+| Dangling DNS | DNS Read |
+| Audit log | Account Settings Read |
+| Cloudflare notifications on the timeline | Notifications Read. It has no key for the pre-filled token link, so add it by hand. |
 
 If a permission is missing, the scan skips what it cannot read, carries on with the rest, and lists what it skipped. See [troubleshooting.md](troubleshooting.md).

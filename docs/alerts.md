@@ -23,6 +23,15 @@ An open finding is alerted once. If it is still open 24 hours later, it is alert
 
 One scan sends at most 50 findings, critical first. Chat messages show up to 20 of them.
 
+## When Ambersight itself has a problem
+
+- **Failed scans.** After 3 failed scans of an account in a row (an expired or revoked token, for example), Ambersight sends one alert a day on the channel set for critical alerts. The overview shows the last error.
+- **The token is about to expire.** The `health:token-expiry` finding warns 14 days and 3 days ahead.
+
+## Is it Cloudflare?
+
+Turn on **Settings › Checks › Cloudflare incidents** and Ambersight looks at Cloudflare's public status page before it sends an instant alert. If an incident is open, the alert says so: *"Cloudflare reports an active incident: …"*. Recent incidents also show on the timeline. This is the only feature that contacts a site outside Cloudflare's API, so it is off by default; the request carries nothing about your account.
+
 ## Quiet hours
 
 Set a start and end time in **Settings › Alerts**, for example 22:00 to 07:00, in your time zone. Instant alerts wait during quiet hours and go out with the first scan after they end. The digest is not affected.
@@ -98,15 +107,30 @@ Worker names, route patterns and other names that people in your account choose 
 
 ## The digest
 
-The digest is e-mail only. It lists the open findings for the severities you include, worst first (up to 25), and adds:
+The digest is e-mail only. It lists the open findings for the severities you include, worst first (up to 25 per account), and adds:
 
-- requests and errors across the fleet for the period
+- requests and errors for the period, and how many notifications Cloudflare itself sent
+- the estimated bill so far this month and by month end (Workers Paid)
+- on the Free plan, the busiest day's share of each daily limit (D1 rows, KV writes and the rest) at 20% or more
+- the Workers whose traffic changed most against the period before (at least 2x up or down)
 - Workers added to or removed from the account
 - every deploy in the period, with its author when Cloudflare records one
 
+With several accounts, each gets its own section.
+
 When nothing is open, the subject says *"All Workers look healthy"*. That is a useful signal by itself: if the digest stops arriving, the scan stopped running.
 
-Choose weekly (any weekday) or daily, and the hour, in **Settings › Digest**. The time zone is in **Settings › General**.
+Choose daily, weekly (any weekday) or monthly (on the 1st), and the hour, in **Settings › Digest**. The time zone is in **Settings › General**.
+
+### A plain-language summary
+
+With the optional Workers AI binding (`AI` in `wrangler.jsonc`), turn on **Settings › Digest › Plain-language summary**. A few sentences at the top say what is most urgent and what to fix first. Workers AI gets only the findings' text, runs in your own account and uses a few hundred of the free 10,000 neurons a day. If the call fails, the digest goes out without the summary.
+
+### A digest per account (client reports)
+
+In **Settings › Accounts**, give an account one or more digest recipients. They get that account's own digest, and nothing about your other accounts, on the digest schedule. Each address must also be in `DIGEST_TO`.
+
+For a one-off report, the overview links to a printable report of the account for the last 7 or 30 days. With the optional Browser Rendering binding (`BROWSER`), it also comes as a PDF.
 
 ### A digest per group
 
