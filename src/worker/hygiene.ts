@@ -11,7 +11,8 @@ export interface InventoryFacts {
   bindingsComplete: boolean;
   /** False until the first full inventory refresh has run. */
   refreshed: boolean;
-  storage: { kind: 'kv' | 'd1' | 'r2' | 'queues'; id: string; name: string | null }[];
+  /** inUse: used without a binding (a queue with a consumer or producer, or a dead-letter queue). */
+  storage: { kind: 'kv' | 'd1' | 'r2' | 'queues'; id: string; name: string | null; inUse?: boolean }[];
   routes: { id: string; pattern: string; script: string | null }[];
   domains: { id: string; hostname: string; script: string | null }[];
   /** null = Access check off or not readable. */
@@ -102,18 +103,26 @@ export function deprecationFindings(now: Date, meta: WorkerMeta[], tf: (n: strin
   return out;
 }
 
-/** Host part of a route pattern or URL, without wildcard prefix or path. */
+/** Host part of a route pattern or URL, keeping a leading wildcard: "*.example.com/*" → "*.example.com". */
 export function hostOf(pattern: string): string {
-  return pattern.replace(/^https?:\/\//, '').split('/')[0].replace(/^\*\.?/, '').toLowerCase();
+  return pattern.replace(/^https?:\/\//, '').split('/')[0].toLowerCase();
 }
 
-/** True if an Access application domain (host, host/path or *.host) covers `host`. */
-export function accessCovers(appDomains: string[], host: string): boolean {
-  return appDomains.some((d) => {
-    const raw = d.replace(/^https?:\/\//, '').split('/')[0].toLowerCase();
-    if (raw.startsWith('*.')) return host === raw.slice(2) || host.endsWith(raw.slice(1));
-    return raw === host;
-  });
+/**
+ * True if Access application domains cover every host an entry point (route pattern, hostname)
+ * serves. An app scoped to a path protects only that path, so it does not count; "*.host" covers
+ * subdomains but not the apex; a route "*host/*" serves the apex and every subdomain.
+ */
+export function accessCovers(appDomains: string[], entry: string): boolean {
+  const host = hostOf(entry);
+  const needed = host.startsWith('*.') ? [host] : host.startsWith('*') ? [host.slice(1), `*.${host.slice(1)}`] : [host];
+  const apps = appDomains
+    .map((d) => d.replace(/^https?:\/\//, '').toLowerCase().split('/'))
+    .filter(([, ...path]) => ['', '*'].includes(path.join('/')))
+    .map(([h]) => h);
+  const covers = (app: string, h: string) =>
+    app === h || (app.startsWith('*.') && (h.startsWith('*.') ? h.slice(1) : h).endsWith(app.slice(1)));
+  return needed.every((h) => apps.some((app) => covers(app, h)));
 }
 
 /** Public entry points per Worker: routes, custom domains and workers.dev. */
@@ -175,7 +184,7 @@ export function exposureFindings(meta: WorkerMeta[], inv: InventoryFacts, access
       }
     }
     if (accessCheck && inv.accessDomains) {
-      const open = (entries.get(w.name) ?? []).filter((e) => !accessCovers(inv.accessDomains!, hostOf(e)));
+      const open = (entries.get(w.name) ?? []).filter((e) => !accessCovers(inv.accessDomains!, e));
       if (open.length) {
         out.push(finding(
           'exposure', w.name, 'not-behind-access', 'warning',
@@ -272,7 +281,7 @@ export function zombieFindings(meta: WorkerMeta[], stats: WorkerStats[], inv: In
     const used = new Set(meta.flatMap((m) => (m.bindings ?? []).map((b) => `${b.type}|${b.target}`)));
     for (const s of inv.storage) {
       const key = s.kind === 'queues' ? `${bindingType.queues}|${s.name}` : `${bindingType[s.kind]}|${s.id}`;
-      if (used.has(key)) continue;
+      if (s.inUse || used.has(key)) continue;
       out.push(finding(
         'zombies', '*', `unbound-${s.kind}-${s.id}`, 'info',
         `${label[s.kind]} ${s.name ?? s.id} is not bound to any Worker.`,

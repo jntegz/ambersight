@@ -38,10 +38,22 @@ export const fleet = {
   } as Record<string, unknown>,
 };
 
+/** cron-job ran every hour from 2026-11-08 11:00 to 2026-11-09 07:00 UTC, then missed 08:00, 09:00 and 10:00. */
+export const CRON_JOB_RUNS = Array.from({ length: 21 }, (_, i) => ({
+  scriptName: 'cron-job',
+  status: 'success',
+  datetime: new Date(Date.UTC(2026, 10, 8, 11 + i, 0, 1)).toISOString(),
+}));
+
 export interface FakeOptions {
   /** Hourly invocation rows to return from workersInvocationsAdaptive. */
   hourly?: { scriptName: string; datetimeHour: string; requests: number; errors: number; subrequests?: number; cpuTimeUs?: number }[];
+  /** Raw scheduled invocations. Default: CRON_JOB_RUNS. */
   cronRuns?: { scriptName: string; status: string; datetime: string }[];
+  /** Fail the scheduled-invocations query. */
+  cronError?: boolean;
+  /** Queues list response. Default: none. */
+  queues?: unknown[];
   /** Reject the cpuTimeUs field like an older schema would. */
   rejectCpuSum?: boolean;
   tokenPolicies?: { name: string }[] | null;
@@ -57,7 +69,10 @@ export function fakeFetch(opts: FakeOptions = {}) {
     if (url.hostname === 'hooks.slack.com') return new Response('ok');
     if (path === '/graphql') {
       const q = JSON.parse(String(init?.body)).query as string;
-      if (q.includes('workersInvocationsScheduled')) return gql({ viewer: { accounts: [{ workersInvocationsScheduled: opts.cronRuns ?? [] }] } });
+      if (q.includes('workersInvocationsScheduled')) {
+        if (opts.cronError) return new Response(JSON.stringify({ data: null, errors: [{ message: 'dataset not available' }] }));
+        return gql({ viewer: { accounts: [{ workersInvocationsScheduled: opts.cronRuns ?? CRON_JOB_RUNS }] } });
+      }
       if (q.includes('status_in')) return gql({ viewer: { accounts: [{ workersInvocationsAdaptive: [] }] } });
       if (q.includes('workersInvocationsAdaptive')) {
         if (opts.rejectCpuSum && q.includes('cpuTimeUs')) return new Response(JSON.stringify({ data: null, errors: [{ message: 'unknown field cpuTimeUs' }] }));
@@ -95,7 +110,7 @@ export function fakeFetch(opts: FakeOptions = {}) {
       case `${a}/storage/kv/namespaces`: return ok([{ id: 'ns-used', title: 'cache' }, { id: 'ns-sites', title: 'sites' }, { id: 'ns-unused', title: 'forgotten' }]);
       case `${a}/d1/database`: return ok([]);
       case `${a}/r2/buckets`: return ok({ buckets: [] });
-      case `${a}/queues`: return ok([]);
+      case `${a}/queues`: return ok(opts.queues ?? []);
     }
     return new Response(JSON.stringify({ success: false, errors: [{ message: `no fixture for ${path}` }] }), { status: 404 });
   };

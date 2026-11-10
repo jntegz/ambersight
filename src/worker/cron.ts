@@ -36,6 +36,9 @@ function parseField(field: string, [min, max]: [number, number], isDow: boolean)
       lo = parseValue(a);
       hi = b !== undefined ? parseValue(b) : stepPart ? max : lo;
     }
+    // Bound the loop: a stored expression like "0-1000000000 * * * *" must not stall every scan.
+    const top = isDow ? 7 : max;
+    if (lo < min || hi > top) throw new Error(`Cron value out of range: ${part}`);
     for (let v = lo; v <= hi; v += step) out.add(isDow && v === 7 ? 0 : v);
   }
   return out;

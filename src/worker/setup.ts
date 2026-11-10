@@ -12,7 +12,8 @@ export function writeScopes(permissions: string[]): string[] {
   return permissions.filter((p) => /\b(write|edit|admin|delete|purge|revoke)\b/i.test(p));
 }
 
-export async function setupStatus(env: Env): Promise<SetupStatus> {
+/** `accountId` previews another account the token can see; CF_ACCOUNT_ID always wins. */
+export async function setupStatus(env: Env, opts: { accountId?: string; behindAccess?: boolean } = {}): Promise<SetupStatus> {
   const settings = await getSettings(env.DB);
   const recipients = (env.DIGEST_TO ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   const base: SetupStatus = {
@@ -27,11 +28,14 @@ export async function setupStatus(env: Env): Promise<SetupStatus> {
     webhook: { configured: Boolean(env.WEBHOOK_URL), kind: env.WEBHOOK_URL ? webhookKind(env.WEBHOOK_URL) : null },
     setupDone: settings.setup_done === '1',
     passphraseFromSettings: Boolean(settings.passphrase_hash),
+    accounts: [],
+    accountPinned: Boolean(env.CF_ACCOUNT_ID),
+    behindAccess: opts.behindAccess ?? false,
   };
   if (!env.CF_API_TOKEN || env.CF_API_TOKEN.startsWith('paste-')) return { ...base, tokenError: 'CF_API_TOKEN is not set.' };
   try {
     const accounts = await CfClient.accounts(env.CF_API_TOKEN);
-    const account = accounts.find((a) => a.id === (env.CF_ACCOUNT_ID || settings.account_id)) ?? accounts[0];
+    const account = accounts.find((a) => a.id === (env.CF_ACCOUNT_ID || opts.accountId || settings.account_id)) ?? accounts[0];
     if (!account) return { ...base, tokenError: 'The token cannot see any account. Add Account Settings Read or set CF_ACCOUNT_ID.' };
     const cf = new CfClient(env.CF_API_TOKEN, account.id);
     const token = await cf.verifyToken();
@@ -42,6 +46,7 @@ export async function setupStatus(env: Env): Promise<SetupStatus> {
       tokenError: token.status === 'active' ? null : `The token is ${token.status}.`,
       accountId: account.id,
       accountName: account.name,
+      accounts: accounts.map((a) => ({ id: a.id, name: a.name })),
       detectedPlan: await cf.detectPlan(),
       writeScopes: perms ? writeScopes(perms) : null,
       readScopes: perms ? perms.filter((p) => !writeScopes([p]).length) : null,

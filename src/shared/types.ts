@@ -82,6 +82,12 @@ export interface SetupStatus {
   webhook: { configured: boolean; kind: string | null };
   setupDone: boolean;
   passphraseFromSettings: boolean;
+  /** Every account the token can see (up to 20); the wizard offers a choice when there are several. */
+  accounts: { id: string; name: string }[];
+  /** CF_ACCOUNT_ID is set, so the account cannot be chosen in the UI. */
+  accountPinned: boolean;
+  /** This request came through Cloudflare Access. Display only: never used to grant access. */
+  behindAccess: boolean;
 }
 
 export interface SelfCostDay {

@@ -5,8 +5,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { groupsFor, inScope, thresholdsFor, type Config } from '../shared/config';
+import { checkOf } from '../shared/findings';
 import type { Finding } from '../shared/types';
-import { CfClient, type ApiScript, type ApiWorker, type CronRunRow, type Deployment, type InventoryItem, type ResourceOps, type ScriptSettings } from './cf';
+import { CfClient, CronRunsTruncated, type ApiScript, type ApiWorker, type CronRunRow, type Deployment, type InventoryItem, type ResourceOps, type ScriptSettings } from './cf';
 import { median, runChecks, type CronStats, type HourPoint, type ResourceStats, type WorkerMeta, type WorkerStats } from './checks';
 import { countRuns } from './cron';
 import { configFrom, getSettings, hourFloor, isoHour, planFrom, recordUsage, setSettings, utcMidnight, type Settings } from './db';
@@ -98,6 +99,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { force?: boo
   const cronFrom = new Date(hourFloor(now).getTime() - 25 * HOUR);
   const cronTo = new Date(hourFloor(now).getTime() - HOUR);
   let cronRuns: CronRunRow[] | null = null;
+  let cronTruncated = false;
   const cronRetryDue = settings.cron_dataset !== 'unavailable' || now.getTime() - new Date(settings.cron_dataset_checked ?? 0).getTime() > DAY;
   if (config.modules.cron && scheduled.length && cronRetryDue) {
     const withCpu = settings.cron_cpu !== 'unsupported';
@@ -108,7 +110,8 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { force?: boo
         return cf.cronRuns(new Date(cronFrom.getTime() - HOUR), now, false);
       });
     } catch (e) {
-      warnings.push(`Cron runs unavailable: ${(e as Error).message}`);
+      cronTruncated = e instanceof CronRunsTruncated;
+      warnings.push(cronTruncated ? `Cron checks paused: ${(e as Error).message}` : `Cron runs unavailable: ${(e as Error).message}`);
     }
   }
 
@@ -135,6 +138,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { force?: boo
   const refreshDue = inventoryDue(now, settings.inventory_at ?? null, config);
   const refreshed: InventoryItem[] = [];
   const refreshedKinds = new Set<InventoryItem['kind']>();
+  let routeZones: string[] | null = null; // set when only some zones' routes were read
   let subdomain = settings.workers_subdomain ?? null;
   if (refreshDue) {
     subdomain = (await cf.workersSubdomain()) ?? subdomain;
@@ -149,7 +153,11 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { force?: boo
     await step(['domain'], 'Custom domains', () => cf.customDomains());
     await step(['route'], 'Routes', async () => {
       const r = await cf.routes(Math.max(1, Math.min(MAX_ZONES, left() - 15)));
-      if (r.zonesSkipped) warnings.push(`Routes: ${r.zonesSkipped} zones not checked this run.`);
+      if (r.zonesSkipped) {
+        warnings.push(`Routes: ${r.zonesSkipped} zones not checked this run.`);
+        // Replace stored routes only for the zones read; keep the rest instead of deleting them.
+        routeZones = r.zonesChecked;
+      }
       return r.items;
     });
     const st = await cf.storage();
@@ -157,7 +165,10 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { force?: boo
     const storageLabel = { kv: 'KV', d1: 'D1', r2: 'R2', queues: 'Queues' } as const;
     for (const k of ['kv', 'd1', 'r2', 'queues'] as const) if (!st.failed.includes(storageLabel[k])) refreshedKinds.add(k);
     if (st.failed.length) warnings.push(`Storage lists unavailable: ${st.failed.join(', ')} (add the matching Read permissions to the token).`);
-    if (config.modules.exposure && config.modules.access) await step(['access'], 'Access applications', () => cf.accessApps());
+    if (config.modules.exposure && config.modules.access) {
+      await step(['access'], 'Access applications', () => cf.accessApps());
+      if (refreshedKinds.has('access')) settings.access_listed_at = stamp;
+    }
     if (config.updateCheck) await checkForUpdate(settings).catch((e: Error) => warnings.push(`Update check failed: ${e.message}`));
   }
 
@@ -277,7 +288,11 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { force?: boo
   }
   if (refreshDue) {
     writes.push(
-      db.prepare(`DELETE FROM resources WHERE kind IN (SELECT value FROM json_each(?1))`).bind(j([...refreshedKinds])),
+      db.prepare(`DELETE FROM resources WHERE kind IN (SELECT value FROM json_each(?1))`)
+        .bind(j([...refreshedKinds].filter((k) => !(k === 'route' && routeZones)))),
+      ...(routeZones
+        ? [db.prepare(`DELETE FROM resources WHERE kind = 'route' AND json_extract(extra, '$.zone') IN (SELECT value FROM json_each(?1))`).bind(j(routeZones))]
+        : []),
       db.prepare(
         `INSERT INTO resources (kind, id, name, script, extra)
          SELECT json_extract(value,'$.kind'), json_extract(value,'$.id'), json_extract(value,'$.name'), json_extract(value,'$.script'), json_extract(value,'$.extra')
@@ -295,21 +310,26 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { force?: boo
       ...(settings.ops_checked ? { ops_unavailable: settings.ops_unavailable ?? '', ops_checked: settings.ops_checked } : {}),
       ...(settings.latest_version ? { latest_version: settings.latest_version, latest_url: settings.latest_url ?? '' } : {}),
       ...(refreshDue ? { inventory_at: stamp, workers_subdomain: subdomain ?? '' } : {}),
+      ...(settings.access_listed_at ? { access_listed_at: settings.access_listed_at } : {}),
       ...(settings.first_metrics_at ? {} : { first_metrics_at: stamp }),
-      ...(config.modules.cron && scheduled.length && cronRetryDue ? { cron_dataset: cronRuns ? 'available' : 'unavailable', cron_dataset_checked: stamp } : {}),
+      ...(config.modules.cron && scheduled.length && cronRetryDue ? { cron_dataset: cronRuns || cronTruncated ? 'available' : 'unavailable', cron_dataset_checked: stamp } : {}),
     }),
   );
   await db.batch(writes);
 
   // 8. Checks.
-  const cronDatasetOk = cronRuns != null || settings.cron_dataset === 'available';
-  const facts = await loadFacts(db, now, config, settings, cronDatasetOk ? { from: cronFrom, to: cronTo } : null, subdomain);
+  // Judge crons only on runs fetched in this scan: stored rows from an earlier scan lack the recent hours.
+  const facts = await loadFacts(db, now, config, settings, cronRuns ? { from: cronFrom, to: cronTo } : null, subdomain);
+  // No runs at all for any scheduled Worker, Ambersight's own cron included, means Cloudflare
+  // returned no data, not that every cron stopped. Say so instead of raising a missed run per Worker.
+  const cronDataEmpty = (facts.crons?.length ?? 0) > 0 && (cronRuns ?? []).every((r) => r.runs === 0);
+  if (cronDataEmpty) warnings.push('Cron checks paused: Cloudflare returned no scheduled runs for any Worker in the last 24 hours, not even Ambersight\'s own.');
   const findings = runChecks({
     now,
     plan,
     accountRequestsToday: facts.accountToday,
     workers: facts.stats,
-    crons: facts.crons,
+    crons: cronDataEmpty ? [] : facts.crons,
     cronTotal: facts.cronTotal,
     resources: facts.resources,
     meta: facts.meta,
@@ -317,7 +337,12 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { force?: boo
     config,
     thresholdsFor: facts.thresholdsFor,
   });
-  await saveFindings(db, findings, stamp);
+  // Checks the user switched off are dropped here, so their open findings resolve like fixed ones.
+  const muted = new Set(config.mutedChecks);
+  // While cron checks are paused (too many runs to count, or no data at all), keep existing cron
+  // findings as they are rather than resolving them as if every cron had recovered.
+  const keepModules = cronTruncated || cronDataEmpty ? ['cron'] : [];
+  await saveFindings(db, muted.size ? findings.filter((f) => !muted.has(checkOf(f))) : findings, stamp, keepModules);
 
   // 9. Alerts and digest, then the run's own cost.
   await sendAlerts(env, now, config).catch((e: Error) => warnings.push(`Alerts failed: ${e.message}`));
@@ -563,9 +588,12 @@ export async function loadFacts(
       runs.set(r.script, m);
     }
     crons = [];
+    // A deploy can add or change a schedule: expect runs only from the first full hour after it.
+    const deployedAt = new Map(rows.map((w) => [w.name, w.deployed_on ? new Date(w.deployed_on).getTime() : 0]));
     for (const s of schedules) {
       if (!inScopeNames.has(s.script)) continue;
-      const stat = cronStats(s.script, parse<string[]>(s.crons, []), runs.get(s.script) ?? new Map(), cronWindow.from, cronWindow.to);
+      const from = new Date(Math.max(cronWindow.from.getTime(), Math.ceil((deployedAt.get(s.script) ?? 0) / HOUR) * HOUR));
+      const stat = cronStats(s.script, parse<string[]>(s.crons, []), runs.get(s.script) ?? new Map(), from, cronWindow.to);
       if (stat) crons.push(stat);
     }
   }
@@ -597,10 +625,11 @@ export async function loadFacts(
   const inventory: InventoryFacts = {
     bindingsComplete: allRows.every((w) => w.detail_checked_at),
     refreshed: Boolean(settings.inventory_at) || res.length > 0,
-    storage: res.filter((r) => ['kv', 'd1', 'r2', 'queues'].includes(r.kind)).map((r) => ({ kind: r.kind as 'kv', id: r.id, name: r.name })),
+    storage: res.filter((r) => ['kv', 'd1', 'r2', 'queues'].includes(r.kind)).map((r) => ({ kind: r.kind as 'kv', id: r.id, name: r.name, inUse: parse<{ inUse?: boolean }>(r.extra, {}).inUse === true })),
     routes: res.filter((r) => r.kind === 'route').map((r) => ({ id: r.id, pattern: r.name ?? '', script: r.script })),
     domains: res.filter((r) => r.kind === 'domain').map((r) => ({ id: r.id, hostname: r.name ?? '', script: r.script })),
-    accessDomains: config.modules.access && res.some((r) => r.kind === 'access')
+    // A successful listing with zero apps means nothing is covered, not that the check is off.
+    accessDomains: config.modules.access && (res.some((r) => r.kind === 'access') || Boolean(settings.access_listed_at))
       ? res.filter((r) => r.kind === 'access').flatMap((r) => parse<{ domains?: string[] }>(r.extra, {}).domains ?? [])
       : null,
     workersSubdomain: subdomain || null,
@@ -642,7 +671,9 @@ export function cronStats(
   let observed = 0;
   let failures = 0;
   let cpuMaxMs: number | null = null;
-  for (const r of runs.values()) {
+  for (const [hour, r] of runs) {
+    const t = new Date(hour).getTime();
+    if (t < from.getTime() || t >= to.getTime()) continue;
     observed += r.runs;
     failures += r.failures;
     if (r.cpu_max_ms != null) cpuMaxMs = Math.max(cpuMaxMs ?? 0, r.cpu_max_ms);
@@ -657,7 +688,7 @@ export function cronStats(
   return { name, expected, observed, failures, consecutiveBad, cpuMaxMs };
 }
 
-async function saveFindings(db: D1Database, findings: Finding[], stamp: string): Promise<void> {
+async function saveFindings(db: D1Database, findings: Finding[], stamp: string, keepModules: string[] = []): Promise<void> {
   const rows = findings.map((f) => ({ ...f, evidence: JSON.stringify(f.evidence), docsUrl: f.docsUrl ?? null }));
   await db.batch([
     db.prepare(
@@ -678,6 +709,9 @@ async function saveFindings(db: D1Database, findings: Finding[], stamp: string):
            ELSE findings.status END,
          severity=excluded.severity`,
     ).bind(JSON.stringify(rows), stamp),
-    db.prepare(`UPDATE findings SET status = 'resolved' WHERE last_seen <> ?1 AND status <> 'resolved'`).bind(stamp),
+    db.prepare(
+      `UPDATE findings SET status = 'resolved'
+       WHERE last_seen <> ?1 AND status <> 'resolved' AND module NOT IN (SELECT value FROM json_each(?2))`,
+    ).bind(stamp, JSON.stringify(keepModules)),
   ]);
 }

@@ -3,6 +3,8 @@
 <script lang="ts">
   import type { Overview, Severity, WorkerSummary } from '../../../src/shared/types';
   import BudgetMeter from '../components/BudgetMeter.svelte';
+  import { checkOf, groupFindings } from '../../../src/shared/findings';
+  import FindingGroup from '../components/FindingGroup.svelte';
   import FindingRow from '../components/FindingRow.svelte';
   import FleetMap from '../components/FleetMap.svelte';
   import GroupFilter from '../components/GroupFilter.svelte';
@@ -13,13 +15,17 @@
   import { compact, num, pct, workerId } from '../lib/api';
   import { loadPrefs, savePrefs } from '../lib/prefs';
 
-  let { data, query, scanInterval, onAcknowledge, onSnooze }: {
+  let { data, query, scanInterval, mutedChecks = [], onAcknowledge, onSnooze, onBulk, onMute }: {
     data: Overview;
     query: string;
     /** Minutes between scans, from the config; null when unknown. */
     scanInterval: number | null;
+    /** Checks switched off; hidden right away, resolved by the next scan. */
+    mutedChecks?: string[];
     onAcknowledge: (id: string) => void;
     onSnooze: (id: string, days: 7 | 30 | 90) => void;
+    onBulk: (ids: string[], action: 'acknowledge' | 'snooze', days?: 7 | 30 | 90) => void;
+    onMute: (check: string) => void;
   } = $props();
 
   type Sort = 'attention' | 'requests' | 'errors' | 'name';
@@ -30,6 +36,7 @@
   let group = $state(prefs.group);
   let severity = $state<'all' | Severity>('all');
   let showHealthy = $state(false);
+  let showHousekeeping = $state(false);
   $effect(() => savePrefs('ambersight-workers-view', { sort, layout, group }));
   // A group that no longer exists (renamed in Settings) falls back to all.
   $effect(() => {
@@ -47,12 +54,21 @@
   // Everything below is scoped to the selected group.
   const scoped = $derived(group ? data.workers.filter((w) => w.groups?.includes(group)) : data.workers);
   const scopedNames = $derived(new Set(scoped.map((w) => w.name)));
-  const scopedFindings = $derived(data.findings.filter((f) => (f.script === '*' ? !group : scopedNames.has(f.script))));
+  const muted = $derived(new Set(mutedChecks));
+  const scopedFindings = $derived(
+    data.findings.filter((f) => (f.script === '*' ? !group : scopedNames.has(f.script)) && !muted.has(checkOf(f))),
+  );
   const findings = $derived(
     scopedFindings.filter(
       (f) => (severity === 'all' || f.severity === severity) && (!q || f.script.toLowerCase().includes(q) || f.message.toLowerCase().includes(q)),
     ),
   );
+  // One row per check: critical and warning groups first, info ("housekeeping") collapsed below.
+  const groups = $derived(groupFindings(findings));
+  const urgent = $derived(groups.filter((g) => g.severity !== 'info'));
+  const housekeeping = $derived(groups.filter((g) => g.severity === 'info'));
+  const housekeepingCount = $derived(housekeeping.reduce((n, g) => n + g.findings.length, 0));
+  const housekeepingOpen = $derived(showHousekeeping || severity === 'info' || Boolean(q));
   const workers = $derived(scoped.filter((w) => !q || w.name.toLowerCase().includes(q)).sort(SORTS[sort]));
   const hot = $derived(workers.filter((w) => w.score > 0));
   const healthyCount = $derived(workers.length - hot.length);
@@ -177,12 +193,29 @@
       <button type="button" aria-pressed={severity === 'info'} onclick={() => (severity = 'info')}>Info <span class="num">{counts.info}</span></button>
     </div>
   </div>
-  {#if findings.length}
+  {#snippet groupList(list: typeof groups)}
     <ul class="card list">
-      {#each findings as finding (finding.id)}
-        <FindingRow {finding} {onAcknowledge} {onSnooze} />
+      {#each list as g (g.check)}
+        {#if g.findings.length === 1}
+          <FindingRow finding={g.findings[0]} {onAcknowledge} {onSnooze} />
+        {:else}
+          <FindingGroup group={g} {onAcknowledge} {onSnooze} {onBulk} {onMute} />
+        {/if}
       {/each}
     </ul>
+  {/snippet}
+  {#if findings.length}
+    {#if urgent.length}{@render groupList(urgent)}{/if}
+    {#if housekeeping.length}
+      <div class="housekeeping" class:spaced={urgent.length > 0}>
+        <button type="button" class="hk-toggle" aria-expanded={housekeepingOpen} onclick={() => (showHousekeeping = !showHousekeeping)} disabled={severity === 'info' || Boolean(q)}>
+          <span class="caret" class:open={housekeepingOpen}><Icon name="chevron" size={12} /></span>
+          Housekeeping <span class="count">{num(housekeepingCount)}</span>
+          <span class="muted hk-note">Info only: tidy-ups and things to confirm. Nothing here is urgent.</span>
+        </button>
+        {#if housekeepingOpen}{@render groupList(housekeeping)}{/if}
+      </div>
+    {/if}
   {:else}
     <div class="card empty">
       <span class="empty-icon"><Icon name="healthy" size={28} /></span>
@@ -303,6 +336,17 @@
   .tools { display: flex; align-items: center; gap: 8px; }
   /* No overflow clipping, so the snooze menu can open past the last row. */
   .list { list-style: none; margin: 0; padding: 0; }
+  .housekeeping.spaced { margin-top: 16px; }
+  .hk-toggle {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 8px; width: 100%; min-height: 44px; padding: 8px 12px;
+    margin-bottom: 8px; border: 1px dashed var(--line); border-radius: var(--radius-card); background: transparent;
+    color: var(--ink); font-size: 14px; font-weight: 600; text-align: left; justify-content: flex-start;
+  }
+  .hk-toggle:disabled { opacity: 1; cursor: default; }
+  .hk-toggle:not(:disabled):hover { border-color: var(--ink-muted); }
+  .hk-note { font-weight: 400; font-size: 13px; }
+  .housekeeping .caret { display: inline-flex; transform: rotate(-90deg); transition: transform 150ms; }
+  .housekeeping .caret.open { transform: rotate(0deg); }
   .list :global(li:first-child) { border-radius: var(--radius-card) var(--radius-card) 0 0; }
   .list :global(li:last-child) { border-radius: 0 0 var(--radius-card) var(--radius-card); }
   .list :global(li:only-child) { border-radius: var(--radius-card); }

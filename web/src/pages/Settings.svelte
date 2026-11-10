@@ -3,6 +3,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { ConfigError, DEFAULT_THRESHOLDS, parseConfig, THRESHOLD_RANGES, type Config, type InstantChannel } from '../../../src/shared/config';
+  import { CHECK_TITLES } from '../../../src/shared/findings';
   import type { SetupStatus } from '../../../src/shared/types';
   import Icon, { type IconName } from '../components/Icon.svelte';
   import MapEditor from '../components/settings/MapEditor.svelte';
@@ -285,6 +286,17 @@
             {/if}
           {/each}
         </div>
+        {#if draft.mutedChecks.length}
+          <h3 class="muted-title">Switched off from the overview</h3>
+          <ul class="muted-list">
+            {#each draft.mutedChecks as c (c)}
+              <li>
+                <span>{CHECK_TITLES[c] ?? c} <span class="mono hint">{c}</span></span>
+                <button type="button" class="ghost small" onclick={() => (draft!.mutedChecks = draft!.mutedChecks.filter((x) => x !== c))}>Turn back on</button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
       </section>
 
       <!-- Thresholds -->
@@ -425,7 +437,11 @@
         <h2 id="h-security">Security <span class="now">Applies right away</span></h2>
         <div class="callout">
           <Icon name="shield" size={18} />
-          <p>For stronger protection, put this dashboard behind <a href="https://developers.cloudflare.com/cloudflare-one/applications/configure-apps/self-hosted-public-app/" target="_blank" rel="noopener noreferrer">Cloudflare Access</a> as well as the passphrase.</p>
+          {#if status?.behindAccess}
+            <p><strong>Protected by Cloudflare Access.</strong> This visit came through Access. Other addresses of this Worker (such as workers.dev) are only protected if your Access application covers them too.</p>
+          {:else}
+            <p><strong>Not behind Cloudflare Access.</strong> Anyone who finds this URL can reach the sign-in page. In the Cloudflare dashboard open this Worker's <strong>Access</strong> tab and choose <strong>Protect this Worker behind Access</strong> (free for small teams, with MFA or passkeys from your identity provider). <a href="https://developers.cloudflare.com/workers/configuration/cloudflare-access/" target="_blank" rel="noopener noreferrer">How it works</a></p>
+          {/if}
         </div>
         {#if status?.passphraseFromSettings === false}
           <p class="hint">The passphrase currently comes from the <span class="mono">ADMIN_PASSPHRASE</span> secret. Changing it here stores a new one that takes over.</p>
@@ -507,6 +523,10 @@
 
   .modules { display: grid; gap: 0; }
   .module { display: grid; grid-template-columns: 36px 1fr auto; gap: 14px; align-items: center; padding: 12px 0; border-top: 1px solid var(--line); }
+  .muted-title { font-size: 14px; line-height: 20px; font-weight: 600; margin: 20px 0 4px; }
+  .muted-list { list-style: none; margin: 0; padding: 0; }
+  .muted-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 8px 0; border-top: 1px solid var(--line); font-size: 14px; }
+  .muted-list .hint { margin-left: 6px; }
   .module:first-child { border-top: 0; padding-top: 0; }
   .module.sub { border-top: 0; padding-top: 0; }
   .m-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; background: var(--chip); color: var(--chip-text); transition: opacity 150ms; }

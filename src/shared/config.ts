@@ -2,6 +2,8 @@
 // Shared by the Worker (validation, defaults) and the UI (Settings screen, import/export).
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import { CHECK_PATTERN } from './findings';
+
 export type PlanSetting = 'auto' | 'free' | 'paid';
 export type InstantChannel = 'email' | 'webhook' | 'both' | 'off';
 export type DigestFrequency = 'daily' | 'weekly' | 'off';
@@ -51,6 +53,8 @@ export interface Config {
   /** UTC hour the inventory refresh prefers. */
   inventoryHourUtc: number;
   modules: ModuleSwitches;
+  /** Individual checks switched off, as "module:check" (see checkOf in shared/findings.ts). */
+  mutedChecks: string[];
   thresholds: Thresholds;
   /** Overrides keyed by Worker name or "group:<name>". Worker beats group beats global. */
   overrides: Record<string, Partial<Thresholds>>;
@@ -96,6 +100,7 @@ export function defaultConfig(): Config {
     inventoryIntervalHours: 24,
     inventoryHourUtc: 3,
     modules: { usage: true, cron: true, errors: true, deprecation: true, exposure: true, zombies: true, timeline: true, access: false },
+    mutedChecks: [],
     thresholds: { ...DEFAULT_THRESHOLDS },
     overrides: {},
     scope: { include: [], exclude: [] },
@@ -217,7 +222,11 @@ export function parseConfig(input: unknown): Config {
   if (!['daily', 'weekly', 'off'].includes(dg.frequency as string)) throw new ConfigError('digest.frequency must be daily, weekly or off.');
   const groupRecipients: Record<string, string[]> = {};
   if (!isObj(dg.groupRecipients)) throw new ConfigError('digest.groupRecipients must be an object.');
-  for (const [g, list] of Object.entries(dg.groupRecipients)) groupRecipients[g] = strList(list, `digest.groupRecipients.${g}`, EMAIL);
+  for (const [g, list] of Object.entries(dg.groupRecipients)) {
+    // The key ends up in an e-mail subject: same rule as group names, so no line breaks.
+    if (!NAME.test(g) || g.includes(':')) throw new ConfigError(`Group name "${g}" in digest.groupRecipients is not valid.`);
+    groupRecipients[g] = strList(list, `digest.groupRecipients.${g}`, EMAIL);
+  }
 
   if (typeof v.timeZone !== 'string' || !isValidTimeZone(v.timeZone)) throw new ConfigError('timeZone must be an IANA time zone such as Europe/Prague.');
   if (typeof v.updateCheck !== 'boolean') throw new ConfigError('updateCheck must be true or false.');
@@ -229,6 +238,7 @@ export function parseConfig(input: unknown): Config {
     inventoryIntervalHours: num(v.inventoryIntervalHours, [6, 168], 'inventoryIntervalHours'),
     inventoryHourUtc: Math.round(num(v.inventoryHourUtc, [0, 23], 'inventoryHourUtc')),
     modules: modules as unknown as ModuleSwitches,
+    mutedChecks: [...new Set(strList(v.mutedChecks ?? [], 'mutedChecks', CHECK_PATTERN))],
     thresholds: t,
     overrides,
     scope: { include: strList(scope.include ?? [], 'scope.include'), exclude: strList(scope.exclude ?? [], 'scope.exclude') },

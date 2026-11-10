@@ -9,6 +9,15 @@ export class CfApiError extends Error {
   }
 }
 
+/** The cron-run query hit its row limit, so per-Worker counts would be arbitrary. */
+export class CronRunsTruncated extends Error {
+  constructor(readonly limit: number) {
+    super(`More than ${limit.toLocaleString('en-US')} scheduled runs in 24 hours, too many to count in one query.`);
+  }
+}
+
+const CRON_RUNS_LIMIT = 10_000;
+
 export interface ApiWorker {
   name: string;
   created_on?: string;
@@ -239,14 +248,15 @@ export class CfClient {
   }
 
   /** Routes across the account's zones (first `maxZones` zones). */
-  async routes(maxZones: number): Promise<{ items: InventoryItem[]; zonesSkipped: number }> {
+  async routes(maxZones: number): Promise<{ items: InventoryItem[]; zonesSkipped: number; zonesChecked: string[] }> {
     const zones = await this.get<{ id: string; name: string }[]>(`/zones?account.id=${this.accountId}&per_page=50`);
     const items: InventoryItem[] = [];
-    for (const z of zones.slice(0, maxZones)) {
+    const checked = zones.slice(0, maxZones);
+    for (const z of checked) {
       const routes = await this.get<{ id: string; pattern: string; script?: string | null }[]>(`/zones/${z.id}/workers/routes`);
       for (const r of routes) items.push({ kind: 'route', id: r.id, name: r.pattern, script: r.script ?? null, extra: { zone: z.name } });
     }
-    return { items, zonesSkipped: Math.max(0, zones.length - maxZones) };
+    return { items, zonesSkipped: Math.max(0, zones.length - maxZones), zonesChecked: checked.map((z) => z.name) };
   }
 
   async storage(): Promise<{ items: InventoryItem[]; failed: string[] }> {
@@ -257,7 +267,20 @@ export class CfClient {
       ['KV', async () => (await this.get<{ id: string; title: string }[]>(`${a}/storage/kv/namespaces?per_page=100`)).map((n) => ({ kind: 'kv', id: n.id, name: n.title, script: null }))],
       ['D1', async () => (await this.get<{ uuid: string; name: string }[]>(`${a}/d1/database?per_page=100`)).map((d) => ({ kind: 'd1', id: d.uuid, name: d.name, script: null }))],
       ['R2', async () => ((await this.get<{ buckets?: { name: string }[] }>(`${a}/r2/buckets`)).buckets ?? []).map((b) => ({ kind: 'r2', id: b.name, name: b.name, script: null }))],
-      ['Queues', async () => (await this.get<{ queue_id: string; queue_name: string }[]>(`${a}/queues`)).map((q) => ({ kind: 'queues', id: q.queue_id, name: q.queue_name, script: null }))],
+      ['Queues', async () => {
+        // Queues are used without a binding too: by a consumer Worker, or as another queue's dead-letter queue.
+        type Q = { queue_id: string; queue_name: string; producers?: unknown[]; producers_total_count?: number; consumers?: { dead_letter_queue?: string }[]; consumers_total_count?: number };
+        const queues = await this.get<Q[]>(`${a}/queues`);
+        const deadLetter = new Set(queues.flatMap((q) => (q.consumers ?? []).map((c) => c.dead_letter_queue).filter(Boolean)));
+        return queues.map((q) => ({
+          kind: 'queues' as const, id: q.queue_id, name: q.queue_name, script: null,
+          extra: {
+            inUse: Math.max(q.producers?.length ?? 0, q.producers_total_count ?? 0) > 0
+              || Math.max(q.consumers?.length ?? 0, q.consumers_total_count ?? 0) > 0
+              || deadLetter.has(q.queue_name),
+          },
+        }));
+      }],
     ];
     for (const [label, run] of tries) {
       try {
@@ -270,10 +293,12 @@ export class CfClient {
   }
 
   async accessApps(): Promise<InventoryItem[]> {
-    const apps = await this.get<{ id: string; name: string; domain?: string; self_hosted_domains?: string[]; destinations?: { uri?: string }[] }[]>(
+    const apps = await this.get<{ id: string; name: string; type?: string; domain?: string; self_hosted_domains?: string[]; destinations?: { uri?: string }[] }[]>(
       `/accounts/${this.accountId}/access/apps`,
     );
-    return apps.map((app) => ({
+    // Only self-hosted applications gate traffic to a hostname; bookmarks, SaaS and launcher apps do not.
+    const gating = new Set(['self_hosted', 'ssh', 'vnc', 'rdp']);
+    return apps.filter((app) => !app.type || gating.has(app.type)).map((app) => ({
       kind: 'access',
       id: app.id,
       name: app.name,
@@ -353,7 +378,7 @@ export class CfClient {
   async cronRuns(since: Date, until: Date, withCpu = true): Promise<CronRunRow[]> {
     const query = `query($account: string!, $since: Time!, $until: Time!) {
       viewer { accounts(filter: { accountTag: $account }) {
-        workersInvocationsScheduled(limit: 10000, filter: { datetime_geq: $since, datetime_lt: $until }) {
+        workersInvocationsScheduled(limit: ${CRON_RUNS_LIMIT}, filter: { datetime_geq: $since, datetime_lt: $until }) {
           scriptName
           status
           datetime${withCpu ? '\n          cpuTimeUs' : ''}
@@ -362,7 +387,9 @@ export class CfClient {
     }`;
     type R = { viewer: { accounts: { workersInvocationsScheduled: { scriptName: string; status: string; datetime: string; cpuTimeUs?: number }[] }[] } };
     const data = await this.graphql<R>(query, this.window(since, until));
-    return bucketCronRuns(data.viewer.accounts[0]?.workersInvocationsScheduled ?? []);
+    const rows = data.viewer.accounts[0]?.workersInvocationsScheduled ?? [];
+    if (rows.length >= CRON_RUNS_LIMIT) throw new CronRunsTruncated(CRON_RUNS_LIMIT);
+    return bucketCronRuns(rows);
   }
 
   /**

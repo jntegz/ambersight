@@ -4,11 +4,14 @@
   import type { Finding } from '../../../src/shared/types';
   import { timeAgo, workerId } from '../lib/api';
   import Icon, { type IconName } from './Icon.svelte';
+  import SnoozeMenu from './SnoozeMenu.svelte';
 
-  let { finding, onAcknowledge, onSnooze }: {
+  let { finding, onAcknowledge, onSnooze, compact = false }: {
     finding: Finding;
     onAcknowledge: (id: string) => void;
     onSnooze: (id: string, days: 7 | 30 | 90) => void;
+    /** Inside a group: the group already shows the fix, so leave it out. */
+    compact?: boolean;
   } = $props();
 
   const LABEL = { critical: 'Critical', warning: 'Warning', info: 'Info' } as const;
@@ -16,16 +19,14 @@
     budget: 'budget', errors: 'errors', runaway: 'runaway', cron: 'cron', usage: 'usage',
     deprecation: 'deprecation', exposure: 'exposure', zombies: 'zombies', timeline: 'timeline',
   };
-  const SNOOZE = [7, 30, 90] as const;
-  let menu = $state(false);
-  let menuEl = $state<HTMLDivElement>();
-  function closeOnOutside(e: MouseEvent) {
-    if (menu && menuEl && !menuEl.contains(e.target as Node)) menu = false;
-  }
+  // Timestamps in evidence (e.g. deployedAt) read better as "Nov 9, 19:58 UTC".
+  const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
+  const when = (iso: string) =>
+    `${new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })} UTC`;
   const evidence = $derived(
     Object.entries(finding.evidence).map(([k, v]) => {
-      const label = k.replace(/([a-z])([A-Z0-9])/g, '$1 $2').toLowerCase();
-      return { label: label[0].toUpperCase() + label.slice(1), value: typeof v === 'number' ? v.toLocaleString('en-US') : v };
+      const label = k.replace(/([A-Z])/g, ' $1').toLowerCase(); // inARow -> in a row, d1 -> d1
+      return { label: label[0].toUpperCase() + label.slice(1), value: typeof v === 'number' ? v.toLocaleString('en-US') : ISO.test(v) ? when(v) : v };
     }),
   );
 </script>
@@ -47,10 +48,12 @@
       {#if finding.firstSeen}<span class="age muted" title={finding.firstSeen}>· opened {timeAgo(finding.firstSeen)}</span>{/if}
     </p>
     <p class="message">{finding.message}</p>
-    <p class="action muted">
-      {finding.action}
-      {#if finding.docsUrl}<a href={finding.docsUrl} target="_blank" rel="noopener noreferrer">Docs <Icon name="external" size={12} /></a>{/if}
-    </p>
+    {#if !compact}
+      <p class="action muted">
+        {finding.action}
+        {#if finding.docsUrl}<a href={finding.docsUrl} target="_blank" rel="noopener noreferrer">Docs <Icon name="external" size={12} /></a>{/if}
+      </p>
+    {/if}
     {#if evidence.length}
       <dl class="evidence">
         {#each evidence as e (e.label)}<div><dt>{e.label}</dt><dd class="num">{e.value}</dd></div>{/each}
@@ -59,25 +62,9 @@
   </div>
   <div class="buttons">
     <button type="button" onclick={() => onAcknowledge(finding.id)}><Icon name="check" size={16} /> Acknowledge</button>
-    <div class="snooze" bind:this={menuEl}>
-      <button type="button" aria-haspopup="menu" aria-expanded={menu} onclick={() => (menu = !menu)}>
-        <Icon name="snooze" size={16} /> Snooze <span class="caret" class:open={menu}><Icon name="chevron" size={12} /></span>
-      </button>
-      {#if menu}
-        <div class="menu" role="menu" aria-label="Snooze for">
-          <p class="menu-title">Hide this finding for</p>
-          {#each SNOOZE as days (days)}
-            <button type="button" role="menuitem" onclick={() => { menu = false; onSnooze(finding.id, days); }}>
-              {days} days <span class="muted">until {new Date(Date.now() + days * 86_400_000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
-            </button>
-          {/each}
-        </div>
-      {/if}
-    </div>
+    <SnoozeMenu onSnooze={(days) => onSnooze(finding.id, days)} />
   </div>
 </li>
-
-<svelte:window onclick={closeOnOutside} onkeydown={(e) => e.key === 'Escape' && (menu = false)} />
 
 <style>
   .row {
@@ -112,22 +99,6 @@
   .buttons { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
   .buttons button { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; min-height: 32px; padding: 0 10px; background: transparent; color: var(--ink-muted); }
   .buttons button:hover { color: var(--ink); background: var(--surface); }
-  .snooze { position: relative; }
-  .caret { display: inline-flex; transition: transform 150ms; }
-  .caret.open { transform: rotate(180deg); }
-  .menu {
-    position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; min-width: 200px; padding: 6px;
-    display: grid; gap: 2px; border: 1px solid var(--line); border-radius: 10px;
-    background: var(--surface); box-shadow: var(--shadow-lift), 0 2px 6px rgba(0, 0, 0, 0.08);
-  }
-  .menu-title { font-size: 11px; line-height: 16px; padding: 4px 8px; color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
-  .buttons .menu button { justify-content: space-between; width: 100%; border: 0; border-radius: 6px; color: var(--ink); font-weight: 500; }
-  .buttons .menu button:hover { background: var(--row-tint); }
-  .menu .muted { font-weight: 400; font-size: 12px; }
-  @media (prefers-reduced-motion: no-preference) {
-    .menu { animation: pop 140ms ease-out; transform-origin: top right; }
-  }
-  @keyframes pop { from { opacity: 0; transform: scale(0.96) translateY(-4px); } }
   @media (max-width: 640px) {
     .row { grid-template-columns: 20px 1fr; padding: 14px 16px; }
     .buttons { grid-column: 2; justify-content: flex-start; }

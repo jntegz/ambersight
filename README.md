@@ -42,7 +42,7 @@ It runs as **one Worker in your own Cloudflare account**. Every hour it reads yo
 | **Exposure** | preview URLs are public, a forgotten `workers.dev` hostname still answers, or (optional) a URL is not behind Cloudflare Access. |
 | **Zombies and orphans** | Workers with no traffic or never deployed; KV, D1, R2 and Queues bound to nothing; routes and service bindings that point at deleted Workers. |
 
-Every finding comes with the evidence, a suggested fix and a link to the Cloudflare docs. You can acknowledge it or snooze it.
+Every finding comes with the evidence, a suggested fix and a link to the Cloudflare docs. Findings from the same check are grouped, so fourteen Workers with public preview URLs are one row with one fix, not fourteen. Critical and warning come first; info-level housekeeping stays folded away. Acknowledge or snooze one finding or a whole group, or stop a check you don't care about.
 
 Also included: groups and tags, per-Worker thresholds, include and exclude rules, a weekly or daily digest in your time zone, quiet hours, and a **Self-cost** panel that shows exactly what Ambersight itself uses.
 
@@ -84,7 +84,9 @@ Both start with the same step.
 
 ### Step 1: Create a read-only API token
 
-[**Open the pre-filled token form**](https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22account_analytics%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22d1%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_r2%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22queues%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_routes%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22billing%22%2C%22type%22%3A%22read%22%7D%5D&accountId=*&zoneId=all&name=Ambersight%20read-only). Check that every permission says **Read**, click **Continue to summary**, then **Create Token**. Copy the token now; Cloudflare shows it only once.
+[**Open the pre-filled token form**](https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22account_analytics%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22d1%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_r2%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22queues%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_routes%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22billing%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22access%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22api_tokens%22%2C%22type%22%3A%22read%22%7D%5D&accountId=*&zoneId=all&name=Ambersight%20read-only). Check that every permission says **Read**, click **Continue to summary**, then **Create Token**. Copy the token now; Cloudflare shows it only once.
+
+The form opens with the token set to **All accounts** and **All zones**. If you belong to several Cloudflare accounts, the setup wizard asks which one to watch. You can also narrow the token to that account before you create it.
 
 <details>
 <summary>Prefer to create the token by hand? These are the permissions.</summary>
@@ -98,11 +100,11 @@ Both start with the same step.
 | Account | Account Settings | Read | Finding your account ID |
 | Account | Workers KV Storage, D1, Workers R2 Storage, Queues | Read | Zombie and storage checks |
 | Zone | Workers Routes, Zone | Read | Exposure checks and orphaned routes |
-| Account | Billing | Read | Detecting Free or Paid automatically |
+| Account | Billing | Read | Detecting Free or Paid automatically. Without it, Ambersight uses `PLAN` from `wrangler.jsonc`; you can also set the plan in **Settings › General**. |
 | Account | Access: Apps and Policies | Read | The Access coverage check (off by default) |
 | User | API Tokens | Read | Letting the setup wizard prove the token has no write scopes |
 
-Do not add any **Edit** permission. If the token can see several accounts, set `CF_ACCOUNT_ID` in `wrangler.jsonc` under `vars`.
+Do not add any **Edit** permission. If the token can see several accounts, the setup wizard lets you choose one. To fix the choice in config instead, set `CF_ACCOUNT_ID` in `wrangler.jsonc` under `vars`.
 </details>
 
 ### A. Deploy button
@@ -172,7 +174,7 @@ New database migrations are applied by the deploy script in both cases.
 
 ## Lock it down with Cloudflare Access
 
-The dashboard has its own passphrase login: sessions are random 256-bit IDs, cookies are `HttpOnly`, `Secure` and `SameSite=Strict`, and five wrong attempts lock sign-in for 15 minutes. That is a good lock. **Cloudflare Access is a better door**: nobody reaches the sign-in page at all unless they first prove who they are with your e-mail, Google, GitHub or another identity provider. Zero Trust is free for small teams.
+The dashboard has its own passphrase login: sessions are random 256-bit IDs (stored only as hashes), cookies are `__Host-` prefixed, `HttpOnly`, `Secure` and `SameSite=Strict`, and requests that do not come from the dashboard's own origin are refused. Five wrong attempts from one address lock that address out for 15 minutes. 50 wrong attempts from any mix of addresses pause sign-in for everyone for 15 minutes, so someone with many addresses can keep you from signing in (your open sessions keep working). Access in front, below, removes that. Changing the passphrase, rotating the `ADMIN_PASSPHRASE` secret or deleting the stored passphrase signs every session out. The `ADMIN_PASSPHRASE` secret must be at least 12 characters. That is a good lock. **Cloudflare Access is a better door**: nobody reaches the sign-in page at all unless they first prove who they are with your e-mail, Google, GitHub or another identity provider. Zero Trust is free for small teams.
 
 Use both. It takes two minutes.
 
@@ -193,7 +195,7 @@ If you serve Ambersight on your own hostname, for example `ambersight.example.co
 
 1. Add the hostname under **Workers & Pages › ambersight › Settings › Domains & Routes › Add › Custom domain**.
 2. In **Zero Trust › Access controls › Applications**, choose **Create new application › Self-hosted**, add that public hostname, and attach a policy that allows only your e-mail address or group.
-3. **Turn off the `workers.dev` address**, or it stays a public way around Access. Set `"workers_dev": false` in `wrangler.jsonc` and deploy, or use **Settings › Domains & Routes › workers.dev › Disable**.
+3. **Turn off the `workers.dev` address**, or it stays a public way around Access. Set `"workers_dev": false` in `wrangler.jsonc`, commit it (for a Deploy-button copy, in your own repository) and deploy. Do not rely only on **Settings › Domains & Routes › workers.dev › Disable** in the dashboard: the next deploy applies `wrangler.jsonc` again and turns `workers.dev` back on.
 
 Preview URLs are already off in Ambersight's config (`"preview_urls": false`), so there is no third way in.
 
@@ -270,7 +272,7 @@ The dashboard and Observability are great at showing **one Worker in depth**. Am
 <details>
 <summary><b>I'm on Workers Paid. Is it still useful?</b></summary>
 
-Yes, maybe more so. Workers Paid has no hard spending cap, so a loop, a retry storm or a crawler can run up a bill. The runaway checks compare every Worker's last hour with its usual level and alert you when requests, CPU time, subrequests or storage operations jump. The plan is detected automatically; the free-budget meter is hidden on Paid.
+Yes, maybe more so. Workers Paid has no hard spending cap, so a loop, a retry storm or a crawler can run up a bill. The runaway checks compare every Worker's last hour with its usual level and alert you when requests, CPU time, subrequests or storage operations jump. The plan is detected automatically, and the setup wizard tells you if it could not be. The free-budget meter is hidden on Paid.
 </details>
 
 <details>
@@ -288,7 +290,7 @@ Probably not. A few Cloudflare analytics datasets (for example scheduled invocat
 <details>
 <summary><b>Can I monitor several Cloudflare accounts?</b></summary>
 
-Not from one install yet; that is planned for v1.0. For now, deploy one Ambersight per account (each uses 1 Cron Trigger in that account), or use a token that can see several accounts and pin one with `CF_ACCOUNT_ID`.
+Not from one install yet; that is planned for v1.0. For now, deploy one Ambersight per account (each uses 1 Cron Trigger in that account). If one token can see several accounts, the setup wizard asks which one to watch.
 </details>
 
 <details>

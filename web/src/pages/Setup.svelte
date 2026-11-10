@@ -30,12 +30,15 @@
   let pending = $state<{ current: string; next: string } | null>(null);
   let finishing = $state(false);
   let finishError = $state('');
+  /** Account chosen in step 1 when the token can see several. */
+  let account = $state('');
 
   async function check() {
     checking = true;
     loadError = '';
     try {
-      status = await api.setup();
+      status = await api.setup(account || undefined);
+      account = status.accountId ?? '';
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) onUnauthorized();
       else loadError = (e as Error).message;
@@ -54,6 +57,7 @@
       await api.completeSetup({
         timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         ...(status?.writeScopes == null && confirmReadOnly ? { confirmReadOnly: true as const } : {}),
+        ...(status?.accountId ? { accountId: status.accountId } : {}),
       });
       if (pending) {
         try {
@@ -116,6 +120,27 @@
               {/if}
             </div>
           </li>
+          {#if status.tokenActive && status.accounts.length > 1 && !status.accountPinned}
+            <li class="warn">
+              <Icon name="warning" size={20} />
+              <div>
+                <p class="c-title">This token can see {status.accounts.length} accounts</p>
+                <p class="muted">Choose the one to watch. To watch another account later, deploy a second Ambersight there.</p>
+                <select class="select-input account-select" aria-label="Account to watch" bind:value={account} onchange={check} disabled={checking}>
+                  {#each status.accounts as a (a.id)}<option value={a.id}>{a.name}</option>{/each}
+                </select>
+              </div>
+            </li>
+          {/if}
+          {#if status.tokenActive && !status.detectedPlan}
+            <li class="warn">
+              <Icon name="warning" size={20} />
+              <div>
+                <p class="c-title">Plan not detected</p>
+                <p class="muted">The token cannot read billing, so Ambersight uses the <span class="mono">PLAN</span> value from <span class="mono">wrangler.jsonc</span> (Free unless you changed it). If you are on Workers Paid, set it in <strong>Settings › General › Cloudflare plan</strong> after setup.</p>
+              </div>
+            </li>
+          {/if}
           {#if status.tokenActive}
             {#if status.writeScopes == null}
               <li class="warn">
@@ -155,14 +180,19 @@
       </div>
     {:else if step === 1}
       <h1 id="step-title">Protect the dashboard</h1>
-      <p class="lead">The dashboard is behind a passphrase. For a team, add Cloudflare Access in front of it as well.</p>
+      {#if status?.behindAccess}
+        <p class="lead">The dashboard is behind a passphrase, and this visit came through <strong>Cloudflare Access</strong>. That is the setup we recommend.</p>
+        <ul class="checks"><li class="ok"><Icon name="shield" size={20} /><div><p class="c-title">Protected by Cloudflare Access</p><p class="muted">This address is behind your Access policy. Make sure every other address of this Worker is too: turn off <code>workers_dev</code> in wrangler.jsonc if you use a custom domain.</p></div></li></ul>
+      {:else}
+        <p class="lead">The dashboard is behind a passphrase. Add <strong>Cloudflare Access</strong> in front of it too, so nobody reaches the sign-in page without passing your login first, with MFA or passkeys from your identity provider. It is free for small teams.</p>
 
-      <ol class="guide">
-        <li><span class="n">1</span><p>In the Cloudflare dashboard open <strong>Zero Trust → Access → Applications</strong> and add a <strong>Self-hosted</strong> application.</p></li>
-        <li><span class="n">2</span><p>Use this dashboard's hostname, <span class="mono">{location.host}</span>, as the application domain.</p></li>
-        <li><span class="n">3</span><p>Add a policy that allows only your team, for example emails ending in your company domain.</p></li>
-      </ol>
-      <a class="doc-link" href="https://developers.cloudflare.com/cloudflare-one/applications/configure-apps/self-hosted-public-app/" target="_blank" rel="noopener noreferrer">Cloudflare Access guide <Icon name="external" size={14} /></a>
+        <ol class="guide">
+          <li><span class="n">1</span><p>In the Cloudflare dashboard open <strong>Workers & Pages</strong>, then this Worker, then the <strong>Access</strong> tab.</p></li>
+          <li><span class="n">2</span><p>Choose <strong>Protect this Worker behind Access</strong>, select <strong>All traffic</strong> and apply. This covers <span class="mono">{location.host}</span> and every other address of this Worker.</p></li>
+          <li><span class="n">3</span><p>Edit the policy so it allows only you or your team, for example <strong>Emails</strong> › your address.</p></li>
+        </ol>
+        <a class="doc-link" href="https://developers.cloudflare.com/workers/configuration/cloudflare-access/" target="_blank" rel="noopener noreferrer">Cloudflare Access for Workers <Icon name="external" size={14} /></a>
+      {/if}
 
       <div class="pass-box">
         <div class="pass-head">
@@ -203,6 +233,7 @@
 </main>
 
 <style>
+  .account-select { margin-top: 8px; max-width: 360px; }
   .setup { min-height: 100vh; display: grid; grid-template-columns: minmax(240px, 320px) minmax(0, 620px); gap: 48px; justify-content: center; align-items: start; padding: 72px 24px; }
   .rail { position: sticky; top: 72px; display: grid; gap: 20px; }
   .brand { display: flex; align-items: center; gap: 10px; }

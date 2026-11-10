@@ -1,14 +1,20 @@
 // Passphrase login with server-side sessions. The passphrase is a Worker secret,
-// never stored; sessions are random ids in D1; failed logins lock out for 15 minutes.
+// never stored; sessions are random ids, kept in D1 only as SHA-256 digests and bound to the
+// credential that issued them. Five failed attempts lock that client IP out for 15 minutes;
+// 50 failures from any mix of IPs in 15 minutes pause sign-in for everyone.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { getSettings, setSettings } from './db';
+import { getSettings } from './db';
 import type { Env } from './env';
 
-export const COOKIE = 'as_session';
+/** __Host- keeps sibling subdomains (other *.workers.dev Workers, other zone hosts) from setting or shadowing it. */
+export const COOKIE = '__Host-as_session';
 const SESSION_DAYS = 7;
 const MAX_FAILS = 5;
+const GLOBAL_MAX_FAILS = 50;
 const LOCK_MS = 15 * 60_000;
+/** Shortest ADMIN_PASSPHRASE secret Ambersight accepts; the Settings form enforces the same. */
+export const MIN_PASSPHRASE = 12;
 
 async function digest(value: string): Promise<ArrayBuffer> {
   return crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
@@ -59,42 +65,101 @@ export function readCookie(header: string | null, name: string): string | null {
   return null;
 }
 
+/** What D1 stores for a session: a digest, so a copy of the table is not a set of working cookies. */
+const sessionKey = async (id: string) => hex(await digest(id));
+
+/**
+ * Fingerprint of the credential sign-in currently accepts. Sessions remember the fingerprint they
+ * were issued under, so rotating ADMIN_PASSPHRASE or removing the stored hash signs everyone out.
+ */
+export async function credentialFingerprint(env: Env, storedHash?: string | null): Promise<string> {
+  return hex(await digest(storedHash ? `hash:${storedHash}` : `env:${env.ADMIN_PASSPHRASE ?? ''}`));
+}
+
 export async function hasSession(env: Env, cookieHeader: string | null): Promise<boolean> {
   const id = readCookie(cookieHeader, COOKIE);
   if (!id || !/^[a-f0-9]{64}$/.test(id)) return false;
-  const row = await env.DB.prepare('SELECT 1 AS ok FROM sessions WHERE id = ?1 AND expires_at > ?2')
-    .bind(id, new Date().toISOString())
-    .first();
-  return row != null;
+  const row = await env.DB.prepare(
+    `SELECT cred, (SELECT value FROM settings WHERE key = 'passphrase_hash') AS stored FROM sessions WHERE id = ?1 AND expires_at > ?2`,
+  )
+    .bind(await sessionKey(id), new Date().toISOString())
+    .first<{ cred: string; stored: string | null }>();
+  return row != null && row.cred === (await credentialFingerprint(env, row.stored));
 }
 
-export type LoginResult = { ok: true; cookie: string } | { ok: false; status: 401 | 429 | 500; error: string };
+type Refusal = { ok: false; status: 401 | 429 | 500; error: string };
+export type LoginResult = { ok: true; cookie: string } | Refusal;
 
-export async function login(env: Env, passphrase: string): Promise<LoginResult> {
-  const now = Date.now();
+/**
+ * Counts one passphrase attempt for `key` before the passphrase is checked, in a single D1
+ * transaction, so concurrent attempts cannot all read the same count. Returns a refusal when the
+ * key is locked or sign-in is paused; otherwise the caller checks the passphrase and then calls
+ * `attemptFailed` or `attemptSucceeded`.
+ */
+export async function reserveAttempt(env: Env, key: string, now = Date.now()): Promise<Refusal | null> {
+  const [, mine, all] = await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO login_attempts (ip, fails, window_start, locked_until) VALUES (?1, 1, ?2, 0)
+       ON CONFLICT(ip) DO UPDATE SET
+         fails = CASE WHEN locked_until > ?2 THEN fails WHEN window_start <= ?2 - ?3 THEN 1 ELSE fails + 1 END,
+         window_start = CASE WHEN locked_until > ?2 THEN window_start WHEN window_start <= ?2 - ?3 THEN ?2 ELSE window_start END`,
+    ).bind(key, now, LOCK_MS),
+    env.DB.prepare('SELECT fails, locked_until FROM login_attempts WHERE ip = ?1').bind(key),
+    env.DB.prepare('SELECT COALESCE(SUM(fails), 0) AS n FROM login_attempts WHERE window_start > ?1').bind(now - LOCK_MS),
+  ]);
+  const row = mine.results[0] as { fails: number; locked_until: number };
+  if (row.locked_until > now) return { ok: false, status: 429, error: 'Too many attempts. Try again in 15 minutes.' };
+  if (row.fails > MAX_FAILS) {
+    await env.DB.prepare('UPDATE login_attempts SET locked_until = ?2 WHERE ip = ?1 AND locked_until < ?2').bind(key, now + LOCK_MS).run();
+    return { ok: false, status: 429, error: 'Too many attempts. Try again in 15 minutes.' };
+  }
+  // This attempt is already counted in the sum, hence ">" rather than ">=".
+  if (Number((all.results[0] as { n: number }).n) > GLOBAL_MAX_FAILS) {
+    // Do not let attempts refused by the pause extend it.
+    await env.DB.prepare('UPDATE login_attempts SET fails = fails - 1 WHERE ip = ?1 AND fails > 0').bind(key).run();
+    return { ok: false, status: 429, error: 'Too many failed sign-ins from different addresses. Sign-in is paused for 15 minutes.' };
+  }
+  return null;
+}
+
+export async function attemptFailed(env: Env, key: string, now = Date.now()): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare('UPDATE login_attempts SET locked_until = ?3 WHERE ip = ?1 AND fails >= ?2 AND locked_until < ?3').bind(key, MAX_FAILS, now + LOCK_MS),
+    env.DB.prepare('DELETE FROM login_attempts WHERE window_start < ?1 AND locked_until < ?2').bind(now - 86_400_000, now),
+  ]);
+}
+
+export async function attemptSucceeded(env: Env, key: string): Promise<void> {
+  await env.DB.prepare('DELETE FROM login_attempts WHERE ip = ?1').bind(key).run();
+}
+
+/** `ip` is CF-Connecting-IP, which Cloudflare sets and clients cannot override. */
+export async function login(env: Env, passphrase: string, ip: string, now = Date.now()): Promise<LoginResult> {
   const s = await getSettings(env.DB);
   if (!env.ADMIN_PASSPHRASE && !s.passphrase_hash) return { ok: false, status: 500, error: 'ADMIN_PASSPHRASE secret is not set.' };
-  const fails = Number(s.login_fails ?? 0);
-  const lockedUntil = Number(s.login_locked_until ?? 0);
-  if (lockedUntil > now) return { ok: false, status: 429, error: 'Too many attempts. Try again in 15 minutes.' };
+  if (!s.passphrase_hash && env.ADMIN_PASSPHRASE.length < MIN_PASSPHRASE) {
+    return {
+      ok: false, status: 500,
+      error: `The ADMIN_PASSPHRASE secret is shorter than ${MIN_PASSPHRASE} characters, so sign-in is off. Set a longer one with "npx wrangler secret put ADMIN_PASSPHRASE", or in the Cloudflare dashboard under your Worker › Settings › Variables and Secrets.`,
+    };
+  }
+  const refused = await reserveAttempt(env, ip, now);
+  if (refused) return refused;
 
   if (!(await checkPassphrase(env, passphrase, s.passphrase_hash))) {
-    const next = fails + 1;
-    await setSettings(env.DB, {
-      login_fails: String(next >= MAX_FAILS ? 0 : next),
-      login_locked_until: String(next >= MAX_FAILS ? now + LOCK_MS : 0),
-    }).run();
+    await attemptFailed(env, ip, now);
     return { ok: false, status: 401, error: 'Wrong passphrase.' };
   }
 
   const bytes = crypto.getRandomValues(new Uint8Array(32));
-  const id = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const id = hex(bytes);
   const expires = new Date(now + SESSION_DAYS * 86_400_000);
   await env.DB.batch([
-    env.DB.prepare('INSERT INTO sessions (id, expires_at) VALUES (?1, ?2)').bind(id, expires.toISOString()),
+    env.DB.prepare('INSERT INTO sessions (id, expires_at, cred) VALUES (?1, ?2, ?3)')
+      .bind(await sessionKey(id), expires.toISOString(), await credentialFingerprint(env, s.passphrase_hash)),
     env.DB.prepare('DELETE FROM sessions WHERE expires_at < ?1').bind(new Date(now).toISOString()),
-    setSettings(env.DB, { login_fails: '0', login_locked_until: '0' }),
   ]);
+  await attemptSucceeded(env, ip);
   return {
     ok: true,
     cookie: `${COOKIE}=${id}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${SESSION_DAYS * 86_400}`,
@@ -103,6 +168,6 @@ export async function login(env: Env, passphrase: string): Promise<LoginResult> 
 
 export async function logout(env: Env, cookieHeader: string | null): Promise<string> {
   const id = readCookie(cookieHeader, COOKIE);
-  if (id) await env.DB.prepare('DELETE FROM sessions WHERE id = ?1').bind(id).run();
+  if (id) await env.DB.prepare('DELETE FROM sessions WHERE id = ?1').bind(await sessionKey(id)).run();
   return `${COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`;
 }

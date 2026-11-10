@@ -102,14 +102,25 @@ export function webhookKind(url: string): 'slack' | 'discord' | 'telegram' | 'nt
   return 'json';
 }
 
+/**
+ * Finding text carries names other people in the account choose (KV titles, route patterns), so
+ * neutralise chat markup: no forged lines, no Slack <!channel> or <url|label>, no Discord masked links.
+ */
+function chatSafe(s: string, kind: ReturnType<typeof webhookKind>): string {
+  const flat = s.replace(/[\r\n\u2028\u2029]+/g, ' ');
+  if (kind === 'slack') return flat.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  if (kind === 'discord') return flat.replace(/[\\[\]()*_~`|>#@]/g, '\\$&');
+  return flat;
+}
+
 export async function sendWebhook(url: string, title: string, rows: Row[]): Promise<void> {
-  const lines = rows.slice(0, 20).map((r) => `• [${label(r.severity)}] ${who(r.script)}: ${r.message}`);
-  const text = [title, ...lines].join('\n').slice(0, 3900);
   const kind = webhookKind(url);
+  const lines = rows.slice(0, 20).map((r) => `• [${label(r.severity)}] ${chatSafe(`${who(r.script)}: ${r.message}`, kind)}`);
+  const text = [title, ...lines].join('\n').slice(0, 3900);
   const json = (body: unknown) => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const init: RequestInit =
     kind === 'slack' ? json({ text })
-    : kind === 'discord' ? json({ content: text.slice(0, 1900) })
+    : kind === 'discord' ? json({ content: text.slice(0, 1900), allowed_mentions: { parse: [] } })
     : kind === 'telegram' ? json({ chat_id: new URL(url).searchParams.get('chat_id'), text })
     : kind === 'ntfy' ? { method: 'POST', headers: { Title: title.slice(0, 200) }, body: lines.join('\n') || title }
     : json({ title, findings: rows.map((r) => ({ id: r.id, worker: r.script, severity: r.severity, message: r.message, action: r.action })) });
@@ -135,7 +146,10 @@ export async function sendAlerts(env: Env, now: Date, config: Config): Promise<v
   if (!canEmail && !canHook) return;
 
   // Instant: open findings never sent, or sent more than 24 h ago and still open.
-  const sevs = (['critical', 'warning', 'info'] as const).filter((s) => config.alerts[s].instant !== 'off');
+  // Only severities with a configured channel: undeliverable rows would never be marked sent and
+  // would fill the 50-row window on every scan, crowding out alerts that can be delivered.
+  const deliverable = (route: string) => (route === 'email' && canEmail) || (route === 'webhook' && canHook) || (route === 'both' && (canEmail || canHook));
+  const sevs = (['critical', 'warning', 'info'] as const).filter((s) => deliverable(config.alerts[s].instant));
   if (sevs.length && !inQuietHours(now, config.timeZone, config.alerts.quietHours)) {
     const { results } = await db
       .prepare(

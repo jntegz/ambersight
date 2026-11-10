@@ -6,9 +6,10 @@ import { getSettings, setSettings } from '../src/worker/db';
 import type { Env } from '../src/worker/env';
 import { buildOverview, buildSelfCost, buildTimeline } from '../src/worker/overview';
 import { runScan } from '../src/worker/scan';
+import { sendAlerts, sendWebhook } from '../src/worker/notify';
 import { setupStatus } from '../src/worker/setup';
 import { createD1 } from './d1';
-import { fakeFetch, NOW, type FakeOptions } from './fixtures';
+import { fakeFetch, fleet, NOW, type FakeOptions } from './fixtures';
 
 function env(over: Partial<Env> = {}) {
   const sent: { to: string | string[]; subject: string; text?: string }[] = [];
@@ -191,6 +192,46 @@ describe('notifications', () => {
   });
 });
 
+describe('alert hardening', () => {
+  const capture = () => {
+    const bodies: string[] = [];
+    vi.stubGlobal('fetch', async (_u: string, init?: RequestInit) => {
+      bodies.push(String(init?.body ?? ''));
+      return new Response('ok');
+    });
+    return bodies;
+  };
+  const row = (message: string) => ({ id: 'x', script: '*', severity: 'info' as const, message, action: 'a', evidence: '{}' });
+
+  it('neutralises chat markup from resource names in webhook alerts', async () => {
+    const bodies = capture();
+    await sendWebhook('https://hooks.slack.com/services/T/B/x', 't', [row('KV <!channel> <https://evil.example|dash>\n• [Critical] forged')]);
+    const slack = JSON.parse(bodies[0]).text as string;
+    expect(slack).not.toContain('<!channel>');
+    expect(slack).not.toContain('<https://');
+    expect(slack.split('\n')).toHaveLength(2);
+    await sendWebhook('https://discord.com/api/webhooks/1/x', 't', [row('@everyone [dash](https://evil.example)')]);
+    const discord = JSON.parse(bodies[1]);
+    expect(discord.allowed_mentions).toEqual({ parse: [] });
+    expect(discord.content).not.toContain('[dash](');
+  });
+
+  it('skips alerts routed to a channel that is not set up, so they cannot block deliverable ones', async () => {
+    const bodies = capture();
+    const { env: e } = env({ EMAIL: undefined, WEBHOOK_URL: 'https://hooks.slack.com/services/T/B/x' });
+    const config = defaultConfig(); // critical -> email, which this deployment does not have
+    config.alerts.warning.instant = 'webhook';
+    config.alerts.quietHours = null;
+    const ins = (id: string, severity: string) =>
+      e.DB.prepare(`INSERT INTO findings (id, script, module, severity, code, message, evidence, action, first_seen, last_seen, status)
+        VALUES (?1, 'w', 'exposure', ?2, 'c', 'm', '{}', 'a', ?3, ?3, 'open')`).bind(id, severity, NOW.toISOString()).run();
+    for (let i = 0; i < 50; i++) await ins(`exposure:w${i}:c`, 'critical');
+    await ins('errors:api:error-rate', 'warning');
+    await sendAlerts(e, NOW, config);
+    expect(bodies).toHaveLength(1);
+  });
+});
+
 describe('setup wizard', () => {
   it('reports a read-only token', async () => {
     stub();
@@ -201,8 +242,107 @@ describe('setup wizard', () => {
     stub({ tokenPolicies: [{ name: 'Workers Scripts Read' }, { name: 'Workers Scripts Write' }] });
     expect((await setupStatus(env().env)).writeScopes).toEqual(['Workers Scripts Write']);
   });
+  it('lists the accounts the token can see, and reports pinning and Access', async () => {
+    stub();
+    const s = await setupStatus(env().env, { behindAccess: true });
+    expect(s.accounts).toEqual([{ id: 'acc1', name: 'Test account' }]);
+    expect(s.accountPinned).toBe(false);
+    expect(s.behindAccess).toBe(true);
+    expect((await setupStatus(env({ CF_ACCOUNT_ID: 'acc1' }).env)).accountPinned).toBe(true);
+  });
+
   it('says so when the token cannot read its own permissions', async () => {
     stub({ tokenPolicies: null });
     expect((await setupStatus(env().env)).writeScopes).toBeNull();
+  });
+});
+
+describe('cron data gaps', () => {
+  const cronIds = async (db: D1Database) => (await openFindings(db)).map((x) => x.id).filter((id) => id.startsWith('cron:'));
+
+  it('pauses cron checks instead of flagging every cron when Cloudflare returns no runs', async () => {
+    stub({ cronRuns: [] });
+    const { env: e } = env();
+    const r = await runScan(e, NOW);
+    expect(await cronIds(e.DB)).toEqual([]);
+    expect(r.warnings.join(' ')).toContain('returned no scheduled runs');
+  });
+
+  it('does not judge crons on stored runs when this scan could not fetch them', async () => {
+    // Every hourly run present up to 10:00, then the next scan's cron query fails.
+    const full = Array.from({ length: 24 }, (_, i) => ({ scriptName: 'cron-job', status: 'success', datetime: new Date(Date.UTC(2026, 10, 8, 11 + i, 0, 1)).toISOString() }));
+    stub({ cronRuns: full });
+    const { env: e } = env();
+    await runScan(e, NOW);
+    expect(await cronIds(e.DB)).toEqual([]);
+    stub({ cronError: true });
+    const r = await runScan(e, new Date(NOW.getTime() + 2 * 3_600_000), { force: true });
+    expect(await cronIds(e.DB)).toEqual([]);
+    expect(r.warnings.join(' ')).toContain('Cron runs unavailable');
+  });
+
+  it('pauses cron checks when the run query hits its row limit, without marking the dataset unavailable', async () => {
+    stub({ cronRuns: Array.from({ length: 10_000 }, () => ({ scriptName: 'cron-job', status: 'success', datetime: '2026-11-09T07:00:01Z' })) });
+    const { env: e } = env();
+    const r = await runScan(e, NOW);
+    expect(await cronIds(e.DB)).toEqual([]);
+    expect(r.warnings.join(' ')).toContain('too many to count');
+    expect((await getSettings(e.DB)).cron_dataset).toBe('available');
+  });
+});
+
+describe('queues without bindings', () => {
+  it('does not flag consumed queues or dead-letter queues as unbound', async () => {
+    stub({
+      queues: [
+        { queue_id: 'q-jobs', queue_name: 'jobs', producers: [], consumers: [{ type: 'worker', script_name: 'cron-job', dead_letter_queue: 'jobs-dlq' }] },
+        { queue_id: 'q-dlq', queue_name: 'jobs-dlq', producers: [], consumers: [] },
+        { queue_id: 'q-old', queue_name: 'old', producers: [], consumers: [] },
+      ],
+    });
+    const { env: e } = env();
+    await runScan(e, NOW);
+    const ids = (await openFindings(e.DB)).map((x) => x.id).filter((id) => id.includes('unbound-queues'));
+    expect(ids).toEqual(['zombies:*:unbound-queues-q-old']);
+  });
+});
+
+describe('cron runs after a deploy', () => {
+  it('expects runs only from the first full hour after the last deploy', async () => {
+    const cronJob = fleet.workers.find((w) => w.name === 'cron-job')!;
+    const before = cronJob.deployed_on;
+    try {
+      // Deployed at 10:30; the window ends at 11:00, so no full hour has passed yet.
+      cronJob.deployed_on = '2026-11-09T10:30:00Z';
+      stub();
+      const { env: e } = env();
+      await runScan(e, NOW);
+      expect((await openFindings(e.DB)).filter((f) => f.id.startsWith('cron:cron-job'))).toEqual([]);
+
+      // Deployed at 07:30: 08:00, 09:00 and 10:00 were all missed, whatever ran before the deploy.
+      cronJob.deployed_on = '2026-11-09T07:30:00Z';
+      const { env: e2 } = env();
+      await runScan(e2, NOW);
+      const missed = (await openFindings(e2.DB)).find((f) => f.id === 'cron:cron-job:missed-runs');
+      expect(JSON.parse(missed!.evidence)).toMatchObject({ expected: 3, observed: 0 });
+    } finally {
+      cronJob.deployed_on = before;
+    }
+  });
+});
+
+describe('muted checks', () => {
+  it('drops findings of a check the user switched off, so open ones resolve', async () => {
+    stub();
+    const { env: e } = env();
+    await runScan(e, NOW);
+    expect((await openFindings(e.DB)).some((f) => f.id === 'exposure:api:previews-without-workers-dev')).toBe(true);
+    const config = defaultConfig();
+    config.mutedChecks = ['exposure:previews-without-workers-dev', 'zombies:unbound-kv'];
+    await setSettings(e.DB, { config: JSON.stringify(config) }).run();
+    await runScan(e, new Date(NOW.getTime() + 3_600_000), { force: true });
+    const ids = (await openFindings(e.DB)).map((f) => f.id);
+    expect(ids.some((id) => id.startsWith('exposure:api:previews-without-workers-dev') || id.includes('unbound-kv'))).toBe(false);
+    expect(ids).toContain('deprecation:legacy:service-worker-syntax');
   });
 });

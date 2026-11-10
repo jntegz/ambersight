@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { describe, expect, it } from 'vitest';
 import { defaultConfig, groupsFor, inScope, matchPattern, parseConfig, thresholdsFor } from '../src/shared/config';
+import { checkOf, groupFindings } from '../src/shared/findings';
+import type { Finding } from '../src/shared/types';
 import { runChecks, type WorkerStats } from '../src/worker/checks';
 import { cronStats } from '../src/worker/scan';
 import { accessCovers, hostOf, monthsBetween } from '../src/worker/hygiene';
+import { parseCron } from '../src/worker/cron';
 import { digestDue, inQuietHours, localTime } from '../src/worker/time';
 import { isNewer } from '../src/worker/version';
 
@@ -78,15 +81,37 @@ describe('checks', () => {
 
 describe('hygiene helpers', () => {
   it('matches Access applications to hostnames', () => {
-    expect(hostOf('*example.com/*')).toBe('example.com');
+    expect(hostOf('*example.com/*')).toBe('*example.com');
     expect(hostOf('https://Admin.example.com/x')).toBe('admin.example.com');
     expect(accessCovers(['*.example.com'], 'admin.example.com')).toBe(true);
-    expect(accessCovers(['admin.example.com/panel'], 'admin.example.com')).toBe(true);
+    expect(accessCovers(['admin.example.com/*'], 'admin.example.com/*')).toBe(true);
     expect(accessCovers(['admin.example.com'], 'example.com')).toBe(false);
+  });
+  it('does not count partial Access coverage', () => {
+    // An app scoped to a path protects only that path.
+    expect(accessCovers(['admin.example.com/panel'], 'admin.example.com')).toBe(false);
+    // "*.host" does not protect the apex.
+    expect(accessCovers(['*.example.com'], 'example.com')).toBe(false);
+    // A wildcard route needs its subdomains covered, not just the apex.
+    expect(accessCovers(['example.com'], '*.example.com/*')).toBe(false);
+    expect(accessCovers(['*.example.com'], '*.example.com/*')).toBe(true);
+    expect(accessCovers(['example.com'], '*example.com/*')).toBe(false);
+    expect(accessCovers(['example.com', '*.example.com'], '*example.com/*')).toBe(true);
   });
   it('counts whole months', () => {
     expect(monthsBetween(new Date('2025-11-09'), now)).toBe(12);
     expect(monthsBetween(new Date('2025-11-10'), now)).toBe(11);
+  });
+});
+
+describe('input limits', () => {
+  it('rejects out-of-range cron fields instead of looping over them', () => {
+    expect(() => parseCron('0-1000000000 * * * *')).toThrow(/out of range/);
+    expect(() => parseCron('0-1e9 * * * *')).toThrow(/out of range/);
+    expect(parseCron('0-59/15 * * * 7').minutes.size).toBe(4);
+  });
+  it('rejects digest group names that could break an e-mail subject', () => {
+    expect(() => parseConfig({ version: 1, digest: { groupRecipients: { 'x\r\nBcc: a@b.co': ['me@example.com'] } } })).toThrow(/not valid/);
   });
 });
 
@@ -113,4 +138,39 @@ it('compares versions', () => {
   expect(isNewer('v0.2.0', '0.1.0')).toBe(true);
   expect(isNewer('v0.1.0', '0.1.0')).toBe(false);
   expect(isNewer('0.10.0', '0.9.9')).toBe(true);
+});
+
+describe('finding groups', () => {
+  const f = (module: Finding['module'], script: string, code: string, severity: Finding['severity']): Finding =>
+    ({ id: `${module}:${script}:${code}`, module, script, code, severity, message: code, evidence: {}, action: '' });
+
+  it('strips resource ids so one check is one group', () => {
+    expect(checkOf(f('zombies', '*', 'unbound-queues-q1', 'info'))).toBe('zombies:unbound-queues');
+    expect(checkOf(f('zombies', 'api', 'missing-service-auth', 'info'))).toBe('zombies:missing-service');
+    expect(checkOf(f('usage', 'api', 'ops-spike-kv-ns1', 'critical'))).toBe('usage:ops-spike-kv');
+    expect(checkOf(f('exposure', 'api', 'preview-urls', 'warning'))).toBe('exposure:preview-urls');
+  });
+
+  it('orders groups by worst severity, then size, and takes the worst severity', () => {
+    const groups = groupFindings([
+      f('exposure', 'a', 'preview-urls', 'warning'),
+      f('zombies', '*', 'unbound-kv-1', 'info'),
+      f('cron', 'b', 'missed-runs', 'warning'),
+      f('exposure', 'b', 'preview-urls', 'warning'),
+      f('cron', 'c', 'missed-runs', 'critical'),
+      f('zombies', '*', 'unbound-kv-2', 'info'),
+    ]);
+    expect(groups.map((g) => [g.check, g.severity, g.findings.length])).toEqual([
+      ['cron:missed-runs', 'critical', 2],
+      ['exposure:preview-urls', 'warning', 2],
+      ['zombies:unbound-kv', 'info', 2],
+    ]);
+    expect(groups[1].title).toBe('Public preview URLs');
+  });
+
+  it('accepts muted checks in the config and rejects malformed ones', () => {
+    expect(parseConfig({ ...defaultConfig(), mutedChecks: ['exposure:preview-urls', 'exposure:preview-urls'] }).mutedChecks).toEqual(['exposure:preview-urls']);
+    expect(() => parseConfig({ ...defaultConfig(), mutedChecks: ['DROP TABLE'] })).toThrow();
+    expect(parseConfig({ ...defaultConfig(), mutedChecks: undefined }).mutedChecks).toEqual([]);
+  });
 });

@@ -36,8 +36,8 @@ export const api = {
   scan: () => call<ScanResult>('/api/scan', { method: 'POST' }),
   timeline: (days: number) => call<TimelineEntry[]>(`/api/timeline?days=${days}`),
   selfCost: () => call<SelfCost>('/api/self-cost'),
-  setup: () => call<SetupStatus>('/api/setup'),
-  completeSetup: (body: { timeZone: string; confirmReadOnly?: true }) =>
+  setup: (account?: string) => call<SetupStatus>(account ? `/api/setup?account=${encodeURIComponent(account)}` : '/api/setup'),
+  completeSetup: (body: { timeZone: string; confirmReadOnly?: true; accountId?: string }) =>
     call<{ ok: true }>('/api/setup/complete', { method: 'POST', body: JSON.stringify(body) }),
   config: () => call<Config>('/api/config'),
   saveConfig: (config: Config) => call<Config>('/api/config', { method: 'PUT', body: JSON.stringify(config) }),
@@ -48,6 +48,9 @@ export const api = {
   acknowledge: (id: string) => call<{ ok: true }>(`/api/findings/${encodeURIComponent(id)}/acknowledge`, { method: 'POST' }),
   snooze: (id: string, days: 7 | 30 | 90) =>
     call<{ ok: true }>(`/api/findings/${encodeURIComponent(id)}/snooze`, { method: 'POST', body: JSON.stringify({ days }) }),
+  /** A whole group at once. */
+  bulk: (ids: string[], action: 'acknowledge' | 'snooze', days?: 7 | 30 | 90) =>
+    call<{ ok: true; changed: number }>('/api/findings/bulk', { method: 'POST', body: JSON.stringify({ ids, action, days }) }),
 };
 
 export function timeAgo(iso: string | null, now = Date.now()): string {

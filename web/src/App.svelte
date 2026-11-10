@@ -105,6 +105,22 @@
     await load();
   }
 
+  async function bulk(ids: string[], action: 'acknowledge' | 'snooze', days?: 7 | 30 | 90) {
+    await api.bulk(ids, action, days);
+    await load();
+  }
+
+  /** Switch one check off. Its findings disappear now and resolve on the next scan. */
+  async function mute(check: string) {
+    try {
+      const current = config ?? (await api.config());
+      config = await api.saveConfig({ ...current, mutedChecks: [...new Set([...(current.mutedChecks ?? []), check])] });
+      notice = { text: 'Check turned off. Turn it back on in Settings › Checks.', tone: 'ok' };
+    } catch (e) {
+      notice = { text: (e as Error).message, tone: 'warn' };
+    }
+  }
+
   function signedOut(message = '') {
     data = null;
     config = null;
@@ -232,7 +248,7 @@
         onUnauthorized={() => signedOut()}
       />
     {:else}
-      <Overview {data} {query} scanInterval={config?.scanIntervalMinutes ?? null} onAcknowledge={acknowledge} onSnooze={snooze} />
+      <Overview {data} {query} scanInterval={config?.scanIntervalMinutes ?? null} mutedChecks={config?.mutedChecks ?? []} onAcknowledge={acknowledge} onSnooze={snooze} onBulk={bulk} onMute={mute} />
     {/if}
 
     <footer class="foot muted">

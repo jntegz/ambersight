@@ -14,6 +14,9 @@ export const TOKEN_PERMISSION_KEYS = [
   'zone',
   'workers_routes',
   'billing',
+  // Optional checks: the Access coverage check, and the setup wizard proving the token has no write scopes.
+  'access',
+  'api_tokens',
 ] as const;
 
 export const TOKEN_TEMPLATE_URL =
