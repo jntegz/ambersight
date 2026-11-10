@@ -17,7 +17,6 @@
 </p>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/overview-dark.png">
   <img src="docs/screenshots/overview.png" alt="The Ambersight overview: 9 of 12 Workers need attention, the free request budget, requests and errors today, and a list of findings ranked by severity">
 </picture>
 
