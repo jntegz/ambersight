@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Troubleshooting
+    url: https://github.com/jntegz/ambersight/blob/main/docs/troubleshooting.md
+    about: What each scan warning and setup error means, and how to fix it.
+  - name: Report a security vulnerability
+    url: https://github.com/jntegz/ambersight/security/advisories/new
+    about: Please report security issues privately, not as a public issue.

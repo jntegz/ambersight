@@ -1,0 +1,52 @@
+name: Bug report
+description: A check is wrong, a scan fails, or something in the dashboard does not work.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please do not paste your API token, account ID or passphrase.
+        For a security issue, use **Report a vulnerability** on the Security tab instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: input
+    id: check
+    attributes:
+      label: Check ID, if it is about a finding
+      description: For example `cron:missed-runs`. The IDs are listed in docs/checks.md.
+  - type: dropdown
+    id: plan
+    attributes:
+      label: Workers plan
+      options: [Free, Paid, Not sure]
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you installed it
+      options: [Deploy button, Terminal]
+    validations:
+      required: true
+  - type: input
+    id: fleet
+    attributes:
+      label: Roughly how many Workers
+      placeholder: "30"
+  - type: input
+    id: version
+    attributes:
+      label: Ambersight version
+      description: "`version` in package.json of your copy, or the commit you deployed."
+      placeholder: "0.1.0"
+  - type: textarea
+    id: warnings
+    attributes:
+      label: Scan warnings
+      description: Copy the messages from Settings › Self-cost. They say which Cloudflare data the scan could not read.
+      render: text

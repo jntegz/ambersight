@@ -4,7 +4,7 @@
 
 <h1 align="center">ambersight</h1>
 
-<p align="center"><strong>Your whole Cloudflare Workers fleet on one page.</strong><br>Read-only. Free. No code changes.</p>
+<p align="center"><strong>Find the Cloudflare Worker that is about to break, run up a bill or sit exposed.</strong><br>Your whole Workers fleet on one page. Read-only. Free. No code changes.</p>
 
 <p align="center">
   <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/jntegz/ambersight"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare"></a>
@@ -26,7 +26,10 @@ You have a dozen Workers, maybe fifty. One is quietly burning through the free p
 
 The Cloudflare dashboard shows you each Worker on its own. **Ambersight shows you the fleet** and tells you which Workers need attention, and why, in plain sentences.
 
-It runs as **one Worker in your own Cloudflare account**. Every hour it reads your Workers' settings and metrics with a read-only API token, runs a set of checks, and gives you a ranked list of what to fix. Alerts go to e-mail, Slack, Discord, Telegram or any webhook.
+It runs as **one Worker in your own Cloudflare account**. Every hour it reads your Workers' settings and metrics with a read-only API token, runs 39 checks, and gives you a ranked list of what to fix. Alerts go to e-mail, Slack, Discord, Telegram or any webhook.
+
+- **On the Free plan**, the risk is an outage. Past 100,000 requests in a day, every Worker in the account answers with Error 1027 until midnight UTC. Ambersight warns you at 70% and again at 90%, with the time you will hit the limit at today's pace.
+- **On Workers Paid**, the risk is the bill. There is no hard spending cap, so a loop, a retry storm or a crawler is billed for every hour it runs. Ambersight compares each Worker's last hour with its usual hour and alerts you at 5x, for requests, CPU time, subrequests and D1, KV, R2, Queues and Durable Object operations.
 
 ## What it catches
 
@@ -40,6 +43,15 @@ It runs as **one Worker in your own Cloudflare account**. Every hour it reads yo
 | **Deprecations** | a Worker still uses Service Worker syntax, an old compatibility date, the legacy usage model, Workers Sites or redundant flags. |
 | **Exposure** | preview URLs are public, a forgotten `workers.dev` hostname still answers, or (optional) a URL is not behind Cloudflare Access. |
 | **Zombies and orphans** | Workers with no traffic or never deployed; KV, D1, R2 and Queues bound to nothing; routes and service bindings that point at deleted Workers. |
+| **Log costs** | a busy Worker logs every request at 100% sampling (Workers Logs are billed by volume from 1 December 2026), or Logpush is still on. |
+
+The [full list of checks](docs/checks.md) has every threshold, ID and fix.
+
+This is what a finding looks like (demo fleet):
+
+> **Critical · auth-gateway**<br>
+> 6.2% of requests failed in the last 24 hours. It started right after a deploy.<br>
+> *Compare the deploy of 2026-11-09 22:14 UTC with the one before it, or roll back. Open the Worker in Workers Observability and look at the most frequent exception.*
 
 Every finding comes with the evidence, a suggested fix and a link to the Cloudflare docs. Findings from the same check are grouped, so fourteen Workers with public preview URLs are one row with one fix, not fourteen. Critical and warning come first; info-level housekeeping stays folded away. Acknowledge or snooze one finding or a whole group, or stop a check you don't care about.
 
@@ -173,7 +185,7 @@ New database migrations are applied by the deploy script in both cases.
 
 ## Lock it down with Cloudflare Access
 
-The dashboard has its own passphrase login: sessions are random 256-bit IDs (stored only as hashes), cookies are `__Host-` prefixed, `HttpOnly`, `Secure` and `SameSite=Strict`, and requests that do not come from the dashboard's own origin are refused. Five wrong attempts from one address lock that address out for 15 minutes. 50 wrong attempts from any mix of addresses pause sign-in for everyone for 15 minutes, so someone with many addresses can keep you from signing in (your open sessions keep working). Access in front, below, removes that. Changing the passphrase, rotating the `ADMIN_PASSPHRASE` secret or deleting the stored passphrase signs every session out. The `ADMIN_PASSPHRASE` secret must be at least 12 characters. That is a good lock. **Cloudflare Access is a better door**: nobody reaches the sign-in page at all unless they first prove who they are with your e-mail, Google, GitHub or another identity provider. Zero Trust is free for small teams.
+The dashboard has its own passphrase login, with hashed sessions, strict cookies and a lockout after wrong attempts ([details in SECURITY.md](SECURITY.md)). That is a good lock. **Cloudflare Access is a better door**: nobody reaches the sign-in page at all unless they first prove who they are with your e-mail, Google, GitHub or another identity provider. It also stops strangers from triggering the sign-in lockout and keeping you out for 15 minutes. Zero Trust is free for small teams.
 
 Use both. It takes two minutes.
 
@@ -222,6 +234,8 @@ npx wrangler secret put WEBHOOK_URL
 Paste a Slack or Discord incoming-webhook URL, a Telegram `https://api.telegram.org/bot<token>/sendMessage?chat_id=<id>` URL, an ntfy topic URL, or any HTTPS endpoint that accepts JSON. With the Deploy button you can also add it in the Cloudflare dashboard under **ambersight › Settings › Variables and Secrets**.
 
 In **Settings › Alerts**, choose per severity whether alerts go to e-mail, the webhook, both or only the digest. Every channel has a **Send test** button.
+
+[docs/alerts.md](docs/alerts.md) covers the defaults, quiet hours, the digest, per-group digests and the exact message format for each channel.
 
 ## What it costs
 
@@ -283,7 +297,7 @@ Yes. It uses 1 Cron Trigger and well under 1% of the daily request allowance for
 <details>
 <summary><b>Some checks say a dataset is unavailable. Is something broken?</b></summary>
 
-Probably not. A few Cloudflare analytics datasets (for example scheduled invocations and some storage analytics) are not available on every plan or account. Ambersight tries each one, uses what it gets, and tells you what it had to skip. The other checks keep working.
+Probably not. A few Cloudflare analytics datasets (for example scheduled invocations and some storage analytics) are not available on every plan or account. Ambersight tries each one, uses what it gets, and tells you what it had to skip. The other checks keep working. [Troubleshooting](docs/troubleshooting.md) explains each message.
 </details>
 
 <details>
@@ -307,7 +321,7 @@ npx wrangler d1 execute ambersight --remote --command "DELETE FROM settings WHER
 <details>
 <summary><b>Can I tune the checks for my fleet?</b></summary>
 
-Yes. Every check can be switched off, and every threshold can be changed globally, per group or per Worker in **Settings**. Group Workers by name pattern (Cloudflare tags become groups automatically), ignore the ones you do not care about, and export the whole setup as `config.json` to keep it in version control.
+Yes. Every check can be switched off, and every threshold can be changed globally, per group or per Worker in **Settings**. Group Workers by name pattern (Cloudflare tags become groups automatically), ignore the ones you do not care about, and export the whole setup as `config.json` to keep it in version control. Every field is listed in [docs/configuration.md](docs/configuration.md).
 </details>
 
 <details>
@@ -323,6 +337,15 @@ No. It is an independent open-source project built on Cloudflare's public APIs. 
 </details>
 
 ---
+
+## Documentation
+
+- [Checks](docs/checks.md): all 39 checks, with thresholds, IDs and fixes
+- [How it works](docs/how-it-works.md): what one scan does, what it stores and how it stays inside the free plan
+- [Alerts](docs/alerts.md): channels, defaults, the digest and message formats
+- [Configuration](docs/configuration.md): `wrangler.jsonc`, secrets and every `config.json` field
+- [Troubleshooting](docs/troubleshooting.md): scan warnings, token errors, e-mail that does not arrive
+- [Changelog](CHANGELOG.md)
 
 ## Develop
 
@@ -344,15 +367,6 @@ npm test && npm run typecheck
 | `test/` | Vitest: unit tests, plus end-to-end scans against fake API responses with D1 emulated on `node:sqlite` |
 
 Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) first; the short version is *read-only always, free plan first, tests for every check*. To report a security issue, see [SECURITY.md](SECURITY.md).
-
-## Status and roadmap
-
-Ambersight is an **early release (v0.1)**. All checks below are implemented and tested against recorded API responses. A few Cloudflare datasets (scheduled invocations, storage analytics) are still being confirmed on live accounts, so please [open an issue](https://github.com/jntegz/ambersight/issues) if something looks off.
-
-- [x] **Core:** fleet overview, free-budget guard, runaway usage, errors and limits, cron health, digest, Deploy button, setup wizard, Settings
-- [x] **Hygiene:** deprecation radar, exposure audit, zombies and orphaned resources, groups and tags
-- [x] **Insight:** deploy timeline with correlation, webhook channels, per-Worker thresholds, Self-cost panel, update notice
-- [ ] **v1.0:** several accounts in one install, optional GitHub package check
 
 ## License
 
