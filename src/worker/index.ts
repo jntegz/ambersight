@@ -13,7 +13,7 @@ import type { Env, ScanMessage } from './env';
 import { metered } from './meter';
 import { sendTest } from './notify';
 import { buildAccounts, buildOverview, buildSelfCost, buildTimeline, pickAccount } from './overview';
-import { reportHtml, reportPdf } from './report';
+import { reportHtml } from './report';
 import { handleQueueMessage, scanAccount, scheduledRun } from './scheduler';
 import { setupStatus } from './setup';
 import { VERSION } from './version';
@@ -94,22 +94,13 @@ app.post('/api/scan', async (c) => {
   return 'error' in r ? c.json({ error: `The scan failed: ${r.error}` }, 502) : c.json(r);
 });
 
-/** Client report for one account: printable HTML, or a PDF with the Browser Rendering binding. */
+/** Client report for one account: printable HTML. */
 app.get('/api/report', async (c) => {
   const days = c.req.query('days') === '30' ? 30 : 7;
   const { html } = await reportHtml(c.env, await accountOf(c.env, c.req.query('account')), days);
   // The report is static HTML with inline styles: no scripts at all.
   return c.html(html, 200, { 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" });
 });
-app.get('/api/report.pdf', async (c) => {
-  if (!c.env.BROWSER) return c.json({ error: 'PDF reports need the Browser Rendering binding (BROWSER in wrangler.jsonc). Open the HTML report and print it instead.' }, 400);
-  const days = c.req.query('days') === '30' ? 30 : 7;
-  const { html, title } = await reportHtml(c.env, await accountOf(c.env, c.req.query('account')), days);
-  const pdf = await reportPdf(c.env, html);
-  const name = `ambersight-${title.replace(/[^\w.-]+/g, '-').slice(0, 80)}.pdf`;
-  return c.body(pdf, 200, { 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="${name}"` });
-});
-
 /** Choose which accounts to watch (Settings › Accounts). Only accounts the token can see. */
 app.put('/api/accounts', async (c) => {
   if (pinnedAccounts(c.env.CF_ACCOUNT_ID)) return c.json({ error: 'CF_ACCOUNT_ID pins the accounts. Change it in wrangler.jsonc.' }, 400);

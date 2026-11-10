@@ -34,11 +34,8 @@ Each of these is free, commented out in `wrangler.jsonc`, and off until you unco
 | --- | --- | --- |
 | `SCAN_QUEUE` (`queues`) | Every due account is scanned on time, each in its own run with its own subrequest budget. A scan that runs out of budget continues in a follow-up message, up to 20, so large fleets and many zones finish in one go. Create the queue once with `npx wrangler queues create ambersight-scans`. | 10,000 queue operations a day. 14 accounts scanned hourly use about 1,000. |
 | `AI` (`ai`) | A plain-language summary at the top of the digest. Turn it on in **Settings › Digest**. | 10,000 Workers AI neurons a day; one digest uses a few hundred. |
-| `BROWSER` (`browser`) | The client report as a PDF. Without it, the report opens as a page you can print to PDF. | 10 minutes of browser time a day. |
 
 Without the scan queue, one cron run scans one account, so with many accounts each account is scanned about every *accounts × 15 minutes* (for example 2 hours for 8 accounts). **Settings › Accounts** shows the real interval.
-
-The PDF report uses `@cloudflare/playwright`, which makes the Worker bundle about 3.6 MB (720 KB compressed). It is loaded only when a PDF is asked for.
 
 Two other settings in `wrangler.jsonc` matter for security:
 

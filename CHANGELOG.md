@@ -21,10 +21,10 @@ Everything here is built on free Cloudflare features and keeps the read-only tok
 - **Estimated bill** on Workers Paid: month to date, month-end forecast, costliest Workers, and dollars on runaway findings.
 - **Timeline** adds Cloudflare's own notifications, the audit log, Pages deploys, and (opt-in) Cloudflare status incidents; deploy authors are filled in from the audit log.
 - **Digest**: monthly frequency, free-limit headroom, biggest traffic changes, estimated bill, a section per account, client digests per account.
-- **Client report** per account for 7 or 30 days, printable, or as a PDF with Browser Rendering.
+- **Client report** per account for 7 or 30 days, printable (Print saves it as PDF).
 - **Alerts**: an alert after 3 failed scans in a row; an optional note when Cloudflare reports an active incident.
 - **Zones** are read on a cursor, so all of them are covered instead of the first 20.
-- **Optional, free bindings**, all off by default: a scan queue (every account on time, large fleets in one go), a Workers AI digest summary, PDF reports, and Turnstile on sign-in.
+- **Optional, free bindings**, all off by default: a scan queue (every account on time, large fleets in one go), a Workers AI digest summary, and Turnstile on sign-in.
 - The pre-filled token link adds Pages, SSL and Certificates, and DNS Read.
 
 ## 0.1.0 (2026-11-09)

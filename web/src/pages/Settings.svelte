@@ -19,7 +19,7 @@
     workers: string[];
     groups: string[];
     /** Optional bindings present on this install (from the overview). */
-    features?: { queue: boolean; ai: boolean; pdf: boolean; turnstile: boolean } | null;
+    features?: { queue: boolean; ai: boolean; turnstile: boolean } | null;
     /** The account selected in the header, for the Self-cost panel. */
     account?: string | null;
     accountCount?: number;

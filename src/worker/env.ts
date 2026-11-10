@@ -24,8 +24,6 @@ export interface Env {
   SCAN_QUEUE?: Queue<ScanMessage>;
   /** Optional Workers AI binding, for the plain-language digest summary. */
   AI?: AiBinding;
-  /** Optional Browser Rendering binding, for PDF reports. */
-  BROWSER?: Fetcher;
   /** Optional Turnstile on the sign-in page: the site key (var) and secret (Worker secret). */
   TURNSTILE_SITE_KEY?: string;
   TURNSTILE_SECRET?: string;

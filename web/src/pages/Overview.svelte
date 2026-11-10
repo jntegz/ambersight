@@ -149,8 +149,7 @@
             <span class="report muted">
               Report:
               <a href="/api/report?account={a}&days=7" target="_blank" rel="noopener">7 days</a> ·
-              <a href="/api/report?account={a}&days=30" target="_blank" rel="noopener">30 days</a>{#if data.features?.pdf} ·
-                <a href="/api/report.pdf?account={a}&days=30">PDF</a>{/if}
+              <a href="/api/report?account={a}&days=30" target="_blank" rel="noopener">30 days</a>
             </span>
           {/if}
           {#if interval}<span class="next muted">Scans every {interval}</span>{/if}

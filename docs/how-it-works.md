@@ -99,6 +99,6 @@ Ambersight talks to these places, and only these:
 - Only if you turn the check on: `www.cloudflarestatus.com`, Cloudflare's public status page, once a day and when an alert is about to go out. The request carries nothing about your account.
 - Only if you set up Turnstile: `challenges.cloudflare.com`, to check the sign-in challenge.
 
-The optional Workers AI summary and PDF reports run on Workers AI and Browser Rendering in your own account. The AI summary is given the text of the findings and nothing else.
+The optional Workers AI summary runs on Workers AI in your own account and is given the text of the findings and nothing else.
 
 There is no telemetry and no analytics.

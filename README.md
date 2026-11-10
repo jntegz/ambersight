@@ -64,7 +64,7 @@ Every finding comes with the evidence, a suggested fix and a link to the Cloudfl
 
 Also included: several accounts in one install with an "All accounts" view, groups and tags, per-Worker thresholds, include and exclude rules, a daily, weekly or monthly digest in your time zone (with a client digest per account), a printable client report, quiet hours, and a **Self-cost** panel that shows exactly what Ambersight itself uses.
 
-**Optional and free**, each off until you uncomment it in `wrangler.jsonc`: a scan queue that scans every account on time, a plain-language digest summary from Workers AI, PDF reports through Browser Rendering, and Cloudflare Turnstile on the sign-in page. See [configuration.md](docs/configuration.md#optional-bindings).
+**Optional and free**, each off until you uncomment it in `wrangler.jsonc`: a scan queue that scans every account on time, a plain-language digest summary from Workers AI, and Cloudflare Turnstile on the sign-in page. See [configuration.md](docs/configuration.md#optional-bindings).
 
 ## Screenshots
 
@@ -257,7 +257,7 @@ Nothing, on the Workers Free plan. With 30 Workers:
 - **Requests:** about 100 cron runs plus a few hundred dashboard API calls a day. That is well under 1% of the 100,000 daily requests. Page views are static assets and do not count.
 - **Subrequests:** at most 42 per scan, within the free limit of 50. A typical hourly scan uses fewer than 10.
 - **D1 and CPU:** about 10 D1 calls per scan and a small fraction of the free allowance. Its own logs are off.
-- **Optional extras:** the scan queue, Workers AI summary and PDF reports each stay well inside their own free allowances; see [configuration.md](docs/configuration.md#optional-bindings).
+- **Optional extras:** the scan queue and the Workers AI summary each stay well inside their own free allowances; see [configuration.md](docs/configuration.md#optional-bindings).
 
 The **Self-cost** panel in Settings shows the measured numbers for your account.
 

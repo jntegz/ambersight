@@ -130,7 +130,7 @@ With the optional Workers AI binding (`AI` in `wrangler.jsonc`), turn on **Setti
 
 In **Settings › Accounts**, give an account one or more digest recipients. They get that account's own digest, and nothing about your other accounts, on the digest schedule. Each address must also be in `DIGEST_TO`.
 
-For a one-off report, the overview links to a printable report of the account for the last 7 or 30 days. With the optional Browser Rendering binding (`BROWSER`), it also comes as a PDF.
+For a one-off report, the overview links to a printable report of the account for the last 7 or 30 days. Your browser's Print saves it as a PDF.
 
 ### A digest per group
 

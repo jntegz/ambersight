@@ -1,5 +1,5 @@
 // Tier 3: the scan queue, the richer digest (monthly, client digests, AI summary), the client
-// report, Turnstile on sign-in, and nodejs_compat as a redundant flag.
+// report (HTML), Turnstile on sign-in, and nodejs_compat as a redundant flag.
 // SPDX-License-Identifier: AGPL-3.0-only
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { defaultConfig, parseConfig } from '../src/shared/config';
@@ -8,7 +8,7 @@ import { setAccountState, setSettings, upsertAccount } from '../src/worker/db';
 import { aiSummary, digestData, renderDigest } from '../src/worker/digest';
 import type { Env, ScanMessage } from '../src/worker/env';
 import { deprecationFindings } from '../src/worker/hygiene';
-import { reportHtml, reportPdf } from '../src/worker/report';
+import { reportHtml } from '../src/worker/report';
 import { handleQueueMessage, MAX_CONTINUATIONS, scheduledRun } from '../src/worker/scheduler';
 import { runScan } from '../src/worker/scan';
 import { digestDue } from '../src/worker/time';
@@ -132,9 +132,6 @@ describe('client report', () => {
     expect(html).toContain('Report for 2026-10-10 to 2026-11-09.');
     expect(html).toContain('Last 30 days');
     expect(html).not.toContain('<script');
-  });
-  it('needs the Browser Rendering binding for a PDF', async () => {
-    await expect(reportPdf(newEnv(), '<p>x</p>')).rejects.toThrow(/Browser Rendering/);
   });
 });
 
