@@ -209,7 +209,7 @@
   <Setup onDone={load} onSignedOut={signedOut} onUnauthorized={() => signedOut()} />
 {:else if data}
   <header class="top">
-    <div class="top-inner">
+    <div class="top-inner" class:multi>
       <a class="brand" href="#/" aria-label="Ambersight overview"><Logo size={28} /><span class="wordmark">ambersight</span></a>
       {#if multi && accounts}
         <label class="acct-switch" title="Account">
@@ -224,7 +224,7 @@
       {/if}
       <nav class="nav" aria-label="Main">
         {#each NAV as n (n.route)}
-          <a href={n.href} aria-current={route === n.route ? 'page' : undefined}><Icon name={n.icon} size={16} /><span>{n.label}</span></a>
+          <a href={n.href} aria-label={n.label} title={n.label} aria-current={route === n.route ? 'page' : undefined}><Icon name={n.icon} size={16} /><span>{n.label}</span></a>
         {/each}
       </nav>
 
@@ -400,7 +400,10 @@
     appearance: none; height: 100%; max-width: 220px; padding: 0 30px 0 14px; border: 0; border-radius: 999px;
     background: transparent; color: inherit; font: 500 14px/1 var(--font); cursor: pointer; text-overflow: ellipsis;
   }
-  .acct-switch :global(svg) { position: absolute; right: 10px; pointer-events: none; color: var(--ink-muted); transform: rotate(90deg); }
+  .acct-switch :global(svg) { position: absolute; right: 10px; pointer-events: none; color: var(--ink-muted); }
+  /* Header controls keep their size; the search box gives way first. */
+  .scan, .theme, .icon-btn, .acct-switch { flex: none; }
+  .scan-btn { white-space: nowrap; }
 
   .divider { width: 1px; height: 20px; margin: 0 4px; background: var(--line); }
 
@@ -449,6 +452,26 @@
   .banner-text a { font-weight: 600; }
   .banner .icon-btn { width: 30px; height: 30px; border-color: transparent; background: transparent; }
 
+  /* With the account switcher in the header (max 1200 px wide), the nav is icon-only. */
+  .multi .nav a span { display: none; }
+  .multi .nav a { padding: 0 10px; }
+  .multi .nav { margin-left: 8px; }
+  /* The last-scan time is also in the footer: it gives way first. */
+  @media (max-width: 1100px) {
+    .scanned { display: none; }
+    .multi .acct-switch select { max-width: 150px; }
+  }
+  @media (max-width: 900px) {
+    .multi { flex-wrap: wrap; }
+    .multi .search { order: 3; width: 100%; margin: 0; }
+    .multi .search-field { flex: 1; }
+    .multi .search input, .multi .search:focus-within input, .multi .search.filled input { width: 100%; }
+  }
+  @media (max-width: 1320px) {
+    .search input { width: 150px; }
+    .search:focus-within input, .search.filled input { width: 200px; }
+    .acct-switch select { max-width: 180px; }
+  }
   @media (max-width: 1100px) {
     .search input { width: 130px; }
     .search:focus-within input, .search.filled input { width: 180px; }
@@ -460,8 +483,8 @@
   }
   @media (max-width: 760px) {
     .top-inner { flex-wrap: wrap; padding: 10px 16px; }
-    .acct-switch { order: 2; margin-left: 0; }
-    .acct-switch select { max-width: 150px; }
+    .acct-switch { order: 2; margin-left: 0; width: 100%; }
+    .acct-switch select { max-width: none; width: 100%; }
     .scanned, .divider { display: none; }
     .search { order: 3; width: 100%; margin: 0; }
     .search-field { flex: 1; }

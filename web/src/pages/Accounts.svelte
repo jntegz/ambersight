@@ -32,7 +32,7 @@
     <p>
       {#if accounts}
         {num(accounts.length)} accounts · {num(totals.workers)} Workers ·
-        {#if totals.critical}<strong class="crit">{num(totals.critical)} critical</strong>{:else}no critical findings{/if}{#if totals.warning} · {num(totals.warning)} warnings{/if}
+        {#if totals.critical}<strong class="crit">{num(totals.critical)} critical</strong>{:else}no critical findings{/if}{#if totals.warning}{' '}· {num(totals.warning)} warnings{/if}
       {:else}Loading…{/if}
     </p>
   </div>
@@ -57,7 +57,7 @@
             <span class="c info"><Icon name="info" size={14} /> {num(a.findings.info)}</span>
           </span>
           <span class="stats muted">
-            {num(a.workers)} Workers · {compact(a.requestsToday)} requests today{#if a.requestsToday} · {pct(a.errorsToday / Math.max(1, a.requestsToday))} errors{/if}
+            {num(a.workers)} Workers · {compact(a.requestsToday)} requests today{#if a.requestsToday}{' '}· {pct(a.errorsToday / Math.max(1, a.requestsToday))} errors{/if}
           </span>
           {#if a.budgetShare != null}
             <span class="bar" aria-label="Free request budget used today: {pct(a.budgetShare)}"><span style="width: {Math.min(100, a.budgetShare * 100)}%"></span></span>
@@ -76,6 +76,8 @@
   .grid { list-style: none; margin: 0; padding: 0; display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
   .acct {
     width: 100%; display: grid; gap: 10px; padding: 16px 18px; text-align: left; cursor: pointer;
+    /* Undo the global button centring: this is a card. */
+    justify-content: stretch; justify-items: stretch; align-items: start; height: auto;
     border: 1px solid var(--line); border-left: 4px solid var(--line); font: inherit; color: var(--ink);
     transition: border-color 150ms, transform 100ms, box-shadow 150ms;
   }

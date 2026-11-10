@@ -28,7 +28,7 @@
         <li class={tone(q.share)}>
           <div class="row-head">
             <span>{q.label}</span>
-            <span class="num"><strong>{compact(q.used)}</strong><span class="muted"> / {compact(q.limit)}</span></span>
+            <span class="num"><strong>{compact(q.used)}</strong><span class="muted">&nbsp;/ {compact(q.limit)}</span></span>
           </div>
           <div class="track" role="meter" aria-label="{q.label} used today" aria-valuemin="0" aria-valuemax={q.limit} aria-valuenow={q.used}>
             <span class="fill" style="width: {Math.min(1, q.share) * 100}%"></span>
@@ -50,7 +50,7 @@
         <li class={tone(s.share)}>
           <div class="row-head">
             <span class="mono-ish">{s.label}</span>
-            <span class="num"><strong>{size(s.bytes)}</strong><span class="muted"> / {size(s.limit!)}</span></span>
+            <span class="num"><strong>{size(s.bytes)}</strong><span class="muted">&nbsp;/ {size(s.limit!)}</span></span>
           </div>
           <div class="track" role="meter" aria-label="{s.label} storage used" aria-valuemin="0" aria-valuemax={s.limit} aria-valuenow={s.bytes}>
             <span class="fill" style="width: {Math.min(1, s.share ?? 0) * 100}%"></span>

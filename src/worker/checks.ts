@@ -307,7 +307,7 @@ export function idleLoopFindings(input: CheckInput): Finding[] {
     out.push(finding(
       'usage', r.script, `idle-loop-${r.kind}-${r.resource}`, input.plan === 'paid' ? 'critical' : 'warning',
       `${names[r.kind]} on ${r.label} ran at about ${fmt(perHour)} an hour for 3 hours while its Workers had almost no requests.${cost >= 0.01 ? ` That is about $${cost.toFixed(2)} an hour.` : ''}`,
-      { resource: r.label, opsPerHour: perHour, requests3h: r.recentRequests.reduce((a, b) => a + b, 0) },
+      { resource: r.label, opsPerHour: perHour, requestsInThoseHours: r.recentRequests.reduce((a, b) => a + b, 0) },
       'Work with nothing driving it is usually a loop: a Durable Object alarm that always sets the next alarm, a Queue consumer that fails and retries every message, or a cron that never finishes. Find it before it runs all night.',
       'https://developers.cloudflare.com/durable-objects/api/alarms/',
     ));

@@ -316,6 +316,8 @@
         <div class="rows">
           {#if status?.accountPinned}
             <div class="row"><div class="row-text"><p class="hint"><span class="mono">CF_ACCOUNT_ID</span> in <span class="mono">wrangler.jsonc</span> pins the accounts. Change the list there.</p></div></div>
+          {:else if status && !status.tokenActive}
+            <div class="row"><div class="row-text"><p class="hint">Ambersight cannot list the accounts this token can see: {status.tokenError ?? 'the token does not work'}.</p></div></div>
           {:else if status && status.accounts.length > 1}
             <div class="row">
               <div class="row-text"><p class="label">Accounts to watch <span class="now">Applies right away</span></p><p class="hint">The token can see {status.accounts.length} accounts. History of an account you untick is kept until it ages out.</p></div>

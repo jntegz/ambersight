@@ -47,7 +47,7 @@
   {/if}
 
   <p class="muted foot">
-    {#if cost.partialMonth}Ambersight started tracking after the 1st, so the start of the month is extrapolated. {/if}R2 operations, logs and Cloudflare products outside Workers are not included. Check <strong>Billing › Billable Usage</strong> for the real number.
+    {#if cost.partialMonth}Ambersight started tracking after the 1st, so the start of the month is extrapolated.{" "}{/if}R2 operations, logs and Cloudflare products outside Workers are not included. Check <strong>Billing › Billable Usage</strong> for the real number.
   </p>
 </section>
 
