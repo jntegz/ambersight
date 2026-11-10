@@ -36,7 +36,7 @@
       <span class="tick" style="left: {warn * 100}%"></span>
       <span class="tick" style="left: {crit * 100}%"></span>
     </div>
-    <div class="scale muted" aria-hidden="true"><span style="left: {warn * 100}%">Warn {Math.round(warn * 100)}%</span><span class:end={crit > 0.8} style="left: {crit * 100}%">Critical {Math.round(crit * 100)}%</span></div>
+    <div class="scale muted" aria-hidden="true"><span style="left: {warn * 100}%"><em>Warn </em>{Math.round(warn * 100)}%</span><span class:end={crit > 0.8} style="left: {crit * 100}%"><em>Critical </em>{Math.round(crit * 100)}%</span></div>
   </div>
 
   <dl class="facts">
@@ -80,6 +80,9 @@
   .scale span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
   /* Near the right edge, end the label at its tick so it never wraps or overflows. */
   .scale span.end { transform: translateX(calc(-100% + 6px)); }
+  .scale em { font-style: normal; }
+  /* On narrow screens the two labels would overlap; the numbers alone are enough. */
+  @media (max-width: 640px) { .scale em { display: none; } }
   .facts { display: flex; gap: 24px; margin: 0; flex-wrap: wrap; }
   .facts dt { font-size: 12px; line-height: 16px; }
   .facts dd { margin: 2px 0 0; display: flex; align-items: center; gap: 6px; font-size: 15px; font-weight: 600; }

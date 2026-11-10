@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /** Keep in sync with package.json. Shown in the UI and compared with the latest GitHub release. */
 export const VERSION = '0.1.0';
-export const REPO = 'jntegz/ambersight-dev';
+export const REPO = 'jntegz/ambersight';
 
 /** True if `latest` (e.g. "v0.2.0") is a newer semver than `current`. */
 export function isNewer(latest: string, current: string): boolean {

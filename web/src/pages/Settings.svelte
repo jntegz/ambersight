@@ -430,8 +430,7 @@
         {#if status?.passphraseFromSettings === false}
           <p class="hint">The passphrase currently comes from the <span class="mono">ADMIN_PASSPHRASE</span> secret. Changing it here stores a new one that takes over.</p>
         {/if}
-        <PassphraseForm onSubmit={changePassphrase} />
-        <p class="hint">Changing the passphrase signs out every session, including this one.</p>
+        <PassphraseForm onSubmit={changePassphrase} note="Signs out every session, including this one." />
       </section>
 
       <!-- Self-cost -->

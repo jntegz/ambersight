@@ -237,7 +237,7 @@
 
     <footer class="foot muted">
       Last scan {timeAgo(data.lastScanAt)} · Read-only · Runs in your own Cloudflare account ·
-      <a href="https://github.com/jntegz/ambersight-dev" target="_blank" rel="noopener noreferrer">Source (AGPL-3.0)</a>
+      <a href="https://github.com/jntegz/ambersight" target="_blank" rel="noopener noreferrer">Source (AGPL-3.0)</a>
       <br />Created by <a href="https://jantegze.com" target="_blank" rel="noopener">Jan Tegze</a>
     </footer>
   </main>
