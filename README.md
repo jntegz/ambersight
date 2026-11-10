@@ -27,6 +27,12 @@ It never deploys, edits or deletes anything, never adds code to your Workers, an
 
 ## Deploy
 
+You need a Cloudflare account and a GitHub (or GitLab) account. It takes about five minutes.
+
+1. **Create the read-only token.** [Open the pre-filled token form](https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22account_analytics%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22d1%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_r2%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22queues%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_routes%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22billing%22%2C%22type%22%3A%22read%22%7D%5D&accountId=*&zoneId=all&name=Ambersight%20read-only), check that every permission says *Read*, click **Continue to summary**, then **Create Token**. Copy the token; Cloudflare shows it only once.
+2. **Click the button** below. Sign in, pick a repository name, and paste the token and a passphrase of your choice into the two fields.
+3. **Open your dashboard** when the deploy finishes (the link is on the deploy page), sign in with your passphrase, and follow the three setup steps. The first scan starts on its own.
+
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/jntegz/ambersight-dev)
 
 The button forks this repo into your GitHub account, creates the D1 database, applies migrations and deploys. It asks for two secrets:
