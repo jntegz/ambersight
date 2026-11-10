@@ -2,6 +2,7 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { TOKEN_TEMPLATE_URL } from '../../../src/shared/token';
   import type { SetupStatus } from '../../../src/shared/types';
   import Icon from '../components/Icon.svelte';
   import Logo from '../components/Logo.svelte';
@@ -109,6 +110,10 @@
             <div>
               <p class="c-title">{status.tokenActive ? 'Token is active' : 'Token does not work'}</p>
               <p class="muted">{status.tokenActive ? `Account: ${status.accountName ?? status.accountId ?? 'unknown'}${status.detectedPlan ? ` · ${status.detectedPlan} plan` : ''}` : (status.tokenError ?? 'Set CF_API_TOKEN with wrangler secret put and deploy again.')}</p>
+              {#if status.tokenError}
+                <a class="token-link" href={TOKEN_TEMPLATE_URL} target="_blank" rel="noopener noreferrer"><Icon name="key" size={16} /> Create a read-only token <Icon name="external" size={14} /></a>
+                <p class="muted next-step">Then update the <span class="mono">CF_API_TOKEN</span> secret in your Worker's settings and press Check again.</p>
+              {/if}
             </div>
           </li>
           {#if status.tokenActive}
@@ -128,6 +133,7 @@
                   <p class="c-title">Token can make changes</p>
                   <p class="muted">Ambersight never writes, but a leaked token could. Create a new token with read permissions only, then run <span class="mono">wrangler secret put CF_API_TOKEN</span>.</p>
                   <div class="chips">{#each status.writeScopes as s (s)}<span class="tag-chip bad-chip">{s}</span>{/each}</div>
+                  <a class="token-link" href={TOKEN_TEMPLATE_URL} target="_blank" rel="noopener noreferrer"><Icon name="key" size={16} /> Create a read-only token <Icon name="external" size={14} /></a>
                 </div>
               </li>
             {:else}
@@ -231,6 +237,14 @@
   .checks .muted strong { color: var(--ink); }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   .bad-chip { background: color-mix(in srgb, var(--critical) 12%, transparent); color: var(--critical); }
+  .token-link {
+    display: inline-flex; align-items: center; gap: 6px; margin-top: 10px; padding: 0 12px; height: 34px;
+    border-radius: var(--radius-control); background: var(--button); color: var(--button-text);
+    font-size: 13px; font-weight: 600; text-decoration: none;
+  }
+  .token-link:hover { background: var(--button-hover); color: var(--button-text); }
+  .next-step { margin-top: 8px; font-size: 13px; line-height: 18px; }
+  .next-step .mono { font-size: 12px; color: var(--ink); }
   .confirm { display: inline-flex; align-items: center; gap: 8px; margin-top: 10px; font-weight: 500; cursor: pointer; }
   .confirm input { width: 16px; height: 16px; margin: 0; accent-color: var(--button); }
 
