@@ -7,12 +7,13 @@ import { csrf } from 'hono/csrf';
 import { HTTPException } from 'hono/http-exception';
 import { ConfigError, defaultConfig, isValidTimeZone, parseConfig } from '../shared/config';
 import { attemptFailed, attemptSucceeded, hasSession, hashPassphrase, checkPassphrase, login, logout, reserveAttempt } from './auth';
-import { configFrom, getSettings, recordUsage, setSettings } from './db';
+import { CfClient } from './cf';
+import { configFrom, getSettings, listAccounts, pinnedAccounts, recordUsage, setSettings, upsertAccount } from './db';
 import type { Env } from './env';
 import { metered } from './meter';
 import { sendTest } from './notify';
-import { buildOverview, buildSelfCost, buildTimeline } from './overview';
-import { runScan } from './scan';
+import { buildAccounts, buildOverview, buildSelfCost, buildTimeline, pickAccount } from './overview';
+import { scanAccount, scheduledRun } from './scheduler';
 import { setupStatus } from './setup';
 import { VERSION } from './version';
 
@@ -63,11 +64,44 @@ app.use('/api/*', async (c, next) => {
   await next();
 });
 
-app.get('/api/overview', async (c) => c.json(await buildOverview(c.env)));
-app.get('/api/timeline', async (c) => c.json(await buildTimeline(c.env, Math.min(30, Math.max(1, Number(c.req.query('days')) || 14)))));
-app.get('/api/self-cost', async (c) => c.json(await buildSelfCost(c.env)));
+/** The account a request names with ?account=, or the first watched one. */
+async function accountOf(env: Env, requested: string | undefined): Promise<string> {
+  const { account } = await pickAccount(env, requested);
+  if (!account) throw new HTTPException(400, { message: 'No account is set up yet.' });
+  return account.id;
+}
 
-app.post('/api/scan', async (c) => c.json(await runScan(c.env, new Date(), { force: true })));
+app.get('/api/overview', async (c) => c.json(await buildOverview(c.env, c.req.query('account'))));
+app.get('/api/accounts', async (c) => c.json(await buildAccounts(c.env)));
+app.get('/api/timeline', async (c) =>
+  c.json(await buildTimeline(c.env, await accountOf(c.env, c.req.query('account')), Math.min(30, Math.max(1, Number(c.req.query('days')) || 14)))),
+);
+app.get('/api/self-cost', async (c) => c.json(await buildSelfCost(c.env, await accountOf(c.env, c.req.query('account')))));
+
+app.post('/api/scan', async (c) => {
+  const body = await c.req.json<{ account?: unknown }>().catch(() => ({}) as { account?: unknown });
+  const account = await accountOf(c.env, typeof body.account === 'string' ? body.account : undefined);
+  const r = await scanAccount(c.env, account, new Date(), true);
+  return 'error' in r ? c.json({ error: `The scan failed: ${r.error}` }, 502) : c.json(r);
+});
+
+/** Choose which accounts to watch (Settings › Accounts). Only accounts the token can see. */
+app.put('/api/accounts', async (c) => {
+  if (pinnedAccounts(c.env.CF_ACCOUNT_ID)) return c.json({ error: 'CF_ACCOUNT_ID pins the accounts. Change it in wrangler.jsonc.' }, 400);
+  const body = await c.req.json<{ ids?: unknown }>().catch(() => ({}) as { ids?: unknown });
+  const ids = Array.isArray(body.ids) ? [...new Set(body.ids.filter((x): x is string => typeof x === 'string'))].slice(0, 50) : [];
+  if (!ids.length) return c.json({ error: 'Watch at least one account.' }, 400);
+  const visible = await CfClient.accounts(c.env.CF_API_TOKEN);
+  const byId = new Map(visible.map((a) => [a.id, a]));
+  const unknown = ids.filter((id) => !byId.has(id));
+  if (unknown.length) return c.json({ error: 'The token cannot see one of those accounts.' }, 400);
+  const known = await listAccounts(c.env.DB, true);
+  await c.env.DB.batch([
+    ...ids.map((id) => upsertAccount(c.env.DB, { id, name: byId.get(id)!.name, enabled: true })),
+    ...known.filter((a) => !ids.includes(a.id)).map((a) => upsertAccount(c.env.DB, { id: a.id, enabled: false })),
+  ]);
+  return c.json(await buildAccounts(c.env));
+});
 
 app.post('/api/findings/:id/acknowledge', async (c) => {
   await c.env.DB.prepare(`UPDATE findings SET status = 'acknowledged' WHERE id = ?1 AND status = 'open'`).bind(c.req.param('id')).run();
@@ -108,10 +142,15 @@ app.get('/api/setup', async (c) =>
 );
 
 app.post('/api/setup/complete', async (c) => {
-  const body = await c.req.json<{ timeZone?: unknown; confirmReadOnly?: unknown; accountId?: unknown }>().catch(() => ({}) as Record<string, unknown>);
-  const chosen = typeof body.accountId === 'string' && body.accountId ? body.accountId : undefined;
+  const body = await c.req.json<{ timeZone?: unknown; confirmReadOnly?: unknown; accountId?: unknown; accountIds?: unknown }>().catch(() => ({}) as Record<string, unknown>);
+  // accountIds: every account to watch. accountId: older single-account wizards.
+  const list = Array.isArray(body.accountIds)
+    ? body.accountIds.filter((x): x is string => typeof x === 'string' && x.length > 0).slice(0, 50)
+    : typeof body.accountId === 'string' && body.accountId ? [body.accountId] : [];
+  const chosen = list[0];
   const status = await setupStatus(c.env, { accountId: chosen });
-  if (chosen && !status.accountPinned && status.accountId !== chosen) return c.json({ error: 'The token cannot see that account.' }, 400);
+  const visible = new Set(status.accounts.map((a) => a.id));
+  if (!status.accountPinned && list.some((id) => !visible.has(id))) return c.json({ error: 'The token cannot see that account.' }, 400);
   if (!status.tokenActive) return c.json({ error: status.tokenError ?? 'The API token is not active.' }, 400);
   if (status.writeScopes?.length) {
     return c.json({ error: `The token has write permissions (${status.writeScopes.join(', ')}). Create a read-only token and update CF_API_TOKEN.` }, 400);
@@ -123,14 +162,21 @@ app.post('/api/setup/complete', async (c) => {
   const config = settings.config ? configFrom(settings) : defaultConfig();
   if (typeof body.timeZone === 'string' && isValidTimeZone(body.timeZone)) config.timeZone = body.timeZone;
   if (status.detectedPlan === 'paid' && config.scanIntervalMinutes === 60 && !settings.config) config.scanIntervalMinutes = 15;
-  await setSettings(c.env.DB, {
-    setup_done: '1',
-    config: JSON.stringify(config),
-    account_id: status.accountId ?? '',
-    ...(status.detectedPlan ? { detected_plan: status.detectedPlan } : {}),
-  }).run();
-  // First scan runs in the background; the overview fills in as results arrive.
-  c.executionCtx.waitUntil(runScan(c.env, new Date(), { force: true }).catch((e) => console.error(e)));
+  const pinned = pinnedAccounts(c.env.CF_ACCOUNT_ID);
+  const watch = pinned ?? (list.length ? list : status.accountId ? [status.accountId] : []);
+  const names = new Map(status.accounts.map((a) => [a.id, a.name]));
+  // Plan detection for the other accounts: one Billing Read call each.
+  const plans = await Promise.all(
+    watch.map((id) => (id === status.accountId ? Promise.resolve(status.detectedPlan) : new CfClient(c.env.CF_API_TOKEN, id).detectPlan())),
+  );
+  const known = await listAccounts(c.env.DB, true);
+  await c.env.DB.batch([
+    setSettings(c.env.DB, { setup_done: '1', config: JSON.stringify(config) }),
+    ...watch.map((id, i) => upsertAccount(c.env.DB, { id, name: names.get(id) ?? null, enabled: true, detectedPlan: plans[i] })),
+    ...known.filter((a) => !watch.includes(a.id)).map((a) => upsertAccount(c.env.DB, { id: a.id, enabled: false })),
+  ]);
+  // First scan of the first account runs in the background; the scheduler picks up the others.
+  if (watch[0]) c.executionCtx.waitUntil(scanAccount(c.env, watch[0], new Date(), true).catch((e) => console.error(e)));
   return c.json({ ok: true });
 });
 
@@ -186,6 +232,7 @@ app.post('/api/passphrase', async (c) => {
 app.notFound((c) => c.json({ error: 'Not found.' }, 404));
 app.onError((err, c) => {
   if (err instanceof HTTPException && err.status === 403) return c.json({ error: 'Request refused: it did not come from this dashboard.' }, 403);
+  if (err instanceof HTTPException && err.status === 400) return c.json({ error: err.message }, 400);
   console.error(err);
   return c.json({ error: 'Something went wrong. Check the Worker logs.' }, 500);
 });
@@ -193,6 +240,6 @@ app.onError((err, c) => {
 export default {
   fetch: app.fetch,
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(runScan(env).then((r) => (r.skipped ? undefined : console.log(JSON.stringify({ scan: r })))));
+    ctx.waitUntil(scheduledRun(env).then((r) => (r ? console.log(JSON.stringify({ scan: r })) : undefined)));
   },
 } satisfies ExportedHandler<Env>;

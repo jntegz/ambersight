@@ -30,8 +30,10 @@
   let pending = $state<{ current: string; next: string } | null>(null);
   let finishing = $state(false);
   let finishError = $state('');
-  /** Account chosen in step 1 when the token can see several. */
+  /** Account whose token check is shown: the first ticked one. */
   let account = $state('');
+  /** Accounts ticked in step 1 when the token can see several. */
+  let picked = $state<string[]>([]);
 
   async function check() {
     checking = true;
@@ -39,6 +41,7 @@
     try {
       status = await api.setup(account || undefined);
       account = status.accountId ?? '';
+      if (!picked.length) picked = status.watched.length ? [...status.watched] : account ? [account] : [];
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) onUnauthorized();
       else loadError = (e as Error).message;
@@ -48,7 +51,7 @@
   }
   onMount(check);
 
-  const tokenOk = $derived(!!status?.tokenActive && (status.writeScopes?.length === 0 || (status.writeScopes == null && confirmReadOnly)));
+  const tokenOk = $derived(!!status?.tokenActive && (status.writeScopes?.length === 0 || (status.writeScopes == null && confirmReadOnly)) && (status.accounts.length <= 1 || status.accountPinned || picked.length > 0));
 
   async function finish() {
     finishing = true;
@@ -57,7 +60,7 @@
       await api.completeSetup({
         timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         ...(status?.writeScopes == null && confirmReadOnly ? { confirmReadOnly: true as const } : {}),
-        ...(status?.accountId ? { accountId: status.accountId } : {}),
+        ...(picked.length ? { accountIds: picked } : status?.accountId ? { accountId: status.accountId } : {}),
       });
       if (pending) {
         try {
@@ -125,10 +128,17 @@
               <Icon name="warning" size={20} />
               <div>
                 <p class="c-title">This token can see {status.accounts.length} accounts</p>
-                <p class="muted">Choose the one to watch. To watch another account later, deploy a second Ambersight there.</p>
-                <select class="select-input account-select" aria-label="Account to watch" bind:value={account} onchange={check} disabled={checking}>
-                  {#each status.accounts as a (a.id)}<option value={a.id}>{a.name}</option>{/each}
-                </select>
+                <p class="muted">Tick the ones to watch. One install scans them all in turn; you can change the list later in <strong>Settings › Accounts</strong>.</p>
+                <fieldset class="account-list" disabled={checking}>
+                  <legend class="sr-only">Accounts to watch</legend>
+                  {#each status.accounts as a (a.id)}
+                    <label class="account-option">
+                      <input type="checkbox" value={a.id} bind:group={picked} />
+                      <span>{a.name}</span>
+                    </label>
+                  {/each}
+                </fieldset>
+                {#if !picked.length}<p class="error-text">Tick at least one account.</p>{/if}
               </div>
             </li>
           {/if}
@@ -233,7 +243,9 @@
 </main>
 
 <style>
-  .account-select { margin-top: 8px; max-width: 360px; }
+  .account-list { margin: 8px 0 0; padding: 0; border: 0; display: grid; gap: 6px; }
+  .account-option { display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; }
+  .account-option input { width: 16px; height: 16px; accent-color: var(--accent); }
   .setup { min-height: 100vh; display: grid; grid-template-columns: minmax(240px, 320px) minmax(0, 620px); gap: 48px; justify-content: center; align-items: start; padding: 72px 24px; }
   .rail { position: sticky; top: 72px; display: grid; gap: 20px; }
   .brand { display: flex; align-items: center; gap: 10px; }

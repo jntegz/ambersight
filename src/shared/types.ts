@@ -47,6 +47,12 @@ export interface BudgetStatus {
 }
 
 export interface Overview {
+  /** The account shown; null before setup. */
+  account: { id: string; label: string; plan: 'free' | 'paid' } | null;
+  /** How many accounts this install watches. The account switcher appears above 1. */
+  accountCount: number;
+  /** Scans that failed in a row for this account, and the last error. */
+  scanHealth: { failures: number; lastError: string | null; lastAttemptAt: string | null };
   lastScanAt: string | null;
   setupDone: boolean;
   update: { current: string; latest: string; url: string } | null;
@@ -55,6 +61,22 @@ export interface Overview {
   findings: Finding[];
   workers: WorkerSummary[];
   groups: string[];
+}
+
+/** One row of the "All accounts" view. */
+export interface AccountSummary {
+  id: string;
+  label: string;
+  plan: 'free' | 'paid';
+  workers: number;
+  findings: Record<Severity, number>;
+  requestsToday: number;
+  errorsToday: number;
+  /** Share of the free daily request limit; null on Workers Paid. */
+  budgetShare: number | null;
+  lastScanAt: string | null;
+  scanFailures: number;
+  lastError: string | null;
 }
 
 export interface TimelineEntry {
@@ -84,7 +106,9 @@ export interface SetupStatus {
   passphraseFromSettings: boolean;
   /** Every account the token can see (up to 20); the wizard offers a choice when there are several. */
   accounts: { id: string; name: string }[];
-  /** CF_ACCOUNT_ID is set, so the account cannot be chosen in the UI. */
+  /** Accounts already watched (chosen at setup or pinned). */
+  watched: string[];
+  /** CF_ACCOUNT_ID is set, so the accounts cannot be chosen in the UI. */
   accountPinned: boolean;
   /** This request came through Cloudflare Access. Display only: never used to grant access. */
   behindAccess: boolean;

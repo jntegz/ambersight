@@ -10,7 +10,7 @@ import type { Finding } from '../shared/types';
 import { CfClient, CronRunsTruncated, type ApiScript, type ApiWorker, type CronRunRow, type Deployment, type InventoryItem, type ResourceOps, type ScriptSettings } from './cf';
 import { median, runChecks, type CronStats, type HourPoint, type ResourceStats, type WorkerMeta, type WorkerStats } from './checks';
 import { countRuns } from './cron';
-import { configFrom, getSettings, hourFloor, isoHour, planFrom, recordUsage, setSettings, utcMidnight, type Settings } from './db';
+import { configFrom, getAccountState, getSettings, hourFloor, isoHour, planFrom, recordUsage, setAccountState, setSettings, upsertAccount, utcMidnight, type Settings } from './db';
 import type { Env } from './env';
 import type { InventoryFacts } from './hygiene';
 import { metered } from './meter';
@@ -34,12 +34,18 @@ export interface ScanResult {
   detailRemaining?: number;
 }
 
-export async function runScan(rawEnv: Env, now = new Date(), opts: { force?: boolean } = {}): Promise<ScanResult> {
+/** Scans one account. The scheduler (scheduler.ts) decides which account is due. */
+export async function runScan(rawEnv: Env, now = new Date(), opts: { account: string; force?: boolean }): Promise<ScanResult> {
   const started = Date.now();
   const { db, meter } = metered(rawEnv.DB);
   const env = { ...rawEnv, DB: db };
-  const settings = await getSettings(db);
-  const config = configFrom(settings);
+  const accountId = opts.account;
+  const [global, settings, accountRow] = await Promise.all([
+    getSettings(db),
+    getAccountState(db, accountId),
+    db.prepare('SELECT detected_plan FROM accounts WHERE id = ?1').bind(accountId).first<{ detected_plan: string | null }>(),
+  ]);
+  const config = configFrom(global);
 
   // The cron fires every 15 minutes; honour the configured interval.
   if (!opts.force && settings.last_scan_at && now.getTime() - new Date(settings.last_scan_at).getTime() < (config.scanIntervalMinutes - 2) * 60_000) {
@@ -48,9 +54,9 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { force?: boo
 
   const warnings: string[] = [];
   const stamp = now.toISOString();
-  const accountId = env.CF_ACCOUNT_ID || settings.account_id || (await CfClient.resolveAccountId(env.CF_API_TOKEN));
   const cf = new CfClient(env.CF_API_TOKEN, accountId);
-  const plan = planFrom(config, settings, env.PLAN);
+  let detectedPlan = accountRow?.detected_plan ?? null;
+  const plan = planFrom(config, detectedPlan, env.PLAN, accountId);
   const budget = BUDGET[plan];
   const left = () => budget - cf.calls;
 
@@ -64,7 +70,8 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { force?: boo
   ]);
   const inventory = mergeInventory(scripts, apiWorkers ?? [], stamp);
   const { results: known } = await db
-    .prepare(`SELECT name, detail_checked_at, bindings LIKE '%durable_object_namespace%' AS has_do FROM workers`)
+    .prepare(`SELECT name, detail_checked_at, bindings LIKE '%durable_object_namespace%' AS has_do FROM workers WHERE account = ?1`)
+    .bind(accountId)
     .all<{ name: string; detail_checked_at: string | null; has_do: number | null }>();
   const knownNames = new Set(known.map((k) => k.name));
   const currentNames = new Set(inventory.map((w) => w.name));
@@ -76,7 +83,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { force?: boo
     : [];
 
   // 2. Metrics since the last stored hour (at most 48 h back).
-  const lastHourRow = await db.prepare('SELECT MAX(hour) AS h FROM metrics_hourly').first<{ h: string | null }>();
+  const lastHourRow = await db.prepare('SELECT MAX(hour) AS h FROM metrics_hourly WHERE account = ?1').bind(accountId).first<{ h: string | null }>();
   const since = lastHourRow?.h
     ? new Date(Math.max(new Date(lastHourRow.h).getTime() - HOUR, now.getTime() - 48 * HOUR))
     : new Date(hourFloor(now).getTime() - 48 * HOUR);
@@ -118,7 +125,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { force?: boo
   // 4. Storage and Durable Object operations, for kinds the account actually has.
   let resourceOps: ResourceOps[] = [];
   if (config.modules.usage) {
-    const { results: kindRows } = await db.prepare(`SELECT DISTINCT kind FROM resources WHERE kind IN ('kv','d1','r2','queues')`).all<{ kind: ResourceOps['kind'] }>();
+    const { results: kindRows } = await db.prepare(`SELECT DISTINCT kind FROM resources WHERE account = ?1 AND kind IN ('kv','d1','r2','queues')`).bind(accountId).all<{ kind: ResourceOps['kind'] }>();
     const kinds = kindRows.map((k) => k.kind);
     if (known.some((k) => k.has_do) || inventory.some((w) => w.handlers.includes('alarm'))) kinds.push('do');
     const failedBefore = new Set((settings.ops_unavailable ?? '').split(',').filter(Boolean));
@@ -169,7 +176,14 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { force?: boo
       await step(['access'], 'Access applications', () => cf.accessApps());
       if (refreshedKinds.has('access')) settings.access_listed_at = stamp;
     }
-    if (config.updateCheck) await checkForUpdate(settings).catch((e: Error) => warnings.push(`Update check failed: ${e.message}`));
+    if (config.plan === 'auto' && !config.accounts[accountId]?.plan) {
+      detectedPlan = (await cf.detectPlan()) ?? detectedPlan;
+    }
+    // The update check is install-wide: one account's inventory run does it for all.
+    if (config.updateCheck && now.getTime() - new Date(global.update_checked_at ?? 0).getTime() > 20 * HOUR) {
+      await checkForUpdate(global).catch((e: Error) => warnings.push(`Update check failed: ${e.message}`));
+      global.update_checked_at = stamp;
+    }
   }
 
   // 6. Per-Worker detail on a rotating cursor: settings (bindings), deployments, schedules.
@@ -200,49 +214,51 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { force?: boo
   }
   if (detailRemaining) warnings.push(`${detailRemaining} Workers will get their details on the next runs.`);
 
-  // 7. Write everything in one batch.
+  // 7. Write everything in one batch. ?1 is always the account.
   const j = JSON.stringify;
+  const A = accountId;
   const writes: D1PreparedStatement[] = [
     db.prepare(
-      `INSERT INTO workers (name, has_modules, compatibility_date, compat_flags, handlers, usage_model, created_on, modified_on,
+      `INSERT INTO workers (account, name, has_modules, compatibility_date, compat_flags, handlers, usage_model, created_on, modified_on,
          deployed_on, workers_dev, previews_enabled, logs_enabled, sampling_rate, logpush, tags, last_seen, first_seen)
-       SELECT json_extract(value,'$.name'), json_extract(value,'$.has_modules'), json_extract(value,'$.compatibility_date'),
+       SELECT ?1, json_extract(value,'$.name'), json_extract(value,'$.has_modules'), json_extract(value,'$.compatibility_date'),
          json_extract(value,'$.compat_flags'), json_extract(value,'$.handlers'), json_extract(value,'$.usage_model'),
          json_extract(value,'$.created_on'), json_extract(value,'$.modified_on'), json_extract(value,'$.deployed_on'),
          json_extract(value,'$.workers_dev'), json_extract(value,'$.previews_enabled'), json_extract(value,'$.logs_enabled'),
          json_extract(value,'$.sampling_rate'), json_extract(value,'$.logpush'), json_extract(value,'$.tags'),
          json_extract(value,'$.last_seen'), json_extract(value,'$.last_seen')
-       FROM json_each(?1) WHERE true
-       ON CONFLICT(name) DO UPDATE SET has_modules=excluded.has_modules, compatibility_date=excluded.compatibility_date,
+       FROM json_each(?2) WHERE true
+       ON CONFLICT(account, name) DO UPDATE SET has_modules=excluded.has_modules, compatibility_date=excluded.compatibility_date,
          compat_flags=COALESCE(excluded.compat_flags, workers.compat_flags),
          handlers=excluded.handlers, usage_model=excluded.usage_model, created_on=excluded.created_on,
          modified_on=excluded.modified_on, deployed_on=excluded.deployed_on, workers_dev=excluded.workers_dev,
          previews_enabled=excluded.previews_enabled, logs_enabled=excluded.logs_enabled,
          sampling_rate=excluded.sampling_rate, logpush=excluded.logpush, tags=excluded.tags, last_seen=excluded.last_seen`,
-    ).bind(j(inventory.map((w) => ({ ...w, handlers: j(w.handlers), tags: j(w.tags), compat_flags: w.compat_flags ? j(w.compat_flags) : null })))),
-    db.prepare('DELETE FROM workers WHERE last_seen <> ?1').bind(stamp),
+    ).bind(A, j(inventory.map((w) => ({ ...w, handlers: j(w.handlers), tags: j(w.tags), compat_flags: w.compat_flags ? j(w.compat_flags) : null })))),
+    db.prepare('DELETE FROM workers WHERE account = ?1 AND last_seen <> ?2').bind(A, stamp),
     db.prepare(
-      `INSERT INTO metrics_hourly (script, hour, requests, errors, subrequests, cpu_p99, cpu_time_us)
-       SELECT json_extract(value,'$.script'), json_extract(value,'$.hour'), json_extract(value,'$.requests'),
+      `INSERT INTO metrics_hourly (account, script, hour, requests, errors, subrequests, cpu_p99, cpu_time_us)
+       SELECT ?1, json_extract(value,'$.script'), json_extract(value,'$.hour'), json_extract(value,'$.requests'),
          json_extract(value,'$.errors'), json_extract(value,'$.subrequests'), json_extract(value,'$.cpuP99'), json_extract(value,'$.cpuTimeUs')
-       FROM json_each(?1) WHERE true
-       ON CONFLICT(script, hour) DO UPDATE SET requests=excluded.requests, errors=excluded.errors,
+       FROM json_each(?2) WHERE true
+       ON CONFLICT(account, script, hour) DO UPDATE SET requests=excluded.requests, errors=excluded.errors,
          subrequests=excluded.subrequests, cpu_p99=excluded.cpu_p99, cpu_time_us=excluded.cpu_time_us`,
-    ).bind(j(hourly)),
+    ).bind(A, j(hourly)),
     db.prepare(
-      `INSERT INTO metrics_hourly (script, hour, exceeded)
-       SELECT json_extract(value,'$.script'), json_extract(value,'$.hour'), json_extract(value,'$.count')
-       FROM json_each(?1) WHERE true
-       ON CONFLICT(script, hour) DO UPDATE SET exceeded=excluded.exceeded`,
-    ).bind(j(exceeded)),
+      `INSERT INTO metrics_hourly (account, script, hour, exceeded)
+       SELECT ?1, json_extract(value,'$.script'), json_extract(value,'$.hour'), json_extract(value,'$.count')
+       FROM json_each(?2) WHERE true
+       ON CONFLICT(account, script, hour) DO UPDATE SET exceeded=excluded.exceeded`,
+    ).bind(A, j(exceeded)),
     // Detail: bindings, flags, schedules, deployments.
     db.prepare(
       `UPDATE workers SET
          bindings = COALESCE(json_extract(d.value,'$.bindings'), workers.bindings),
          compat_flags = COALESCE(json_extract(d.value,'$.flags'), workers.compat_flags),
-         detail_checked_at = ?2
-       FROM json_each(?1) AS d WHERE workers.name = json_extract(d.value,'$.name')`,
+         detail_checked_at = ?3
+       FROM json_each(?2) AS d WHERE workers.account = ?1 AND workers.name = json_extract(d.value,'$.name')`,
     ).bind(
+      A,
       j(details.map((d) => ({
         name: d.name,
         bindings: d.settings ? j([...d.settings.bindings, ...d.settings.tail_consumers.map((t) => ({ type: 'tail_consumer', name: t, target: t }))]) : null,
@@ -251,75 +267,80 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { force?: boo
       stamp,
     ),
     db.prepare(
-      `INSERT INTO schedules (script, crons, checked_at)
-       SELECT json_extract(value,'$.script'), json_extract(value,'$.crons'), ?2 FROM json_each(?1) WHERE true
-       ON CONFLICT(script) DO UPDATE SET crons=excluded.crons, checked_at=excluded.checked_at`,
-    ).bind(j(details.filter((d) => d.crons).map((d) => ({ script: d.name, crons: j(d.crons) }))), stamp),
-    db.prepare(`DELETE FROM schedules WHERE script NOT IN (SELECT value FROM json_each(?1))`).bind(j(scheduled)),
+      `INSERT INTO schedules (account, script, crons, checked_at)
+       SELECT ?1, json_extract(value,'$.script'), json_extract(value,'$.crons'), ?3 FROM json_each(?2) WHERE true
+       ON CONFLICT(account, script) DO UPDATE SET crons=excluded.crons, checked_at=excluded.checked_at`,
+    ).bind(A, j(details.filter((d) => d.crons).map((d) => ({ script: d.name, crons: j(d.crons) }))), stamp),
+    db.prepare(`DELETE FROM schedules WHERE account = ?1 AND script NOT IN (SELECT value FROM json_each(?2))`).bind(A, j(scheduled)),
     db.prepare(
-      `INSERT INTO deployments (script, id, created_on, author, message, source)
-       SELECT json_extract(value,'$.script'), json_extract(value,'$.id'), json_extract(value,'$.created_on'),
+      `INSERT INTO deployments (account, script, id, created_on, author, message, source)
+       SELECT ?1, json_extract(value,'$.script'), json_extract(value,'$.id'), json_extract(value,'$.created_on'),
          json_extract(value,'$.author'), json_extract(value,'$.message'), json_extract(value,'$.source')
-       FROM json_each(?1) WHERE true
-       ON CONFLICT(script, id) DO NOTHING`,
-    ).bind(j(details.flatMap((d) => (d.deployments ?? []).map((x) => ({ ...x, script: d.name }))))),
-    db.prepare(`INSERT INTO fleet_events (at, kind, script) SELECT json_extract(value,'$.at'), json_extract(value,'$.kind'), json_extract(value,'$.script') FROM json_each(?1) WHERE true`).bind(j(fleetEvents)),
+       FROM json_each(?2) WHERE true
+       ON CONFLICT(account, script, id) DO NOTHING`,
+    ).bind(A, j(details.flatMap((d) => (d.deployments ?? []).map((x) => ({ ...x, script: d.name }))))),
+    db.prepare(`INSERT INTO fleet_events (account, at, kind, script) SELECT ?1, json_extract(value,'$.at'), json_extract(value,'$.kind'), json_extract(value,'$.script') FROM json_each(?2) WHERE true`).bind(A, j(fleetEvents)),
   ];
   if (cronRuns) {
     writes.push(
       db.prepare(
-        `INSERT INTO cron_runs (script, hour, runs, failures, cpu_max_ms)
-         SELECT json_extract(value,'$.script'), json_extract(value,'$.hour'), json_extract(value,'$.runs'),
+        `INSERT INTO cron_runs (account, script, hour, runs, failures, cpu_max_ms)
+         SELECT ?1, json_extract(value,'$.script'), json_extract(value,'$.hour'), json_extract(value,'$.runs'),
            json_extract(value,'$.failures'), json_extract(value,'$.cpuMaxMs')
-         FROM json_each(?1) WHERE true
-         ON CONFLICT(script, hour) DO UPDATE SET runs=excluded.runs, failures=excluded.failures, cpu_max_ms=excluded.cpu_max_ms`,
-      ).bind(j(cronRuns)),
+         FROM json_each(?2) WHERE true
+         ON CONFLICT(account, script, hour) DO UPDATE SET runs=excluded.runs, failures=excluded.failures, cpu_max_ms=excluded.cpu_max_ms`,
+      ).bind(A, j(cronRuns)),
     );
   }
   if (resourceOps.length) {
     writes.push(
       db.prepare(
-        `INSERT INTO resource_hourly (kind, resource, hour, ops)
-         SELECT json_extract(value,'$.kind'), json_extract(value,'$.resource'), json_extract(value,'$.hour'), json_extract(value,'$.ops')
-         FROM json_each(?1) WHERE true
-         ON CONFLICT(kind, resource, hour) DO UPDATE SET ops=excluded.ops`,
-      ).bind(j(resourceOps)),
+        `INSERT INTO resource_hourly (account, kind, resource, hour, ops)
+         SELECT ?1, json_extract(value,'$.kind'), json_extract(value,'$.resource'), json_extract(value,'$.hour'), json_extract(value,'$.ops')
+         FROM json_each(?2) WHERE true
+         ON CONFLICT(account, kind, resource, hour) DO UPDATE SET ops=excluded.ops`,
+      ).bind(A, j(resourceOps)),
     );
   }
   if (refreshDue) {
     writes.push(
-      db.prepare(`DELETE FROM resources WHERE kind IN (SELECT value FROM json_each(?1))`)
-        .bind(j([...refreshedKinds].filter((k) => !(k === 'route' && routeZones)))),
+      db.prepare(`DELETE FROM resources WHERE account = ?1 AND kind IN (SELECT value FROM json_each(?2))`)
+        .bind(A, j([...refreshedKinds].filter((k) => !(k === 'route' && routeZones)))),
       ...(routeZones
-        ? [db.prepare(`DELETE FROM resources WHERE kind = 'route' AND json_extract(extra, '$.zone') IN (SELECT value FROM json_each(?1))`).bind(j(routeZones))]
+        ? [db.prepare(`DELETE FROM resources WHERE account = ?1 AND kind = 'route' AND json_extract(extra, '$.zone') IN (SELECT value FROM json_each(?2))`).bind(A, j(routeZones))]
         : []),
       db.prepare(
-        `INSERT INTO resources (kind, id, name, script, extra)
-         SELECT json_extract(value,'$.kind'), json_extract(value,'$.id'), json_extract(value,'$.name'), json_extract(value,'$.script'), json_extract(value,'$.extra')
-         FROM json_each(?1) WHERE true ON CONFLICT(kind, id) DO NOTHING`,
-      ).bind(j(refreshed.filter((r) => refreshedKinds.has(r.kind)).map((r) => ({ ...r, extra: r.extra ? j(r.extra) : null })))),
+        `INSERT INTO resources (account, kind, id, name, script, extra)
+         SELECT ?1, json_extract(value,'$.kind'), json_extract(value,'$.id'), json_extract(value,'$.name'), json_extract(value,'$.script'), json_extract(value,'$.extra')
+         FROM json_each(?2) WHERE true ON CONFLICT(account, kind, id) DO NOTHING`,
+      ).bind(A, j(refreshed.filter((r) => refreshedKinds.has(r.kind)).map((r) => ({ ...r, extra: r.extra ? j(r.extra) : null })))),
       // Retention, once per inventory refresh.
-      ...retentionDeletes(db, now, config.retentionDays),
+      ...retentionDeletes(db, A, now, config.retentionDays),
+      upsertAccount(db, { id: A, detectedPlan }, now),
     );
   }
   writes.push(
-    setSettings(db, {
-      account_id: accountId,
+    setAccountState(db, A, {
       ...(settings.cpu_sum ? { cpu_sum: settings.cpu_sum } : {}),
       ...(settings.cron_cpu ? { cron_cpu: settings.cron_cpu } : {}),
       ...(settings.ops_checked ? { ops_unavailable: settings.ops_unavailable ?? '', ops_checked: settings.ops_checked } : {}),
-      ...(settings.latest_version ? { latest_version: settings.latest_version, latest_url: settings.latest_url ?? '' } : {}),
       ...(refreshDue ? { inventory_at: stamp, workers_subdomain: subdomain ?? '' } : {}),
       ...(settings.access_listed_at ? { access_listed_at: settings.access_listed_at } : {}),
       ...(settings.first_metrics_at ? {} : { first_metrics_at: stamp }),
       ...(config.modules.cron && scheduled.length && cronRetryDue ? { cron_dataset: cronRuns || cronTruncated ? 'available' : 'unavailable', cron_dataset_checked: stamp } : {}),
     }),
   );
+  if (global.update_checked_at === stamp) {
+    writes.push(setSettings(db, {
+      update_checked_at: stamp,
+      ...(global.latest_version ? { latest_version: global.latest_version, latest_url: global.latest_url ?? '' } : {}),
+    }));
+  }
   await db.batch(writes);
 
   // 8. Checks.
   // Judge crons only on runs fetched in this scan: stored rows from an earlier scan lack the recent hours.
-  const facts = await loadFacts(db, now, config, settings, cronRuns ? { from: cronFrom, to: cronTo } : null, subdomain);
+  const facts = await loadFacts(db, accountId, now, config, settings, cronRuns ? { from: cronFrom, to: cronTo } : null, subdomain);
   // No runs at all for any scheduled Worker, Ambersight's own cron included, means Cloudflare
   // returned no data, not that every cron stopped. Say so instead of raising a missed run per Worker.
   const cronDataEmpty = (facts.crons?.length ?? 0) > 0 && (cronRuns ?? []).every((r) => r.runs === 0);
@@ -342,16 +363,17 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { force?: boo
   // While cron checks are paused (too many runs to count, or no data at all), keep existing cron
   // findings as they are rather than resolving them as if every cron had recovered.
   const keepModules = cronTruncated || cronDataEmpty ? ['cron'] : [];
-  await saveFindings(db, muted.size ? findings.filter((f) => !muted.has(checkOf(f))) : findings, stamp, keepModules);
+  await saveFindings(db, accountId, muted.size ? findings.filter((f) => !muted.has(checkOf(f))) : findings, stamp, keepModules);
 
   // 9. Alerts and digest, then the run's own cost.
   await sendAlerts(env, now, config).catch((e: Error) => warnings.push(`Alerts failed: ${e.message}`));
   await db.batch([
-    setSettings(db, {
+    setAccountState(db, A, {
       last_scan_at: stamp,
       last_scan_calls: String(cf.calls),
       last_scan_ms: String(Date.now() - started),
       last_scan_warnings: j(warnings),
+      scan_failures: '0',
     }),
     recordUsage(db, now, { cronRuns: 1, subrequests: cf.calls, rowsRead: meter.rowsRead, rowsWritten: meter.rowsWritten }),
   ]);
@@ -368,17 +390,18 @@ export function inventoryDue(now: Date, last: string | null, config: Config): bo
   return config.inventoryIntervalHours % 24 !== 0 || now.getUTCHours() === config.inventoryHourUtc;
 }
 
-function retentionDeletes(db: D1Database, now: Date, days: number): D1PreparedStatement[] {
+function retentionDeletes(db: D1Database, account: string, now: Date, days: number): D1PreparedStatement[] {
   const cutoff = new Date(now.getTime() - days * DAY);
   const hour = isoHour(cutoff);
   const iso = cutoff.toISOString();
   return [
-    db.prepare('DELETE FROM metrics_hourly WHERE hour < ?1').bind(hour),
-    db.prepare('DELETE FROM cron_runs WHERE hour < ?1').bind(hour),
-    db.prepare('DELETE FROM resource_hourly WHERE hour < ?1').bind(hour),
-    db.prepare(`DELETE FROM findings WHERE status = 'resolved' AND last_seen < ?1`).bind(iso),
-    db.prepare('DELETE FROM deployments WHERE created_on < ?1').bind(iso),
-    db.prepare('DELETE FROM fleet_events WHERE at < ?1').bind(iso),
+    db.prepare('DELETE FROM metrics_hourly WHERE account = ?1 AND hour < ?2').bind(account, hour),
+    db.prepare('DELETE FROM cron_runs WHERE account = ?1 AND hour < ?2').bind(account, hour),
+    db.prepare('DELETE FROM resource_hourly WHERE account = ?1 AND hour < ?2').bind(account, hour),
+    db.prepare(`DELETE FROM findings WHERE account = ?1 AND status = 'resolved' AND last_seen < ?2`).bind(account, iso),
+    db.prepare('DELETE FROM deployments WHERE account = ?1 AND created_on < ?2').bind(account, iso),
+    db.prepare('DELETE FROM fleet_events WHERE account = ?1 AND at < ?2').bind(account, iso),
+    // Install-wide tables: any account's refresh may tidy them.
     db.prepare('DELETE FROM usage_daily WHERE day < ?1').bind(iso.slice(0, 10)),
     db.prepare('DELETE FROM sessions WHERE expires_at < ?1').bind(now.toISOString()),
   ];
@@ -482,7 +505,7 @@ export interface Facts {
 
 /** Everything the checks need, from D1, in one batch. Out-of-scope Workers are left out. */
 export async function loadFacts(
-  db: D1Database, now: Date, config: Config, settings: Settings, cronWindow: { from: Date; to: Date } | null, subdomain: string | null,
+  db: D1Database, account: string, now: Date, config: Config, settings: Settings, cronWindow: { from: Date; to: Date } | null, subdomain: string | null,
 ): Promise<Facts> {
   const lastFullHour = isoHour(new Date(hourFloor(now).getTime() - HOUR));
   const dayAgo = isoHour(new Date(now.getTime() - DAY));
@@ -493,18 +516,18 @@ export async function loadFacts(
   const cronTo = cronWindow ? isoHour(cronWindow.to) : lastFullHour;
 
   const [workersR, histR, windowR, todayR, schedR, runsR, resR, opsR, depR] = await db.batch([
-    db.prepare('SELECT * FROM workers'),
+    db.prepare('SELECT * FROM workers WHERE account = ?1').bind(account),
     db.prepare(
       `SELECT script, hour, requests, errors, subrequests, cpu_time_us, exceeded, cpu_p99 FROM metrics_hourly
-       WHERE hour >= ?1 ORDER BY hour`,
-    ).bind(weekAgo),
-    db.prepare('SELECT script, SUM(requests) AS requests FROM metrics_hourly WHERE hour >= ?1 GROUP BY script').bind(zombieFrom),
-    db.prepare('SELECT COALESCE(SUM(requests),0) AS n FROM metrics_hourly WHERE hour >= ?1').bind(isoHour(utcMidnight(now))),
-    db.prepare('SELECT script, crons FROM schedules'),
-    db.prepare('SELECT script, hour, runs, failures, cpu_max_ms FROM cron_runs WHERE hour >= ?1 AND hour < ?2').bind(cronFrom, cronTo),
-    db.prepare('SELECT kind, id, name, script, extra FROM resources'),
-    db.prepare('SELECT kind, resource, hour, ops FROM resource_hourly WHERE hour >= ?1').bind(weekAgo),
-    db.prepare('SELECT script, id, created_on FROM deployments WHERE created_on >= ?1').bind(deployFrom),
+       WHERE account = ?1 AND hour >= ?2 ORDER BY hour`,
+    ).bind(account, weekAgo),
+    db.prepare('SELECT script, SUM(requests) AS requests FROM metrics_hourly WHERE account = ?1 AND hour >= ?2 GROUP BY script').bind(account, zombieFrom),
+    db.prepare('SELECT COALESCE(SUM(requests),0) AS n FROM metrics_hourly WHERE account = ?1 AND hour >= ?2').bind(account, isoHour(utcMidnight(now))),
+    db.prepare('SELECT script, crons FROM schedules WHERE account = ?1').bind(account),
+    db.prepare('SELECT script, hour, runs, failures, cpu_max_ms FROM cron_runs WHERE account = ?1 AND hour >= ?2 AND hour < ?3').bind(account, cronFrom, cronTo),
+    db.prepare('SELECT kind, id, name, script, extra FROM resources WHERE account = ?1').bind(account),
+    db.prepare('SELECT kind, resource, hour, ops FROM resource_hourly WHERE account = ?1 AND hour >= ?2').bind(account, weekAgo),
+    db.prepare('SELECT script, id, created_on FROM deployments WHERE account = ?1 AND created_on >= ?2').bind(account, deployFrom),
   ]);
 
   const allRows = workersR.results as unknown as WorkerRow[];
@@ -688,12 +711,15 @@ export function cronStats(
   return { name, expected, observed, failures, consecutiveBad, cpuMaxMs };
 }
 
-async function saveFindings(db: D1Database, findings: Finding[], stamp: string, keepModules: string[] = []): Promise<void> {
-  const rows = findings.map((f) => ({ ...f, evidence: JSON.stringify(f.evidence), docsUrl: f.docsUrl ?? null }));
+/** Stored finding IDs carry the account, so the same check on a same-named Worker in two accounts stays apart. */
+export const findingKey = (account: string, id: string) => `${account}/${id}`;
+
+async function saveFindings(db: D1Database, account: string, findings: Finding[], stamp: string, keepModules: string[] = []): Promise<void> {
+  const rows = findings.map((f) => ({ ...f, id: findingKey(account, f.id), evidence: JSON.stringify(f.evidence), docsUrl: f.docsUrl ?? null }));
   await db.batch([
     db.prepare(
-      `INSERT INTO findings (id, script, module, severity, code, message, evidence, action, docs_url, first_seen, last_seen, status)
-       SELECT json_extract(value,'$.id'), json_extract(value,'$.script'), json_extract(value,'$.module'),
+      `INSERT INTO findings (id, account, script, module, severity, code, message, evidence, action, docs_url, first_seen, last_seen, status)
+       SELECT json_extract(value,'$.id'), ?3, json_extract(value,'$.script'), json_extract(value,'$.module'),
          json_extract(value,'$.severity'), json_extract(value,'$.code'), json_extract(value,'$.message'),
          json_extract(value,'$.evidence'), json_extract(value,'$.action'), json_extract(value,'$.docsUrl'), ?2, ?2, 'open'
        FROM json_each(?1) WHERE true
@@ -708,10 +734,10 @@ async function saveFindings(db: D1Database, findings: Finding[], stamp: string, 
            WHEN findings.status = 'snoozed' AND findings.snooze_until < excluded.last_seen THEN 'open'
            ELSE findings.status END,
          severity=excluded.severity`,
-    ).bind(JSON.stringify(rows), stamp),
+    ).bind(JSON.stringify(rows), stamp, account),
     db.prepare(
       `UPDATE findings SET status = 'resolved'
-       WHERE last_seen <> ?1 AND status <> 'resolved' AND module NOT IN (SELECT value FROM json_each(?2))`,
-    ).bind(stamp, JSON.stringify(keepModules)),
+       WHERE account = ?3 AND last_seen <> ?1 AND status <> 'resolved' AND module NOT IN (SELECT value FROM json_each(?2))`,
+    ).bind(stamp, JSON.stringify(keepModules), account),
   ]);
 }

@@ -77,6 +77,17 @@ export interface Config {
   timeZone: string;
   retentionDays: number;
   updateCheck: boolean;
+  /** Per-account settings, keyed by Cloudflare account ID. */
+  accounts: Record<string, AccountSettings>;
+}
+
+export interface AccountSettings {
+  /** Name shown in the dashboard and in alerts, instead of the Cloudflare account name. */
+  label?: string;
+  /** Overrides the global plan for this account. */
+  plan?: PlanSetting;
+  /** Extra digest for this account (a client), sent only to addresses also listed in DIGEST_TO. */
+  digestTo?: string[];
 }
 
 export const DEFAULT_THRESHOLDS: Thresholds = {
@@ -115,6 +126,7 @@ export function defaultConfig(): Config {
     timeZone: 'UTC',
     retentionDays: 30,
     updateCheck: true,
+    accounts: {},
   };
 }
 
@@ -136,6 +148,8 @@ export class ConfigError extends Error {}
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const NAME = /^[\w.:\- *]{1,100}$/;
+const ACCOUNT_ID = /^[\w-]{1,64}$/;
+const LABEL = /^[^\r\n\u2028\u2029<>]{1,60}$/;
 const EMAIL = /^[^\s@,<>"]+@[^\s@,<>"]+\.[^\s@,<>"]+$/;
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 
@@ -228,6 +242,25 @@ export function parseConfig(input: unknown): Config {
     groupRecipients[g] = strList(list, `digest.groupRecipients.${g}`, EMAIL);
   }
 
+  const accounts: Config['accounts'] = {};
+  if (!isObj(v.accounts)) throw new ConfigError('accounts must be an object.');
+  for (const [id, a] of Object.entries(v.accounts)) {
+    if (!ACCOUNT_ID.test(id)) throw new ConfigError(`accounts key "${id}" is not a Cloudflare account ID.`);
+    if (!isObj(a)) throw new ConfigError(`accounts.${id} must be an object.`);
+    const out: AccountSettings = {};
+    if (a.label != null) {
+      // The label ends up in e-mail subjects and chat messages: one line, no markup.
+      if (typeof a.label !== 'string' || !LABEL.test(a.label)) throw new ConfigError(`accounts.${id}.label must be one line of up to 60 characters.`);
+      out.label = a.label;
+    }
+    if (a.plan != null) {
+      if (!['auto', 'free', 'paid'].includes(a.plan as string)) throw new ConfigError(`accounts.${id}.plan must be auto, free or paid.`);
+      out.plan = a.plan as PlanSetting;
+    }
+    if (a.digestTo != null) out.digestTo = strList(a.digestTo, `accounts.${id}.digestTo`, EMAIL);
+    accounts[id] = out;
+  }
+
   if (typeof v.timeZone !== 'string' || !isValidTimeZone(v.timeZone)) throw new ConfigError('timeZone must be an IANA time zone such as Europe/Prague.');
   if (typeof v.updateCheck !== 'boolean') throw new ConfigError('updateCheck must be true or false.');
 
@@ -258,6 +291,7 @@ export function parseConfig(input: unknown): Config {
     timeZone: v.timeZone,
     retentionDays: Math.round(num(v.retentionDays, [7, 90], 'retentionDays')),
     updateCheck: v.updateCheck,
+    accounts,
   };
 }
 

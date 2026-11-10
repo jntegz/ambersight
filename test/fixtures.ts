@@ -57,6 +57,8 @@ export interface FakeOptions {
   /** Reject the cpuTimeUs field like an older schema would. */
   rejectCpuSum?: boolean;
   tokenPolicies?: { name: string }[] | null;
+  /** Extra accounts the token can see, each with its own fleet. acc1 always uses `fleet`. */
+  fleets?: Record<string, { workers: unknown[]; scripts: unknown[] } | 'fail'>;
 }
 
 export function fakeFetch(opts: FakeOptions = {}) {
@@ -85,8 +87,16 @@ export function fakeFetch(opts: FakeOptions = {}) {
       }
       return new Response(JSON.stringify({ data: null, errors: [{ message: 'dataset not available' }] }));
     }
-    const a = '/accounts/acc1';
-    const m = path.match(/^\/accounts\/acc1\/workers\/scripts\/([^/]+)\/(settings|deployments|schedules)$/);
+    // Which account this call is for: acc1 is the default fleet, others come from opts.fleets.
+    const acct = path.match(/^\/accounts\/([^/]+)\//)?.[1] ?? 'acc1';
+    const other = acct !== 'acc1' ? opts.fleets?.[acct] : undefined;
+    if (other === 'fail') return new Response(JSON.stringify({ success: false, errors: [{ message: 'Authentication error' }] }), { status: 403 });
+    const a = `/accounts/${acct}`;
+    if (other) {
+      if (path === `${a}/workers/workers`) return ok(other.workers);
+      if (path === `${a}/workers/scripts`) return ok(other.scripts);
+    }
+    const m = path.match(/^\/accounts\/[^/]+\/workers\/scripts\/([^/]+)\/(settings|deployments|schedules)$/);
     if (m) {
       const name = decodeURIComponent(m[1]);
       if (m[2] === 'settings') return ok(fleet.settings[name] ?? { bindings: [] });
@@ -94,7 +104,7 @@ export function fakeFetch(opts: FakeOptions = {}) {
       return ok({ schedules: name === 'cron-job' ? [{ cron: '0 * * * *' }] : [] });
     }
     switch (path) {
-      case '/accounts': return ok([{ id: 'acc1', name: 'Test account' }]);
+      case '/accounts': return ok([{ id: 'acc1', name: 'Test account' }, ...Object.keys(opts.fleets ?? {}).map((id) => ({ id, name: `Account ${id}` }))]);
       case '/user/tokens/verify': return ok({ id: 'tok1', status: 'active' });
       case '/user/tokens/tok1':
         return opts.tokenPolicies === null

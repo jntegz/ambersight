@@ -14,6 +14,8 @@ const MAX_DIGEST_ROWS = 25;
 
 interface Row {
   id: string;
+  /** Account label, set only when the install watches more than one account. */
+  account?: string;
   script: string;
   severity: Severity;
   message: string;
@@ -31,7 +33,7 @@ export interface DigestExtras {
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 const label = (s: Severity) => (s === 'critical' ? 'Critical' : s === 'warning' ? 'Warning' : 'Info');
-const who = (script: string) => (script === '*' ? 'Account' : script);
+const who = (script: string, account?: string) => (account ? `${account} · ${script === '*' ? 'Account' : script}` : script === '*' ? 'Account' : script);
 const n = (x: number) => x.toLocaleString('en-US');
 const FONT = 'Inter,Arial,sans-serif';
 
@@ -50,7 +52,7 @@ export function render(title: string, intro: string, rows: Row[], extras?: Diges
   const items = rows
     .map(
       (r) => `<tr><td style="padding:12px 0;border-bottom:1px solid #EADFD5">
-        <div style="font:600 14px/20px ${FONT};color:${r.severity === 'critical' ? '#C2361B' : r.severity === 'warning' ? '#B3440B' : '#6E6259'}">${label(r.severity)} · ${esc(who(r.script))}</div>
+        <div style="font:600 14px/20px ${FONT};color:${r.severity === 'critical' ? '#C2361B' : r.severity === 'warning' ? '#B3440B' : '#6E6259'}">${label(r.severity)} · ${esc(who(r.script, r.account))}</div>
         <div style="font:400 15px/22px ${FONT};color:#2B211B">${esc(r.message)}</div>
         <div style="font:400 13px/20px ${FONT};color:#6E6259">${esc(r.action)}</div>
         ${r.evidence ? `<div style="font:400 12px/18px ${FONT};color:#6E6259">${esc(evidenceText(r.evidence))}</div>` : ''}</td></tr>`,
@@ -81,7 +83,7 @@ export function render(title: string, intro: string, rows: Row[], extras?: Diges
     </table></body></html>`;
   const text = [
     title, intro, '',
-    ...rows.map((r) => `[${r.severity}] ${who(r.script)}: ${r.message}\n  ${r.action}`),
+    ...rows.map((r) => `[${r.severity}] ${who(r.script, r.account)}: ${r.message}\n  ${r.action}`),
     ...(extras
       ? [
           '', `This week: ${n(extras.requests)} requests, ${n(extras.errors)} errors`,
@@ -115,7 +117,7 @@ function chatSafe(s: string, kind: ReturnType<typeof webhookKind>): string {
 
 export async function sendWebhook(url: string, title: string, rows: Row[]): Promise<void> {
   const kind = webhookKind(url);
-  const lines = rows.slice(0, 20).map((r) => `• [${label(r.severity)}] ${chatSafe(`${who(r.script)}: ${r.message}`, kind)}`);
+  const lines = rows.slice(0, 20).map((r) => `• [${label(r.severity)}] ${chatSafe(`${who(r.script, r.account)}: ${r.message}`, kind)}`);
   const text = [title, ...lines].join('\n').slice(0, 3900);
   const json = (body: unknown) => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const init: RequestInit =
@@ -123,7 +125,7 @@ export async function sendWebhook(url: string, title: string, rows: Row[]): Prom
     : kind === 'discord' ? json({ content: text.slice(0, 1900), allowed_mentions: { parse: [] } })
     : kind === 'telegram' ? json({ chat_id: new URL(url).searchParams.get('chat_id'), text })
     : kind === 'ntfy' ? { method: 'POST', headers: { Title: title.slice(0, 200) }, body: lines.join('\n') || title }
-    : json({ title, findings: rows.map((r) => ({ id: r.id, worker: r.script, severity: r.severity, message: r.message, action: r.action })) });
+    : json({ title, findings: rows.map((r) => ({ id: r.id, ...(r.account ? { account: r.account } : {}), worker: r.script, severity: r.severity, message: r.message, action: r.action })) });
   const res = await allowedFetch(url, init, url);
   if (!res.ok) throw new Error(`Webhook answered ${res.status}`);
 }
@@ -153,12 +155,14 @@ export async function sendAlerts(env: Env, now: Date, config: Config): Promise<v
   if (sevs.length && !inQuietHours(now, config.timeZone, config.alerts.quietHours)) {
     const { results } = await db
       .prepare(
-        `SELECT id, script, severity, message, action, evidence FROM findings
+        `SELECT id, account, script, severity, message, action, evidence FROM findings
          WHERE status = 'open' AND severity IN (SELECT value FROM json_each(?2)) AND (notified_at IS NULL OR notified_at < ?1)
          ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END LIMIT 50`,
       )
       .bind(new Date(now.getTime() - DAY).toISOString(), JSON.stringify(sevs))
       .all<Row>();
+    const labels = await accountLabels(db, config);
+    for (const r of results) r.account = labels(r.account);
     const viaEmail = results.filter((r) => ['email', 'both'].includes(config.alerts[r.severity].instant));
     const viaHook = results.filter((r) => ['webhook', 'both'].includes(config.alerts[r.severity].instant));
     const sent: string[] = [];
@@ -202,12 +206,23 @@ export async function sendAlerts(env: Env, now: Date, config: Config): Promise<v
   await setSettings(db, { last_digest_at: stamp }).run();
 }
 
+/**
+ * Maps an account ID to its display label when the install watches more than one account,
+ * and to undefined otherwise, so single-account alerts look exactly as before.
+ */
+async function accountLabels(db: D1Database, config: Config): Promise<(id: string | undefined) => string | undefined> {
+  const { results } = await db.prepare('SELECT id, name FROM accounts WHERE enabled = 1').all<{ id: string; name: string | null }>();
+  if (results.length < 2) return () => undefined;
+  const names = new Map(results.map((a) => [a.id, config.accounts[a.id]?.label ?? a.name ?? a.id]));
+  return (id) => (id ? (names.get(id) ?? id) : undefined);
+}
+
 async function digestData(db: D1Database, now: Date, config: Config, days: number) {
   const since = new Date(now.getTime() - days * DAY);
   const sevs = (['critical', 'warning', 'info'] as const).filter((s) => config.alerts[s].digest);
   const [findings, totals, events, deploys, workers] = await db.batch([
     db.prepare(
-      `SELECT id, script, severity, message, action, evidence FROM findings WHERE status = 'open' AND severity IN (SELECT value FROM json_each(?1))
+      `SELECT id, account, script, severity, message, action, evidence FROM findings WHERE status = 'open' AND severity IN (SELECT value FROM json_each(?1))
        ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, first_seen DESC LIMIT 100`,
     ).bind(JSON.stringify(sevs)),
     db.prepare('SELECT COALESCE(SUM(requests),0) AS requests, COALESCE(SUM(errors),0) AS errors FROM metrics_hourly WHERE hour >= ?1').bind(isoHour(since)),
@@ -215,6 +230,8 @@ async function digestData(db: D1Database, now: Date, config: Config, days: numbe
     db.prepare('SELECT script, created_on, author FROM deployments WHERE created_on >= ?1 ORDER BY created_on DESC LIMIT 50').bind(since.toISOString()),
     db.prepare('SELECT name, tags FROM workers'),
   ]);
+  const labels = await accountLabels(db, config);
+  for (const r of findings.results as unknown as Row[]) r.account = labels(r.account);
   const t = totals.results[0] as { requests: number; errors: number };
   const ev = events.results as { kind: string; script: string }[];
   return {

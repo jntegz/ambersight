@@ -5,9 +5,12 @@
   import { api, compact, num, pct, timeAgo } from '../../lib/api';
   import TrendBars from '../TrendBars.svelte';
 
+  let { account = null }: { account?: string | null } = $props();
   let cost = $state<SelfCost | null>(null);
   let error = $state('');
-  api.selfCost().then((c) => (cost = c), (e) => (error = (e as Error).message));
+  $effect(() => {
+    api.selfCost(account ?? undefined).then((c) => (cost = c), (e) => (error = (e as Error).message));
+  });
 
   const today = $derived(cost?.days.at(-1) ?? null);
   const meters = $derived(

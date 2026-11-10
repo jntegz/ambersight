@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import type { Config } from '../../../src/shared/config';
-import type { Overview, SelfCost, SetupStatus, TimelineEntry } from '../../../src/shared/types';
+import type { AccountSummary, Overview, SelfCost, SetupStatus, TimelineEntry } from '../../../src/shared/types';
 
 export interface ScanResult {
   skipped?: boolean;
@@ -28,16 +28,22 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+const q = (account?: string) => (account ? `?account=${encodeURIComponent(account)}` : '');
+
 export const api = {
   session: () => call<{ authenticated: boolean }>('/api/session'),
   login: (passphrase: string) => call<{ ok: true }>('/api/login', { method: 'POST', body: JSON.stringify({ passphrase }) }),
   logout: () => call<{ ok: true }>('/api/logout', { method: 'POST' }),
-  overview: () => call<Overview>('/api/overview'),
-  scan: () => call<ScanResult>('/api/scan', { method: 'POST' }),
-  timeline: (days: number) => call<TimelineEntry[]>(`/api/timeline?days=${days}`),
-  selfCost: () => call<SelfCost>('/api/self-cost'),
+  overview: (account?: string) => call<Overview>(`/api/overview${q(account)}`),
+  /** The "All accounts" view. */
+  accounts: () => call<AccountSummary[]>('/api/accounts'),
+  /** The full set of accounts to watch. */
+  saveAccounts: (ids: string[]) => call<AccountSummary[]>('/api/accounts', { method: 'PUT', body: JSON.stringify({ ids }) }),
+  scan: (account?: string) => call<ScanResult>('/api/scan', { method: 'POST', body: JSON.stringify(account ? { account } : {}) }),
+  timeline: (days: number, account?: string) => call<TimelineEntry[]>(`/api/timeline?days=${days}${account ? `&account=${encodeURIComponent(account)}` : ''}`),
+  selfCost: (account?: string) => call<SelfCost>(`/api/self-cost${q(account)}`),
   setup: (account?: string) => call<SetupStatus>(account ? `/api/setup?account=${encodeURIComponent(account)}` : '/api/setup'),
-  completeSetup: (body: { timeZone: string; confirmReadOnly?: true; accountId?: string }) =>
+  completeSetup: (body: { timeZone: string; confirmReadOnly?: true; accountId?: string; accountIds?: string[] }) =>
     call<{ ok: true }>('/api/setup/complete', { method: 'POST', body: JSON.stringify(body) }),
   config: () => call<Config>('/api/config'),
   saveConfig: (config: Config) => call<Config>('/api/config', { method: 'PUT', body: JSON.stringify(config) }),

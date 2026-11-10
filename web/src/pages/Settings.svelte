@@ -15,9 +15,13 @@
   import { api, ApiError } from '../lib/api';
   import { fromDisplay, inputStep, rangeText, THRESHOLD_GROUPS, toDisplay, type ThresholdKey } from '../lib/thresholds';
 
-  let { workers, groups, onSaved, onSignedOut, onUnauthorized }: {
+  let { workers, groups, account = null, accountCount = 1, onSaved, onAccountsChanged, onSignedOut, onUnauthorized }: {
     workers: string[];
     groups: string[];
+    /** The account selected in the header, for the Self-cost panel. */
+    account?: string | null;
+    accountCount?: number;
+    onAccountsChanged?: () => void;
     onSaved: (config: Config) => void;
     onSignedOut: (message: string) => void;
     onUnauthorized: () => void;
@@ -41,9 +45,12 @@
   onMount(async () => {
     try {
       const [c, s] = await Promise.all([api.config(), api.setup().catch(() => null)]);
+      // Every watched account gets an entry, so its label and plan fields have something to bind to.
+      for (const id of s?.watched ?? []) c.accounts[id] ??= {};
       saved = c;
       draft = clone(c);
       status = s;
+      watch = [...(s?.watched ?? [])];
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) onUnauthorized();
       else loadError = (e as Error).message;
@@ -112,6 +119,33 @@
     }
   }
 
+  // ---- Accounts (applies right away, like Security) ----
+  let watch = $state<string[]>([]);
+  let accountsBusy = $state(false);
+  let accountsError = $state('');
+  const watchChanged = $derived(!!status && JSON.stringify([...watch].sort()) !== JSON.stringify([...status.watched].sort()));
+  const accountName = (id: string) => status?.accounts.find((a) => a.id === id)?.name ?? id;
+  async function saveAccounts() {
+    accountsBusy = true;
+    accountsError = '';
+    try {
+      await api.saveAccounts(watch);
+      status = await api.setup();
+      for (const id of status.watched) {
+        saved!.accounts[id] ??= {};
+        draft!.accounts[id] ??= {};
+      }
+      flash('Accounts saved. New accounts are scanned in turn from the next cron run.');
+      onAccountsChanged?.();
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) onUnauthorized();
+      else accountsError = (e as Error).message;
+    } finally {
+      accountsBusy = false;
+    }
+  }
+  const watchedCount = $derived(Math.max(accountCount, status?.watched.length ?? 0));
+
   async function changePassphrase(current: string, next: string) {
     await api.changePassphrase(current, next);
     onSignedOut('Passphrase changed. Every session was signed out; sign in with the new passphrase.');
@@ -155,6 +189,7 @@
   // ---- Navigation ----
   const SECTIONS = [
     { id: 'general', label: 'General', icon: 'settings' },
+    { id: 'accounts', label: 'Accounts', icon: 'grid' },
     { id: 'modules', label: 'Checks', icon: 'healthy' },
     { id: 'thresholds', label: 'Thresholds', icon: 'budget' },
     { id: 'groups', label: 'Groups & scope', icon: 'grid' },
@@ -263,6 +298,56 @@
               </span>
             </div>
           </details>
+        </div>
+      </section>
+
+      <!-- Accounts -->
+      <section id="s-accounts" class="card sec" aria-labelledby="h-accounts">
+        <h2 id="h-accounts">Accounts</h2>
+        <p class="sec-intro">One Ambersight can watch every account its token can see. Each cron run scans the account that is most overdue.</p>
+        <div class="rows">
+          {#if status?.accountPinned}
+            <div class="row"><div class="row-text"><p class="hint"><span class="mono">CF_ACCOUNT_ID</span> in <span class="mono">wrangler.jsonc</span> pins the accounts. Change the list there.</p></div></div>
+          {:else if status && status.accounts.length > 1}
+            <div class="row">
+              <div class="row-text"><p class="label">Accounts to watch <span class="now">Applies right away</span></p><p class="hint">The token can see {status.accounts.length} accounts. History of an account you untick is kept until it ages out.</p></div>
+              <fieldset class="acct-pick" disabled={accountsBusy}>
+                <legend class="sr-only">Accounts to watch</legend>
+                {#each status.accounts as a (a.id)}
+                  <label><input type="checkbox" value={a.id} bind:group={watch} /> {a.name}</label>
+                {/each}
+              </fieldset>
+            </div>
+            {#if watchChanged}
+              <div class="inline">
+                <button type="button" class="primary small" disabled={accountsBusy || !watch.length} onclick={saveAccounts}>Save accounts</button>
+                <button type="button" class="ghost small" onclick={() => (watch = [...status!.watched])}>Undo</button>
+                {#if !watch.length}<span class="error-text">Watch at least one account.</span>{/if}
+              </div>
+            {/if}
+            {#if accountsError}<p class="error-text" role="alert">{accountsError}</p>{/if}
+          {:else}
+            <div class="row"><div class="row-text"><p class="hint">This token can see one account. To watch more, give the token access to them (or use one token per install).</p></div></div>
+          {/if}
+          {#each status?.watched ?? [] as id (id)}
+            {#if draft.accounts[id]}
+              <div class="row">
+                <div class="row-text"><p class="label">{accountName(id)}</p><p class="hint mono">{id}</p></div>
+                <div class="inline">
+                  <input class="input" aria-label="Label for {accountName(id)}" placeholder="Label (optional)" maxlength="60"
+                    value={draft.accounts[id].label ?? ''} oninput={(e) => (draft!.accounts[id].label = e.currentTarget.value.trim() || undefined)} />
+                  <div class="seg" role="group" aria-label="Plan for {accountName(id)}">
+                    {#each ['auto', 'free', 'paid'] as const as p (p)}
+                      <button type="button" aria-pressed={(draft.accounts[id].plan ?? 'auto') === p} onclick={() => (draft!.accounts[id].plan = p === 'auto' ? undefined : p)}>{p === 'auto' ? 'Default' : p === 'free' ? 'Free' : 'Paid'}</button>
+                    {/each}
+                  </div>
+                </div>
+              </div>
+            {/if}
+          {/each}
+          {#if watchedCount > 1}
+            <div class="row"><div class="row-text"><p class="hint">With {watchedCount} accounts and one scan per 15-minute cron run, each account is scanned about every <strong>{intervalLabel(Math.max(draft.scanIntervalMinutes, watchedCount * 15)).replace('Every ', '').replace('Once a day', 'day')}</strong>.</p></div></div>
+          {/if}
         </div>
       </section>
 
@@ -453,7 +538,7 @@
       <section id="s-cost" class="card sec" aria-labelledby="h-cost">
         <h2 id="h-cost">Self-cost</h2>
         <p class="sec-intro">What Ambersight itself uses today, against the free plan allowances.</p>
-        <SelfCost />
+        <SelfCost {account} />
       </section>
 
       <!-- Backup -->
@@ -500,6 +585,9 @@
   .sec-intro { font-size: 14px; line-height: 20px; color: var(--ink-muted); margin-top: -8px; }
   .sub-title { font-size: 14px; font-weight: 600; margin-top: 8px; }
   .rows { display: grid; }
+  .acct-pick { margin: 0; padding: 0; border: 0; display: grid; gap: 6px; }
+  .acct-pick label { display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; }
+  .acct-pick input { width: 16px; height: 16px; accent-color: var(--accent); }
   .row { display: flex; align-items: center; justify-content: space-between; gap: 12px 24px; padding: 14px 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
   .rows > .row:first-child { border-top: 0; padding-top: 0; }
   .row-text { flex: 1 1 260px; min-width: 0; }

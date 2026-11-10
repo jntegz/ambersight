@@ -44,10 +44,65 @@ export function configFrom(settings: Settings): Config {
   }
 }
 
-/** Plan in effect: the config wins, then the plan detected by the wizard, then the PLAN var. */
-export function planFrom(config: Config, settings: Settings, envPlan?: string): 'free' | 'paid' {
+/** Per-account scan state: last scan, inventory time, dataset availability and so on. */
+export async function getAccountState(db: D1Database, account: string): Promise<Settings> {
+  const { results } = await db.prepare('SELECT key, value FROM account_state WHERE account = ?1').bind(account).all<{ key: string; value: string }>();
+  return Object.fromEntries(results.map((r) => [r.key, r.value]));
+}
+
+export function setAccountState(db: D1Database, account: string, values: Settings): D1PreparedStatement {
+  const rows = Object.entries(values).map(([key, value]) => ({ key, value }));
+  return db
+    .prepare(
+      `INSERT INTO account_state (account, key, value)
+       SELECT ?1, json_extract(value, '$.key'), json_extract(value, '$.value') FROM json_each(?2) WHERE true
+       ON CONFLICT(account, key) DO UPDATE SET value = excluded.value`,
+    )
+    .bind(account, JSON.stringify(rows));
+}
+
+export interface AccountRow {
+  id: string;
+  name: string | null;
+  enabled: number;
+  detected_plan: string | null;
+  added_at: string;
+}
+
+/** Watched accounts, oldest first. `all` includes the ones switched off. */
+export async function listAccounts(db: D1Database, all = false): Promise<AccountRow[]> {
+  const { results } = await db
+    .prepare(`SELECT id, name, enabled, detected_plan, added_at FROM accounts ${all ? '' : 'WHERE enabled = 1'} ORDER BY added_at, id`)
+    .all<AccountRow>();
+  return results;
+}
+
+export function upsertAccount(db: D1Database, a: { id: string; name?: string | null; enabled?: boolean; detectedPlan?: string | null }, now = new Date()): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO accounts (id, name, enabled, detected_plan, added_at) VALUES (?1, ?2, ?3, ?4, ?5)
+       ON CONFLICT(id) DO UPDATE SET name = COALESCE(excluded.name, accounts.name),
+         enabled = CASE WHEN ?6 THEN excluded.enabled ELSE accounts.enabled END,
+         detected_plan = COALESCE(excluded.detected_plan, accounts.detected_plan)`,
+    )
+    .bind(a.id, a.name ?? null, a.enabled === false ? 0 : 1, a.detectedPlan ?? null, now.toISOString(), a.enabled === undefined ? 0 : 1);
+}
+
+/** Accounts pinned with CF_ACCOUNT_ID (comma-separated), or null when not pinned. */
+export function pinnedAccounts(envValue?: string): string[] | null {
+  const ids = (envValue ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  return ids.length ? ids : null;
+}
+
+/**
+ * Plan in effect for one account: the per-account config wins, then the global config, then the
+ * plan detected from billing, then the PLAN var.
+ */
+export function planFrom(config: Config, detected: string | null | undefined, envPlan?: string, account?: string): 'free' | 'paid' {
+  const own = account ? config.accounts[account]?.plan : undefined;
+  if (own && own !== 'auto') return own;
   if (config.plan !== 'auto') return config.plan;
-  const p = settings.detected_plan ?? envPlan;
+  const p = detected ?? envPlan;
   return p === 'paid' ? 'paid' : 'free';
 }
 

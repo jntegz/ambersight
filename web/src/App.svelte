@@ -3,10 +3,11 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import type { Config } from '../../src/shared/config';
-  import type { Overview as OverviewData } from '../../src/shared/types';
+  import type { AccountSummary, Overview as OverviewData } from '../../src/shared/types';
   import Icon, { type IconName } from './components/Icon.svelte';
   import Login from './components/Login.svelte';
   import Logo from './components/Logo.svelte';
+  import Accounts from './pages/Accounts.svelte';
   import Overview from './pages/Overview.svelte';
   import Settings from './pages/Settings.svelte';
   import Setup from './pages/Setup.svelte';
@@ -15,7 +16,7 @@
   import { currentTheme, setTheme, type Theme } from './lib/theme';
 
   type View = 'loading' | 'login' | 'ready' | 'error';
-  type Route = 'overview' | 'timeline' | 'settings';
+  type Route = 'overview' | 'timeline' | 'settings' | 'accounts';
   let view = $state<View>('loading');
   let data = $state<OverviewData | null>(null);
   let config = $state<Config | null>(null);
@@ -27,8 +28,32 @@
   let theme = $state<Theme>(currentTheme());
   let searchEl = $state<HTMLInputElement>();
 
+  // ---- Accounts: the selected one is remembered per browser.
+  const ACCOUNT_KEY = 'ambersight-account';
+  let selected = $state<string | null>((() => { try { return localStorage.getItem(ACCOUNT_KEY); } catch { return null; } })());
+  let accounts = $state<AccountSummary[] | null>(null);
+  const multi = $derived((data?.accountCount ?? 1) > 1);
+  function remember(id: string | null) {
+    selected = id;
+    try { if (id) localStorage.setItem(ACCOUNT_KEY, id); } catch {}
+  }
+  async function loadAccounts() {
+    try {
+      accounts = await api.accounts();
+    } catch {
+      accounts = null;
+    }
+  }
+  async function selectAccount(id: string) {
+    remember(id);
+    query = '';
+    if (route === 'accounts') location.hash = '#/';
+    await load();
+  }
+
   // ---- Routing: "#/timeline" and "#/settings" are pages; any other hash (like "#w-name") is an anchor on the overview.
-  const routeFrom = (hash: string): Route => (hash === '#/timeline' ? 'timeline' : hash === '#/settings' ? 'settings' : 'overview');
+  const routeFrom = (hash: string): Route =>
+    hash === '#/timeline' ? 'timeline' : hash === '#/settings' ? 'settings' : hash === '#/accounts' ? 'accounts' : 'overview';
   let route = $state<Route>(routeFrom(location.hash));
   async function onHash() {
     const next = routeFrom(location.hash);
@@ -47,11 +72,14 @@
       if (el) { el.style.animation = 'none'; void el.offsetWidth; el.style.animation = ''; }
     }
   }
-  const NAV: { route: Route; href: string; label: string; icon: IconName }[] = [
+  const NAV_ALL: { route: Route; href: string; label: string; icon: IconName; multiOnly?: boolean }[] = [
+    { route: 'accounts', href: '#/accounts', label: 'Accounts', icon: 'grid', multiOnly: true },
     { route: 'overview', href: '#/', label: 'Overview', icon: 'overview' },
     { route: 'timeline', href: '#/timeline', label: 'Timeline', icon: 'timeline' },
     { route: 'settings', href: '#/settings', label: 'Settings', icon: 'settings' },
   ];
+
+  const NAV = $derived(NAV_ALL.filter((n) => !n.multiOnly || multi));
 
   function toggleTheme() {
     theme = theme === 'dark' ? 'light' : 'dark';
@@ -60,8 +88,10 @@
 
   async function load() {
     try {
-      data = await api.overview();
+      data = await api.overview(selected ?? undefined);
+      if (data.account && data.account.id !== selected) remember(data.account.id);
       view = 'ready';
+      if (data.accountCount > 1) loadAccounts();
       loginMessage = '';
       if (!config && data.setupDone !== false) api.config().then((c) => (config = c), () => {});
     } catch (e) {
@@ -77,7 +107,7 @@
     scanning = true;
     notice = null;
     try {
-      const r = await api.scan();
+      const r = await api.scan(selected ?? undefined);
       const parts = r.skipped
         ? ['A scan just ran, so this one was skipped.']
         : [
@@ -159,6 +189,9 @@
   });
 
   const searchable = $derived(route !== 'settings');
+  // An account that has not been scanned for 3 of its intervals: the cron may be detached.
+  const interval = $derived(Math.max(config?.scanIntervalMinutes ?? 60, (data?.accountCount ?? 1) * 15));
+  const stale = $derived(!!data?.lastScanAt && Date.now() - new Date(data.lastScanAt).getTime() > 3 * interval * 60_000);
 </script>
 
 <svelte:window onkeydown={onKey} onhashchange={onHash} />
@@ -175,6 +208,17 @@
   <header class="top">
     <div class="top-inner">
       <a class="brand" href="#/" aria-label="Ambersight overview"><Logo size={28} /><span class="wordmark">ambersight</span></a>
+      {#if multi && accounts}
+        <label class="acct-switch" title="Account">
+          <span class="sr-only">Account</span>
+          <select value={selected ?? ''} onchange={(e) => selectAccount(e.currentTarget.value)}>
+            {#each accounts as a (a.id)}
+              <option value={a.id}>{a.label}{a.findings.critical ? ` · ${a.findings.critical} critical` : ''}</option>
+            {/each}
+          </select>
+          <Icon name="chevron" size={14} />
+        </label>
+      {/if}
       <nav class="nav" aria-label="Main">
         {#each NAV as n (n.route)}
           <a href={n.href} aria-current={route === n.route ? 'page' : undefined}><Icon name={n.icon} size={16} /><span>{n.label}</span></a>
@@ -184,9 +228,9 @@
       {#if searchable}
         <div class="search" class:filled={!!query}>
           <label class="search-field">
-            <span class="sr-only">{route === 'timeline' ? 'Search deploys' : 'Search Workers'}</span>
+            <span class="sr-only">{route === 'timeline' ? 'Search deploys' : route === 'accounts' ? 'Search accounts' : 'Search Workers'}</span>
             <Icon name="search" size={16} />
-            <input type="search" placeholder={route === 'timeline' ? 'Search deploys' : 'Search Workers'} autocomplete="off" spellcheck="false" bind:value={query} bind:this={searchEl} />
+            <input type="search" placeholder={route === 'timeline' ? 'Search deploys' : route === 'accounts' ? 'Search accounts' : 'Search Workers'} autocomplete="off" spellcheck="false" bind:value={query} bind:this={searchEl} />
           </label>
           {#if query}
             <button type="button" class="clear" aria-label="Clear search" onclick={() => { query = ''; searchEl?.focus(); }}><Icon name="close" size={14} /></button>
@@ -226,6 +270,24 @@
       </div>
     </div>
   {/if}
+  {#if data.scanHealth?.failures}
+    <div class="banner">
+      <div class="banner-inner warn" role="alert">
+        <Icon name="warning" size={18} />
+        <p class="banner-text">
+          The last {data.scanHealth.failures === 1 ? 'scan' : `${data.scanHealth.failures} scans`}{multi && data.account ? ` of ${data.account.label}` : ''} failed: {data.scanHealth.lastError}
+          The overview shows the data from the last scan that worked{data.lastScanAt ? ` (${timeAgo(data.lastScanAt)})` : ''}.
+        </p>
+      </div>
+    </div>
+  {:else if stale}
+    <div class="banner">
+      <div class="banner-inner warn" role="status">
+        <Icon name="warning" size={18} />
+        <p class="banner-text">No scan for {timeAgo(data.lastScanAt).replace(' ago', '')}. Check that Ambersight's Cron Trigger is still attached (<strong>Workers & Pages › ambersight › Settings › Trigger events</strong>), or press <strong>Scan now</strong>.</p>
+      </div>
+    </div>
+  {/if}
   {#if notice}
     <div class="banner">
       <div class="banner-inner {notice.tone}" role="status">
@@ -237,12 +299,17 @@
   {/if}
 
   <main class="page">
-    {#if route === 'timeline'}
-      <Timeline groups={data.groups ?? []} {query} onUnauthorized={() => signedOut()} />
+    {#if route === 'accounts' && multi}
+      <Accounts {accounts} {selected} {query} onSelect={selectAccount} />
+    {:else if route === 'timeline'}
+      <Timeline groups={data.groups ?? []} {query} account={selected} onUnauthorized={() => signedOut()} />
     {:else if route === 'settings'}
       <Settings
         workers={data.workers.map((w) => w.name)}
         groups={data.groups ?? []}
+        account={selected}
+        accountCount={data.accountCount}
+        onAccountsChanged={load}
         onSaved={(c) => { config = c; load(); }}
         onSignedOut={signedOut}
         onUnauthorized={() => signedOut()}
@@ -320,6 +387,17 @@
   .scan-icon { display: inline-flex; }
   .scan-icon :global(svg) { display: block; }
 
+  .acct-switch {
+    position: relative; display: inline-flex; align-items: center; height: 36px; margin-left: 12px;
+    border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--ink);
+  }
+  .acct-switch:hover { border-color: color-mix(in srgb, var(--ink-muted) 45%, var(--line)); }
+  .acct-switch select {
+    appearance: none; height: 100%; max-width: 220px; padding: 0 30px 0 14px; border: 0; border-radius: 999px;
+    background: transparent; color: inherit; font: 500 14px/1 var(--font); cursor: pointer; text-overflow: ellipsis;
+  }
+  .acct-switch :global(svg) { position: absolute; right: 10px; pointer-events: none; color: var(--ink-muted); transform: rotate(90deg); }
+
   .divider { width: 1px; height: 20px; margin: 0 4px; background: var(--line); }
 
   /* Theme switch: sliding thumb behind sun/moon. */
@@ -378,6 +456,8 @@
   }
   @media (max-width: 760px) {
     .top-inner { flex-wrap: wrap; padding: 10px 16px; }
+    .acct-switch { order: 2; margin-left: 0; }
+    .acct-switch select { max-width: 150px; }
     .scanned, .divider { display: none; }
     .search { order: 3; width: 100%; margin: 0; }
     .search-field { flex: 1; }

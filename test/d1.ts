@@ -36,10 +36,13 @@ class Stmt {
   }
 }
 
-export function createD1(): D1Database {
+const MIGRATIONS = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
+const migrationFiles = () => readdirSync(MIGRATIONS).filter((f: string) => f.endsWith('.sql')).sort();
+
+/** Applies migrations whose file name sorts before `stopBefore` (all when omitted). */
+export function createD1(opts: { stopBefore?: string } = {}): D1Database {
   const db = new DatabaseSync(':memory:');
-  const dir = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
-  for (const f of readdirSync(dir).filter((f: string) => f.endsWith('.sql')).sort()) db.exec(readFileSync(join(dir, f), 'utf8'));
+  for (const f of migrationFiles().filter((f) => !opts.stopBefore || f < opts.stopBefore)) db.exec(readFileSync(join(MIGRATIONS, f), 'utf8'));
   const d1 = {
     prepare: (sql: string) => new Stmt(db, sql),
     batch: async (stmts: Stmt[]) => {
@@ -54,6 +57,10 @@ export function createD1(): D1Database {
       }
     },
     exec: async (sql: string) => db.exec(sql),
+    /** Test only: applies the migrations from `from` onwards, like a later deploy would. */
+    migrateFrom: (from: string) => {
+      for (const f of migrationFiles().filter((f) => f >= from)) db.exec(readFileSync(join(MIGRATIONS, f), 'utf8'));
+    },
   };
   return d1 as unknown as D1Database;
 }

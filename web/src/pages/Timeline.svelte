@@ -8,7 +8,7 @@
   import { api, num, timeAgo, workerId } from '../lib/api';
   import { loadPrefs, savePrefs } from '../lib/prefs';
 
-  let { groups, query, onUnauthorized }: { groups: string[]; query: string; onUnauthorized: () => void } = $props();
+  let { groups, query, account = null, onUnauthorized }: { groups: string[]; query: string; account?: string | null; onUnauthorized: () => void } = $props();
 
   const prefs = loadPrefs('ambersight-timeline', { days: 14, group: '', onlyFlagged: false });
   let days = $state([7, 14, 30].includes(prefs.days) ? prefs.days : 14);
@@ -20,11 +20,11 @@
   let error = $state('');
   let loading = $state(false);
 
-  async function load(d: number) {
+  async function load(d: number, acct: string | null) {
     loading = true;
     error = '';
     try {
-      entries = await api.timeline(d);
+      entries = await api.timeline(d, acct ?? undefined);
     } catch (e) {
       if ((e as { status?: number }).status === 401) onUnauthorized();
       else error = (e as Error).message;
@@ -33,7 +33,7 @@
     }
   }
   $effect(() => {
-    load(days);
+    load(days, account);
   });
 
   const q = $derived(query.trim().toLowerCase());
@@ -99,7 +99,7 @@
 </div>
 
 {#if error}
-  <div class="card empty"><p role="alert">{error}</p><button type="button" onclick={() => load(days)}>Try again</button></div>
+  <div class="card empty"><p role="alert">{error}</p><button type="button" onclick={() => load(days, account)}>Try again</button></div>
 {:else if !entries}
   <div class="card empty muted" aria-busy="true"><p>Loading deploys…</p></div>
 {:else}

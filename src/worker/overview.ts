@@ -3,11 +3,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { groupsFor, inScope } from '../shared/config';
-import { SEVERITY_WEIGHT, type Finding, type Overview, type SelfCost, type Severity, type TimelineEntry, type WorkerSummary } from '../shared/types';
+import { SEVERITY_WEIGHT, type AccountSummary, type Finding, type Overview, type SelfCost, type Severity, type TimelineEntry, type WorkerSummary } from '../shared/types';
 import { FREE_DAILY_REQUESTS, projectLimitTime } from './checks';
-import { configFrom, getSettings, isoHour, planFrom, utcMidnight } from './db';
+import { configFrom, getAccountState, getSettings, isoHour, planFrom, utcMidnight, type AccountRow } from './db';
 import type { Env } from './env';
 import { updateNotice } from './scan';
+import { activeAccounts } from './scheduler';
 
 const SEVERITY_ORDER: Record<Severity, number> = { critical: 0, warning: 1, info: 2 };
 const HOUR = 3_600_000;
@@ -41,25 +42,37 @@ const toFinding = (r: FindingRow): Finding => ({
   status: r.status,
 });
 
-export async function buildOverview(env: Env, now = new Date()): Promise<Overview> {
+/** Display name: the label from Settings, then the Cloudflare account name, then the ID. */
+export const accountLabel = (a: Pick<AccountRow, 'id' | 'name'>, config: ReturnType<typeof configFrom>) => config.accounts[a.id]?.label ?? a.name ?? a.id;
+
+/** The account a request asks for, or the first watched one. Null before setup. */
+export async function pickAccount(env: Env, requested?: string | null): Promise<{ account: AccountRow | null; accounts: AccountRow[] }> {
+  const accounts = await activeAccounts(env).catch(() => [] as AccountRow[]);
+  return { account: accounts.find((a) => a.id === requested) ?? accounts[0] ?? null, accounts };
+}
+
+export async function buildOverview(env: Env, requested?: string | null, now = new Date()): Promise<Overview> {
   const db = env.DB;
-  const settings = await getSettings(db);
-  const config = configFrom(settings);
-  const plan = planFrom(config, settings, env.PLAN);
+  const global = await getSettings(db);
+  const config = configFrom(global);
+  const { account: acct, accounts } = await pickAccount(env, requested);
+  const A = acct?.id ?? '';
+  const settings = A ? await getAccountState(db, A) : {};
+  const plan = planFrom(config, acct?.detected_plan, env.PLAN, A);
   const midnight = isoHour(utcMidnight(now));
   const dayAgo = isoHour(new Date(now.getTime() - DAY));
   const weekStart = isoHour(new Date(utcMidnight(now).getTime() - 6 * DAY));
 
   const [workers, hourly, daily, today, findings, entries] = await db.batch([
-    db.prepare('SELECT name, deployed_on, modified_on, handlers, tags, workers_dev FROM workers ORDER BY name'),
-    db.prepare('SELECT script, hour, requests, errors FROM metrics_hourly WHERE hour >= ?1').bind(dayAgo),
+    db.prepare('SELECT name, deployed_on, modified_on, handlers, tags, workers_dev FROM workers WHERE account = ?1 ORDER BY name').bind(A),
+    db.prepare('SELECT script, hour, requests, errors FROM metrics_hourly WHERE account = ?1 AND hour >= ?2').bind(A, dayAgo),
     db.prepare(
       `SELECT script, substr(hour, 1, 10) AS day, SUM(requests) AS requests FROM metrics_hourly
-       WHERE hour >= ?1 GROUP BY script, day`,
-    ).bind(weekStart),
-    db.prepare('SELECT COALESCE(SUM(requests),0) AS requests, COALESCE(SUM(errors),0) AS errors FROM metrics_hourly WHERE hour >= ?1').bind(midnight),
-    db.prepare(`SELECT * FROM findings WHERE status = 'open'`),
-    db.prepare(`SELECT name, script FROM resources WHERE kind IN ('route','domain')`),
+       WHERE account = ?1 AND hour >= ?2 GROUP BY script, day`,
+    ).bind(A, weekStart),
+    db.prepare('SELECT COALESCE(SUM(requests),0) AS requests, COALESCE(SUM(errors),0) AS errors FROM metrics_hourly WHERE account = ?1 AND hour >= ?2').bind(A, midnight),
+    db.prepare(`SELECT * FROM findings WHERE account = ?1 AND status = 'open'`).bind(A),
+    db.prepare(`SELECT name, script FROM resources WHERE account = ?1 AND kind IN ('route','domain')`).bind(A),
   ]);
 
   type W = { name: string; deployed_on: string | null; modified_on: string | null; handlers: string | null; tags: string | null; workers_dev: number | null };
@@ -125,9 +138,16 @@ export async function buildOverview(env: Env, now = new Date()): Promise<Overvie
 
   const t = today.results[0] as { requests: number; errors: number };
   return {
+    account: acct ? { id: acct.id, label: accountLabel(acct, config), plan } : null,
+    accountCount: accounts.length,
+    scanHealth: {
+      failures: Number(settings.scan_failures ?? 0),
+      lastError: settings.last_scan_error ?? null,
+      lastAttemptAt: settings.last_attempt_at ?? null,
+    },
     lastScanAt: settings.last_scan_at ?? null,
-    setupDone: settings.setup_done === '1',
-    update: updateNotice(settings),
+    setupDone: global.setup_done === '1',
+    update: updateNotice(global),
     totals: {
       workers: summaries.length,
       needAttention: summaries.filter((s) => s.score > 0).length,
@@ -153,15 +173,15 @@ export async function buildOverview(env: Env, now = new Date()): Promise<Overvie
 }
 
 /** M8: every deployment across the fleet, newest first, with correlated findings marked. */
-export async function buildTimeline(env: Env, days = 14): Promise<TimelineEntry[]> {
+export async function buildTimeline(env: Env, account: string, days = 14): Promise<TimelineEntry[]> {
   const db = env.DB;
   const settings = await getSettings(db);
   const config = configFrom(settings);
   const since = new Date(Date.now() - days * DAY).toISOString();
   const [deps, workers, findings] = await db.batch([
-    db.prepare('SELECT script, id, created_on, author, message, source FROM deployments WHERE created_on >= ?1 ORDER BY created_on DESC LIMIT 300').bind(since),
-    db.prepare('SELECT name, tags FROM workers'),
-    db.prepare(`SELECT code, evidence FROM findings WHERE status <> 'resolved' AND evidence LIKE '%deployId%'`),
+    db.prepare('SELECT script, id, created_on, author, message, source FROM deployments WHERE account = ?1 AND created_on >= ?2 ORDER BY created_on DESC LIMIT 300').bind(account, since),
+    db.prepare('SELECT name, tags FROM workers WHERE account = ?1').bind(account),
+    db.prepare(`SELECT code, evidence FROM findings WHERE account = ?1 AND status <> 'resolved' AND evidence LIKE '%deployId%'`).bind(account),
   ]);
   const tags = new Map((workers.results as { name: string; tags: string | null }[]).map((w) => [w.name, w.tags ? (JSON.parse(w.tags) as string[]) : []]));
   const correlated = new Map<string, string[]>();
@@ -184,9 +204,9 @@ export async function buildTimeline(env: Env, days = 14): Promise<TimelineEntry[
     }));
 }
 
-export async function buildSelfCost(env: Env): Promise<SelfCost> {
+export async function buildSelfCost(env: Env, account: string): Promise<SelfCost> {
   const db = env.DB;
-  const settings = await getSettings(db);
+  const settings = await getAccountState(db, account);
   const { results } = await db
     .prepare('SELECT * FROM usage_daily WHERE day >= ?1 ORDER BY day DESC')
     .bind(new Date(Date.now() - 7 * DAY).toISOString().slice(0, 10))
@@ -202,3 +222,55 @@ export async function buildSelfCost(env: Env): Promise<SelfCost> {
     allowances: { requestsPerDay: FREE_DAILY_REQUESTS, subrequestsPerRun: 50, rowsWrittenPerDay: 100_000, rowsReadPerDay: 5_000_000 },
   };
 }
+
+/** The "All accounts" view: one row per watched account. */
+export async function buildAccounts(env: Env, now = new Date()): Promise<AccountSummary[]> {
+  const db = env.DB;
+  const config = configFrom(await getSettings(db));
+  const accounts = await activeAccounts(env, now);
+  const ids = JSON.stringify(accounts.map((a) => a.id));
+  const [counts, today, state, workers] = await db.batch([
+    db.prepare(
+      `SELECT account, severity, COUNT(*) AS n FROM findings WHERE status = 'open' AND account IN (SELECT value FROM json_each(?1))
+       GROUP BY account, severity`,
+    ).bind(ids),
+    db.prepare(
+      `SELECT account, COALESCE(SUM(requests),0) AS requests, COALESCE(SUM(errors),0) AS errors FROM metrics_hourly
+       WHERE hour >= ?2 AND account IN (SELECT value FROM json_each(?1)) GROUP BY account`,
+    ).bind(ids, isoHour(utcMidnight(now))),
+    db.prepare(
+      `SELECT account, key, value FROM account_state WHERE key IN ('last_scan_at', 'scan_failures', 'last_scan_error')
+       AND account IN (SELECT value FROM json_each(?1))`,
+    ).bind(ids),
+    db.prepare(`SELECT account, COUNT(*) AS n FROM workers WHERE account IN (SELECT value FROM json_each(?1)) GROUP BY account`).bind(ids),
+  ]);
+  const sev = new Map<string, Record<Severity, number>>();
+  for (const r of counts.results as { account: string; severity: Severity; n: number }[]) {
+    const m = sev.get(r.account) ?? { critical: 0, warning: 0, info: 0 };
+    m[r.severity] = r.n;
+    sev.set(r.account, m);
+  }
+  const t = new Map((today.results as { account: string; requests: number; errors: number }[]).map((r) => [r.account, r]));
+  const st = new Map<string, Record<string, string>>();
+  for (const r of state.results as { account: string; key: string; value: string }[]) st.set(r.account, { ...(st.get(r.account) ?? {}), [r.key]: r.value });
+  const w = new Map((workers.results as { account: string; n: number }[]).map((r) => [r.account, r.n]));
+  return accounts.map((a) => {
+    const plan = planFrom(config, a.detected_plan, env.PLAN, a.id);
+    const requests = t.get(a.id)?.requests ?? 0;
+    const s = st.get(a.id) ?? {};
+    return {
+      id: a.id,
+      label: accountLabel(a, config),
+      plan,
+      workers: w.get(a.id) ?? 0,
+      findings: sev.get(a.id) ?? { critical: 0, warning: 0, info: 0 },
+      requestsToday: requests,
+      errorsToday: t.get(a.id)?.errors ?? 0,
+      budgetShare: plan === 'free' ? requests / FREE_DAILY_REQUESTS : null,
+      lastScanAt: s.last_scan_at ?? null,
+      scanFailures: Number(s.scan_failures ?? 0),
+      lastError: s.last_scan_error ?? null,
+    };
+  });
+}
+
