@@ -176,3 +176,13 @@ describe('scan cost with every module on', () => {
     expect(r.d1Queries).toBeLessThan(50);
   });
 });
+
+describe('e-mail subjects', () => {
+  it('stay on one line even when an account name contains a line break', async () => {
+    const { sendEmail } = await import('../src/worker/notify');
+    const sent: { subject: string }[] = [];
+    const e = newEnv({ EMAIL_FROM: 'a@example.com', DIGEST_TO: 'me@example.com', EMAIL: { send: async (m) => void sent.push(m) } });
+    await sendEmail(e, ['me@example.com'], 'Ambersight · Evil\r\nBcc: x@example.com: 1 Worker needs attention', { html: '', text: '' });
+    expect(sent[0].subject).toBe('Ambersight · Evil Bcc: x@example.com: 1 Worker needs attention');
+  });
+});

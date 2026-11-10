@@ -108,7 +108,9 @@ export function recipients(env: Env): string[] {
 export const emailReady = (env: Env) => Boolean(env.EMAIL && env.EMAIL_FROM && recipients(env).length);
 
 export async function sendEmail(env: Env, to: string[], subject: string, body: { html: string; text: string }) {
-  await env.EMAIL!.send({ to, from: env.EMAIL_FROM!, subject, ...body });
+  // Subjects can carry an account name set in Cloudflare: keep them to one line.
+  const oneLine = subject.replace(/[\r\n\u2028\u2029]+/g, ' ').slice(0, 200);
+  await env.EMAIL!.send({ to, from: env.EMAIL_FROM!, subject: oneLine, ...body });
 }
 
 export async function sendAlerts(env: Env, now: Date, config: Config): Promise<void> {
