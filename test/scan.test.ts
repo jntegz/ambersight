@@ -163,7 +163,7 @@ describe('notifications', () => {
     stub();
     const { env: e, sent } = env();
     const config = defaultConfig();
-    config.digest = { frequency: 'daily', weekday: 1, hour: 0, groupRecipients: { 'client-a': ['me@example.com', 'stranger@example.com'] } };
+    config.digest = { ...config.digest, frequency: 'daily', weekday: 1, hour: 0, groupRecipients: { 'client-a': ['me@example.com', 'stranger@example.com'] } };
     await setSettings(e.DB, { config: JSON.stringify(config) }).run();
     await scan(e, NOW);
     const subjects = sent.map((s) => s.subject);

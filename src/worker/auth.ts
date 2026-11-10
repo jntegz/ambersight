@@ -6,6 +6,30 @@
 
 import { getSettings } from './db';
 import type { Env } from './env';
+import { allowedFetch, OPTIONAL_HOSTS } from './net';
+
+/** Turnstile is on when both the site key (var) and the secret (Worker secret) are set. */
+export const turnstileOn = (env: Env) => Boolean(env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET);
+
+/**
+ * Checks a Turnstile token with Cloudflare (siteverify). Runs before the passphrase check, so a
+ * bot that cannot pass the challenge cannot use up the sign-in attempts and lock you out.
+ */
+export async function verifyTurnstile(env: Env, token: unknown, ip: string): Promise<boolean> {
+  if (!turnstileOn(env)) return true;
+  if (typeof token !== 'string' || !token || token.length > 4096) return false;
+  const body = new FormData();
+  body.set('secret', env.TURNSTILE_SECRET!);
+  body.set('response', token);
+  if (ip && ip !== 'unknown') body.set('remoteip', ip);
+  try {
+    const res = await allowedFetch(`https://${OPTIONAL_HOSTS.turnstile}/turnstile/v0/siteverify`, { method: 'POST', body }, undefined, [OPTIONAL_HOSTS.turnstile]);
+    const out = (await res.json()) as { success?: boolean };
+    return out.success === true;
+  } catch {
+    return false;
+  }
+}
 
 /** __Host- keeps sibling subdomains (other *.workers.dev Workers, other zone hosts) from setting or shadowing it. */
 export const COOKIE = '__Host-as_session';

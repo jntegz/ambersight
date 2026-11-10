@@ -6,6 +6,7 @@ import { groupsFor, type Config } from '../shared/config';
 import type { Severity } from '../shared/types';
 import { getSettings, isoHour, setSettings } from './db';
 import type { Env } from './env';
+import { aiSummary, digestData, renderDigest, subjectFor } from './digest';
 import { fetchIncidents } from './incidents';
 import { allowedFetch } from './net';
 import { digestDue, inQuietHours } from './time';
@@ -13,7 +14,7 @@ import { digestDue, inQuietHours } from './time';
 const DAY = 86_400_000;
 const MAX_DIGEST_ROWS = 25;
 
-interface Row {
+export interface Row {
   id: string;
   /** Account label, set only when the install watches more than one account. */
   account?: string;
@@ -24,21 +25,13 @@ interface Row {
   evidence?: string;
 }
 
-export interface DigestExtras {
-  requests: number;
-  errors: number;
-  added: string[];
-  removed: string[];
-  deploys: { script: string; created_on: string; author: string | null }[];
-}
+export const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
+export const label = (s: Severity) => (s === 'critical' ? 'Critical' : s === 'warning' ? 'Warning' : 'Info');
+export const who = (script: string, account?: string) => (account ? `${account} · ${script === '*' ? 'Account' : script}` : script === '*' ? 'Account' : script);
+export const n = (x: number) => x.toLocaleString('en-US');
+export const FONT = 'Inter,Arial,sans-serif';
 
-const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
-const label = (s: Severity) => (s === 'critical' ? 'Critical' : s === 'warning' ? 'Warning' : 'Info');
-const who = (script: string, account?: string) => (account ? `${account} · ${script === '*' ? 'Account' : script}` : script === '*' ? 'Account' : script);
-const n = (x: number) => x.toLocaleString('en-US');
-const FONT = 'Inter,Arial,sans-serif';
-
-function evidenceText(e?: string): string {
+export function evidenceText(e?: string): string {
   if (!e) return '';
   try {
     return Object.entries(JSON.parse(e) as Record<string, unknown>)
@@ -49,7 +42,7 @@ function evidenceText(e?: string): string {
   }
 }
 
-export function render(title: string, intro: string, rows: Row[], extras?: DigestExtras): { html: string; text: string } {
+export function render(title: string, intro: string, rows: Row[]): { html: string; text: string } {
   const items = rows
     .map(
       (r) => `<tr><td style="padding:12px 0;border-bottom:1px solid #EADFD5">
@@ -59,39 +52,16 @@ export function render(title: string, intro: string, rows: Row[], extras?: Diges
         ${r.evidence ? `<div style="font:400 12px/18px ${FONT};color:#6E6259">${esc(evidenceText(r.evidence))}</div>` : ''}</td></tr>`,
     )
     .join('');
-  const section = (h: string, body: string) =>
-    `<tr><td style="font:600 15px/22px ${FONT};color:#2B211B;padding-top:20px">${h}</td></tr><tr><td style="font:400 14px/22px ${FONT};color:#2B211B">${body}</td></tr>`;
-  const ex = extras
-    ? [
-        section('This week', `${n(extras.requests)} requests · ${n(extras.errors)} errors`),
-        extras.added.length || extras.removed.length
-          ? section('Fleet changes', [
-              ...extras.added.map((s) => `+ ${esc(s)}`),
-              ...extras.removed.map((s) => `− ${esc(s)}`),
-            ].join('<br>'))
-          : '',
-        extras.deploys.length
-          ? section(`Deploys (${extras.deploys.length})`, extras.deploys.slice(0, 15).map((d) => `${esc(d.created_on.slice(0, 16).replace('T', ' '))} UTC · ${esc(d.script)}${d.author ? ` · ${esc(d.author)}` : ''}`).join('<br>'))
-          : '',
-      ].join('')
-    : '';
   const html = `<!doctype html><html><body style="margin:0;background:#FFFCF8;padding:24px">
     <table role="presentation" width="100%" style="max-width:600px;margin:0 auto">
     <tr><td style="font:600 20px/28px ${FONT};color:#2B211B;padding-bottom:4px">${esc(title)}</td></tr>
     <tr><td style="font:400 14px/20px ${FONT};color:#6E6259;padding-bottom:12px">${esc(intro)}</td></tr>
-    ${items}${ex}
+    ${items}
     <tr><td style="font:400 12px/18px ${FONT};color:#6E6259;padding-top:16px">Sent by your Ambersight Worker. Read-only, running in your own Cloudflare account.</td></tr>
     </table></body></html>`;
   const text = [
     title, intro, '',
     ...rows.map((r) => `[${r.severity}] ${who(r.script, r.account)}: ${r.message}\n  ${r.action}`),
-    ...(extras
-      ? [
-          '', `This week: ${n(extras.requests)} requests, ${n(extras.errors)} errors`,
-          ...extras.added.map((s) => `+ ${s}`), ...extras.removed.map((s) => `- ${s}`),
-          ...(extras.deploys.length ? ['', `Deploys: ${extras.deploys.length}`] : []),
-        ]
-      : []),
   ].join('\n');
   return { html, text };
 }
@@ -131,13 +101,13 @@ export async function sendWebhook(url: string, title: string, rows: Row[], note?
   if (!res.ok) throw new Error(`Webhook answered ${res.status}`);
 }
 
-function recipients(env: Env): string[] {
+export function recipients(env: Env): string[] {
   return (env.DIGEST_TO ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 }
 
-const emailReady = (env: Env) => Boolean(env.EMAIL && env.EMAIL_FROM && recipients(env).length);
+export const emailReady = (env: Env) => Boolean(env.EMAIL && env.EMAIL_FROM && recipients(env).length);
 
-async function sendEmail(env: Env, to: string[], subject: string, body: { html: string; text: string }) {
+export async function sendEmail(env: Env, to: string[], subject: string, body: { html: string; text: string }) {
   await env.EMAIL!.send({ to, from: env.EMAIL_FROM!, subject, ...body });
 }
 
@@ -194,21 +164,30 @@ export async function sendAlerts(env: Env, now: Date, config: Config): Promise<v
   const settings = await getSettings(db);
   const d = config.digest;
   if (!digestDue(now, config.timeZone, d.frequency, d.weekday, d.hour, settings.last_digest_at ?? null)) return;
-  const { rows, extras, tags } = await digestData(db, now, config, d.frequency === 'daily' ? 1 : 7);
-  const period = d.frequency === 'daily' ? 'daily' : 'weekly';
+  const days = d.frequency === 'daily' ? 1 : d.frequency === 'monthly' ? 30 : 7;
+  const periodLabel = d.frequency === 'daily' ? 'Last 24 hours' : d.frequency === 'monthly' ? 'Last 30 days' : 'This week';
+  const digests = await digestData(env, now, config, days);
+  const multi = digests.length > 1;
+  const allRows = digests.flatMap((x) => x.rows.map((r) => ({ ...r, account: multi ? x.label : undefined })));
   const to = recipients(env);
-  const subject = (list: Row[]) => {
-    const workers = new Set(list.filter((r) => r.script !== '*').map((r) => r.script)).size;
-    return list.length ? `${workers || list.length} ${(workers || list.length) === 1 ? 'Worker needs' : 'Workers need'} attention` : 'All Workers look healthy';
-  };
-  await sendEmail(env, to, `Ambersight: ${subject(rows)}`, render(subject(rows), `Your ${period} Ambersight digest.`, rows.slice(0, MAX_DIGEST_ROWS), extras));
+  const summary = await aiSummary(env, config, digests);
+  await sendEmail(env, to, `Ambersight: ${subjectFor(allRows)}`, renderDigest(subjectFor(allRows), `Your ${d.frequency} Ambersight digest.`, digests, { periodLabel, summary }));
+
+  // Per-account digests (a client's own report): only to addresses that are also allowed in DIGEST_TO.
+  for (const dg of digests) {
+    const allowed = (config.accounts[dg.id]?.digestTo ?? []).filter((a) => to.includes(a));
+    if (!allowed.length) continue;
+    await sendEmail(env, allowed, `Ambersight · ${dg.label}: ${subjectFor(dg.rows)}`, renderDigest(`${dg.label}: ${subjectFor(dg.rows)}`, `Your ${d.frequency} Ambersight digest for ${dg.label}.`, [dg], { periodLabel }));
+  }
 
   // Per-group digests (agency use): only to addresses that are also allowed in DIGEST_TO.
   for (const [group, list] of Object.entries(d.groupRecipients)) {
     const allowed = list.filter((a) => to.includes(a));
     if (!allowed.length) continue;
-    const mine = rows.filter((r) => r.script !== '*' && groupsFor(config, r.script, tags.get(r.script) ?? []).includes(group));
-    await sendEmail(env, allowed, `Ambersight · ${group}: ${subject(mine)}`, render(`${group}: ${subject(mine)}`, `Your ${period} Ambersight digest for ${group}.`, mine.slice(0, MAX_DIGEST_ROWS)));
+    const mine = digests.flatMap((dg) => dg.rows
+      .filter((r) => r.script !== '*' && groupsFor(config, r.script, dg.tags.get(r.script) ?? []).includes(group))
+      .map((r) => ({ ...r, account: multi ? dg.label : undefined })));
+    await sendEmail(env, allowed, `Ambersight · ${group}: ${subjectFor(mine)}`, render(`${group}: ${subjectFor(mine)}`, `Your ${d.frequency} Ambersight digest for ${group}.`, mine.slice(0, MAX_DIGEST_ROWS)));
   }
   await setSettings(db, { last_digest_at: stamp }).run();
 }
@@ -217,41 +196,11 @@ export async function sendAlerts(env: Env, now: Date, config: Config): Promise<v
  * Maps an account ID to its display label when the install watches more than one account,
  * and to undefined otherwise, so single-account alerts look exactly as before.
  */
-async function accountLabels(db: D1Database, config: Config): Promise<(id: string | undefined) => string | undefined> {
+export async function accountLabels(db: D1Database, config: Config): Promise<(id: string | undefined) => string | undefined> {
   const { results } = await db.prepare('SELECT id, name FROM accounts WHERE enabled = 1').all<{ id: string; name: string | null }>();
   if (results.length < 2) return () => undefined;
   const names = new Map(results.map((a) => [a.id, config.accounts[a.id]?.label ?? a.name ?? a.id]));
   return (id) => (id ? (names.get(id) ?? id) : undefined);
-}
-
-async function digestData(db: D1Database, now: Date, config: Config, days: number) {
-  const since = new Date(now.getTime() - days * DAY);
-  const sevs = (['critical', 'warning', 'info'] as const).filter((s) => config.alerts[s].digest);
-  const [findings, totals, events, deploys, workers] = await db.batch([
-    db.prepare(
-      `SELECT id, account, script, severity, message, action, evidence FROM findings WHERE status = 'open' AND severity IN (SELECT value FROM json_each(?1))
-       ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, first_seen DESC LIMIT 100`,
-    ).bind(JSON.stringify(sevs)),
-    db.prepare('SELECT COALESCE(SUM(requests),0) AS requests, COALESCE(SUM(errors),0) AS errors FROM metrics_hourly WHERE hour >= ?1').bind(isoHour(since)),
-    db.prepare('SELECT kind, script FROM fleet_events WHERE at >= ?1 ORDER BY at').bind(since.toISOString()),
-    db.prepare('SELECT script, created_on, author FROM deployments WHERE created_on >= ?1 ORDER BY created_on DESC LIMIT 50').bind(since.toISOString()),
-    db.prepare('SELECT name, tags FROM workers'),
-  ]);
-  const labels = await accountLabels(db, config);
-  for (const r of findings.results as unknown as Row[]) r.account = labels(r.account);
-  const t = totals.results[0] as { requests: number; errors: number };
-  const ev = events.results as { kind: string; script: string }[];
-  return {
-    rows: findings.results as unknown as Row[],
-    extras: {
-      requests: t.requests,
-      errors: t.errors,
-      added: ev.filter((e) => e.kind === 'added').map((e) => e.script),
-      removed: ev.filter((e) => e.kind === 'removed').map((e) => e.script),
-      deploys: deploys.results as DigestExtras['deploys'],
-    },
-    tags: new Map((workers.results as { name: string; tags: string | null }[]).map((w) => [w.name, w.tags ? (JSON.parse(w.tags) as string[]) : []])),
-  };
 }
 
 /**

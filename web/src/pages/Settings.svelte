@@ -15,9 +15,11 @@
   import { api, ApiError } from '../lib/api';
   import { fromDisplay, inputStep, rangeText, THRESHOLD_GROUPS, toDisplay, type ThresholdKey } from '../lib/thresholds';
 
-  let { workers, groups, account = null, accountCount = 1, onSaved, onAccountsChanged, onSignedOut, onUnauthorized }: {
+  let { workers, groups, account = null, accountCount = 1, features = null, onSaved, onAccountsChanged, onSignedOut, onUnauthorized }: {
     workers: string[];
     groups: string[];
+    /** Optional bindings present on this install (from the overview). */
+    features?: { queue: boolean; ai: boolean; pdf: boolean; turnstile: boolean } | null;
     /** The account selected in the header, for the Self-cost panel. */
     account?: string | null;
     accountCount?: number;
@@ -338,7 +340,12 @@
           {#each status?.watched ?? [] as id (id)}
             {#if draft.accounts[id]}
               <div class="row">
-                <div class="row-text"><p class="label">{accountName(id)}</p><p class="hint mono">{id}</p></div>
+                <div class="row-text">
+                  <p class="label">{accountName(id)}</p><p class="hint mono">{id}</p>
+                  <input class="input acct-digest" aria-label="Digest recipients for {accountName(id)}" placeholder="Client digest to (optional, comma-separated)"
+                    value={(draft.accounts[id].digestTo ?? []).join(', ')}
+                    onchange={(e) => { const l = splitList(e.currentTarget.value); draft!.accounts[id].digestTo = l.length ? l : undefined; }} />
+                </div>
                 <div class="inline">
                   <input class="input" aria-label="Label for {accountName(id)}" placeholder="Label (optional)" maxlength="60"
                     value={draft.accounts[id].label ?? ''} oninput={(e) => (draft!.accounts[id].label = e.currentTarget.value.trim() || undefined)} />
@@ -351,8 +358,13 @@
               </div>
             {/if}
           {/each}
-          {#if watchedCount > 1}
-            <div class="row"><div class="row-text"><p class="hint">With {watchedCount} accounts and one scan per 15-minute cron run, each account is scanned about every <strong>{intervalLabel(Math.max(draft.scanIntervalMinutes, watchedCount * 15)).replace('Every ', '').replace('Once a day', 'day')}</strong>.</p></div></div>
+          {#if watchedCount > 1 && features?.queue}
+            <div class="row"><div class="row-text"><p class="hint">The scan queue is on: every account is scanned at the interval you chose, each in its own run.</p></div></div>
+          {:else if watchedCount > 1}
+            <div class="row"><div class="row-text"><p class="hint">With {watchedCount} accounts and one scan per 15-minute cron run, each account is scanned about every <strong>{intervalLabel(Math.max(draft.scanIntervalMinutes, watchedCount * 15)).replace('Every ', '').replace('Once a day', 'day')}</strong>. Add the scan queue in <span class="mono">wrangler.jsonc</span> to scan them all on time.</p></div></div>
+          {/if}
+          {#if (status?.watched.length ?? 0) > 0}
+            <div class="row"><div class="row-text"><p class="hint">A client digest sends that account's own digest to the addresses given, on the digest schedule. Each address must also be in <span class="mono">DIGEST_TO</span>.</p></div></div>
           {/if}
         </div>
       </section>
@@ -488,10 +500,10 @@
         <h2 id="h-digest">Digest</h2>
         <div class="rows">
           <div class="row">
-            <div class="row-text"><p class="label">Send a summary</p><p class="hint">Open findings, new problems and budget use, by email.</p></div>
+            <div class="row-text"><p class="label">Send a summary</p><p class="hint">Open findings, free plan headroom, biggest traffic changes, the estimated bill and deploys, by email. Monthly goes out on the 1st.</p></div>
             <span class="inline">
               <span class="seg" role="group" aria-label="Digest frequency">
-                {#each ['daily', 'weekly', 'off'] as const as f (f)}
+                {#each ['daily', 'weekly', 'monthly', 'off'] as const as f (f)}
                   <button type="button" aria-pressed={draft.digest.frequency === f} onclick={() => (draft!.digest.frequency = f)}>{f[0].toUpperCase() + f.slice(1)}</button>
                 {/each}
               </span>
@@ -512,6 +524,22 @@
                 </select>
               </span>
             </div>
+            <div class="row">
+              <div class="row-text">
+                <p class="label">Plain-language summary</p>
+                <p class="hint">
+                  {#if features?.ai}A few sentences at the top on what to fix first, written by Workers AI from the findings. Uses a little of the account's free 10,000 neurons a day.
+                  {:else}Needs the <span class="mono">AI</span> binding in <span class="mono">wrangler.jsonc</span> (Workers AI, free allocation of 10,000 neurons a day).{/if}
+                </p>
+              </div>
+              <Switch label="Plain-language summary" disabled={!features?.ai} bind:checked={draft.digest.aiSummary} />
+            </div>
+            {#if draft.digest.aiSummary}
+              <div class="row">
+                <div class="row-text"><p class="label">Workers AI model</p><p class="hint">A small text model is enough. Some models need Workers Paid.</p></div>
+                <input class="input" aria-label="Workers AI model" spellcheck="false" bind:value={draft.digest.aiModel} />
+              </div>
+            {/if}
             <div class="field">
               <p class="label">Extra digest per group</p>
               <p class="hint">Sends a group-only digest to these addresses. Each address must also be in <span class="mono">DIGEST_TO</span>.</p>
@@ -591,6 +619,7 @@
   .sec-intro { font-size: 14px; line-height: 20px; color: var(--ink-muted); margin-top: -8px; }
   .sub-title { font-size: 14px; font-weight: 600; margin-top: 8px; }
   .rows { display: grid; }
+  .acct-digest { margin-top: 8px; width: 100%; max-width: 420px; }
   .acct-pick { margin: 0; padding: 0; border: 0; display: grid; gap: 6px; }
   .acct-pick label { display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; }
   .acct-pick input { width: 16px; height: 16px; accent-color: var(--accent); }

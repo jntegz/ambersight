@@ -4,7 +4,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getAccountState, getSettings, listAccounts, setAccountState, setSettings, upsertAccount } from '../src/worker/db';
 import type { Env } from '../src/worker/env';
 import { buildAccounts, buildOverview } from '../src/worker/overview';
-import { dueAccounts, effectiveIntervalMinutes, scheduledRun } from '../src/worker/scheduler';
+import { dueAccounts, effectiveIntervalMinutes, scheduledRun as runTick } from '../src/worker/scheduler';
+
+/** Without a queue, a tick scans one account and says which. */
+const scheduledRun = async (e: Env, now: Date) => (await runTick(e, now)) as { account: string; result: object } | null;
 import { runScan } from '../src/worker/scan';
 import { createD1 } from './d1';
 import { fakeFetch, NOW, type FakeOptions } from './fixtures';

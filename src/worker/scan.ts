@@ -38,6 +38,8 @@ export interface ScanResult {
   d1Queries?: number;
   warnings: string[];
   detailRemaining?: number;
+  /** Per-zone checks still waiting for a later scan. */
+  zonesRemaining?: number;
 }
 
 /** Scans one account. The scheduler (scheduler.ts) decides which account is due. */
@@ -664,7 +666,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
     recordUsage(db, now, { cronRuns: 1, subrequests: cf.calls, rowsRead: meter.rowsRead, rowsWritten: meter.rowsWritten }),
   ]);
 
-  return { workers: inventory.length, findings: findings.length, subrequests: cf.calls, d1Queries: meter.queries, warnings, detailRemaining };
+  return { workers: inventory.length, findings: findings.length, subrequests: cf.calls, d1Queries: meter.queries, warnings, detailRemaining, zonesRemaining: zonesLeft };
 }
 
 export function inventoryDue(now: Date, last: string | null, config: Config): boolean {

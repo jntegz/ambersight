@@ -6,7 +6,7 @@ import { CHECK_PATTERN } from './findings';
 
 export type PlanSetting = 'auto' | 'free' | 'paid';
 export type InstantChannel = 'email' | 'webhook' | 'both' | 'off';
-export type DigestFrequency = 'daily' | 'weekly' | 'off';
+export type DigestFrequency = 'daily' | 'weekly' | 'monthly' | 'off';
 
 export interface Thresholds {
   /** Share of the free daily request limit, e.g. 0.7. */
@@ -91,6 +91,10 @@ export interface Config {
     hour: number; // local hour in timeZone
     /** Extra digest per group, sent only to addresses also listed in DIGEST_TO. */
     groupRecipients: Record<string, string[]>;
+    /** A few plain sentences at the top of the digest, written by Workers AI (needs the AI binding). */
+    aiSummary: boolean;
+    /** Workers AI text model for the summary. */
+    aiModel: string;
   };
   timeZone: string;
   retentionDays: number;
@@ -107,6 +111,10 @@ export interface AccountSettings {
   /** Extra digest for this account (a client), sent only to addresses also listed in DIGEST_TO. */
   digestTo?: string[];
 }
+
+/** A small instruct model on the Workers AI free allocation. */
+export const DEFAULT_AI_MODEL = '@cf/meta/llama-3.2-3b-instruct';
+const AI_MODEL = /^@cf\/[\w.-]+\/[\w.-]+$/;
 
 export const DEFAULT_THRESHOLDS: Thresholds = {
   budgetWarn: 0.7,
@@ -143,7 +151,7 @@ export function defaultConfig(): Config {
       info: { instant: 'off', digest: true },
       quietHours: null,
     },
-    digest: { frequency: 'weekly', weekday: 1, hour: 8, groupRecipients: {} },
+    digest: { frequency: 'weekly', weekday: 1, hour: 8, groupRecipients: {}, aiSummary: false, aiModel: DEFAULT_AI_MODEL },
     timeZone: 'UTC',
     retentionDays: 30,
     updateCheck: true,
@@ -257,7 +265,9 @@ export function parseConfig(input: unknown): Config {
   }
 
   const dg = { ...d.digest, ...(isObj(v.digest) ? v.digest : {}) } as Record<string, unknown>;
-  if (!['daily', 'weekly', 'off'].includes(dg.frequency as string)) throw new ConfigError('digest.frequency must be daily, weekly or off.');
+  if (!['daily', 'weekly', 'monthly', 'off'].includes(dg.frequency as string)) throw new ConfigError('digest.frequency must be daily, weekly, monthly or off.');
+  if (typeof dg.aiSummary !== 'boolean') throw new ConfigError('digest.aiSummary must be true or false.');
+  if (typeof dg.aiModel !== 'string' || !AI_MODEL.test(dg.aiModel)) throw new ConfigError('digest.aiModel must be a Workers AI model ID such as @cf/meta/llama-3.2-3b-instruct.');
   const groupRecipients: Record<string, string[]> = {};
   if (!isObj(dg.groupRecipients)) throw new ConfigError('digest.groupRecipients must be an object.');
   for (const [g, list] of Object.entries(dg.groupRecipients)) {
@@ -311,6 +321,8 @@ export function parseConfig(input: unknown): Config {
       weekday: Math.round(num(dg.weekday, [0, 6], 'digest.weekday')),
       hour: Math.round(num(dg.hour, [0, 23], 'digest.hour')),
       groupRecipients,
+      aiSummary: dg.aiSummary as boolean,
+      aiModel: dg.aiModel as string,
     },
     timeZone: v.timeZone,
     retentionDays: Math.round(num(v.retentionDays, [7, 90], 'retentionDays')),

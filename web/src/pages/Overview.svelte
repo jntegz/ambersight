@@ -143,7 +143,18 @@
             {#if k === 'healthy' || fleet[k]}<li><span class="swatch {k}"></span>{label} <span class="num">{fleet[k]}</span></li>{/if}
           {/each}
         </ul>
-        {#if interval}<span class="next muted">Scans every {interval}</span>{/if}
+        <span class="foot-right">
+          {#if data.account}
+            {@const a = encodeURIComponent(data.account.id)}
+            <span class="report muted">
+              Report:
+              <a href="/api/report?account={a}&days=7" target="_blank" rel="noopener">7 days</a> ·
+              <a href="/api/report?account={a}&days=30" target="_blank" rel="noopener">30 days</a>{#if data.features?.pdf} ·
+                <a href="/api/report.pdf?account={a}&days=30">PDF</a>{/if}
+            </span>
+          {/if}
+          {#if interval}<span class="next muted">Scans every {interval}</span>{/if}
+        </span>
       </div>
     {/if}
   </section>
@@ -309,6 +320,9 @@
 {/if}
 
 <style>
+  .foot-right { display: inline-flex; align-items: center; gap: 16px; flex-wrap: wrap; justify-content: flex-end; }
+  .report { font-size: 13px; }
+  .report a { font-weight: 500; }
   .pages-list { list-style: none; margin: 0; padding: 4px 0; }
   .pages-list li {
     display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto auto; gap: 8px 16px; align-items: center;

@@ -6,14 +6,15 @@ import { Hono } from 'hono';
 import { csrf } from 'hono/csrf';
 import { HTTPException } from 'hono/http-exception';
 import { ConfigError, defaultConfig, isValidTimeZone, parseConfig } from '../shared/config';
-import { attemptFailed, attemptSucceeded, hasSession, hashPassphrase, checkPassphrase, login, logout, reserveAttempt } from './auth';
+import { attemptFailed, attemptSucceeded, hasSession, hashPassphrase, checkPassphrase, login, logout, reserveAttempt, turnstileOn, verifyTurnstile } from './auth';
 import { CfClient } from './cf';
 import { configFrom, getSettings, listAccounts, pinnedAccounts, recordUsage, setSettings, upsertAccount } from './db';
-import type { Env } from './env';
+import type { Env, ScanMessage } from './env';
 import { metered } from './meter';
 import { sendTest } from './notify';
 import { buildAccounts, buildOverview, buildSelfCost, buildTimeline, pickAccount } from './overview';
-import { scanAccount, scheduledRun } from './scheduler';
+import { reportHtml, reportPdf } from './report';
+import { handleQueueMessage, scanAccount, scheduledRun } from './scheduler';
 import { setupStatus } from './setup';
 import { VERSION } from './version';
 
@@ -42,12 +43,20 @@ app.use('/api/*', csrf());
 
 app.get('/api/health', (c) => c.json({ ok: true, version: VERSION }));
 
-app.get('/api/session', async (c) => c.json({ authenticated: await hasSession(c.env, c.req.header('Cookie') ?? null) }));
+app.get('/api/session', async (c) =>
+  c.json({
+    authenticated: await hasSession(c.env, c.req.header('Cookie') ?? null),
+    // Public by design: the site key is meant to be shown to every visitor of the sign-in page.
+    turnstileSiteKey: turnstileOn(c.env) ? c.env.TURNSTILE_SITE_KEY : null,
+  }),
+);
 
 app.post('/api/login', async (c) => {
-  const body = await c.req.json<{ passphrase?: unknown }>().catch(() => ({ passphrase: undefined }));
+  const body = await c.req.json<{ passphrase?: unknown; turnstile?: unknown }>().catch(() => ({ passphrase: undefined, turnstile: undefined }));
   if (typeof body.passphrase !== 'string' || body.passphrase.length > 512) return c.json({ error: 'Passphrase required.' }, 400);
-  const result = await login(c.env, body.passphrase, c.req.header('CF-Connecting-IP') ?? 'unknown');
+  const ip = c.req.header('CF-Connecting-IP') ?? 'unknown';
+  if (!(await verifyTurnstile(c.env, body.turnstile, ip))) return c.json({ error: 'The browser check did not pass. Try again.' }, 400);
+  const result = await login(c.env, body.passphrase, ip);
   if (!result.ok) return c.json({ error: result.error }, result.status);
   c.header('Set-Cookie', result.cookie);
   return c.json({ ok: true });
@@ -83,6 +92,22 @@ app.post('/api/scan', async (c) => {
   const account = await accountOf(c.env, typeof body.account === 'string' ? body.account : undefined);
   const r = await scanAccount(c.env, account, new Date(), true);
   return 'error' in r ? c.json({ error: `The scan failed: ${r.error}` }, 502) : c.json(r);
+});
+
+/** Client report for one account: printable HTML, or a PDF with the Browser Rendering binding. */
+app.get('/api/report', async (c) => {
+  const days = c.req.query('days') === '30' ? 30 : 7;
+  const { html } = await reportHtml(c.env, await accountOf(c.env, c.req.query('account')), days);
+  // The report is static HTML with inline styles: no scripts at all.
+  return c.html(html, 200, { 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" });
+});
+app.get('/api/report.pdf', async (c) => {
+  if (!c.env.BROWSER) return c.json({ error: 'PDF reports need the Browser Rendering binding (BROWSER in wrangler.jsonc). Open the HTML report and print it instead.' }, 400);
+  const days = c.req.query('days') === '30' ? 30 : 7;
+  const { html, title } = await reportHtml(c.env, await accountOf(c.env, c.req.query('account')), days);
+  const pdf = await reportPdf(c.env, html);
+  const name = `ambersight-${title.replace(/[^\w.-]+/g, '-').slice(0, 80)}.pdf`;
+  return c.body(pdf, 200, { 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="${name}"` });
 });
 
 /** Choose which accounts to watch (Settings › Accounts). Only accounts the token can see. */
@@ -242,4 +267,11 @@ export default {
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil(scheduledRun(env).then((r) => (r ? console.log(JSON.stringify({ scan: r })) : undefined)));
   },
-} satisfies ExportedHandler<Env>;
+  // Optional scan queue (SCAN_QUEUE in wrangler.jsonc). Batches are one message each.
+  async queue(batch: MessageBatch<ScanMessage>, env: Env) {
+    for (const msg of batch.messages) {
+      await handleQueueMessage(env, msg.body);
+      msg.ack();
+    }
+  },
+} satisfies ExportedHandler<Env, ScanMessage>;

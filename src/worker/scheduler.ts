@@ -6,7 +6,7 @@
 import { CfClient } from './cf';
 import { configFrom, getAccountState, getSettings, listAccounts, pinnedAccounts, setAccountState, upsertAccount, type AccountRow } from './db';
 import { sendSystemAlert } from './notify';
-import type { Env } from './env';
+import type { Env, ScanMessage } from './env';
 import { runScan, type ScanResult } from './scan';
 
 const MINUTE = 60_000;
@@ -102,13 +102,40 @@ export async function scanAccount(env: Env, account: string, now = new Date(), f
   }
 }
 
-/** The cron entry point: scan the most overdue account, if any. */
-export async function scheduledRun(env: Env, now = new Date()): Promise<{ account: string; result: ScanResult | { error: string } } | null> {
+/**
+ * The cron entry point. Without the scan queue: scan the most overdue account. With it: put every
+ * due account on the queue, where each scan runs in its own invocation with its own budget.
+ */
+export async function scheduledRun(env: Env, now = new Date()): Promise<{ account: string; result: ScanResult | { error: string } } | { queued: string[] } | null> {
   const settings = await getSettings(env.DB);
   if (settings.setup_done !== '1') return null;
   const due = await dueAccounts(env, now);
   if (!due.length) return null;
+  if (env.SCAN_QUEUE) {
+    // Marked as attempted now, so the next tick does not queue them again while they wait.
+    await env.DB.batch(due.map((a) => setAccountState(env.DB, a.id, { last_attempt_at: now.toISOString() })));
+    await env.SCAN_QUEUE.sendBatch(due.map((a) => ({ body: { kind: 'scan', account: a.id } satisfies ScanMessage })));
+    return { queued: due.map((a) => a.id) };
+  }
   const account = due[0].id;
   await setAccountState(env.DB, account, { last_attempt_at: now.toISOString() }).run();
   return { account, result: await scanAccount(env, account, now, true) };
+}
+
+/** Continuations per account per scan: enough for a few hundred Workers' details or zones. */
+export const MAX_CONTINUATIONS = 20;
+
+/**
+ * The queue consumer. A scan that could not finish (Workers still waiting for their details,
+ * zones still to read) queues a continuation, which runs as a new invocation with a fresh budget.
+ */
+export async function handleQueueMessage(env: Env, msg: ScanMessage, now = new Date()): Promise<ScanResult | { error: string }> {
+  const accounts = await activeAccounts(env, now);
+  if (!accounts.some((a) => a.id === msg.account)) return { error: 'Account is no longer watched.' };
+  const result = await scanAccount(env, msg.account, now, true);
+  const step = (msg.step ?? 0) + 1;
+  if (!('error' in result) && env.SCAN_QUEUE && step <= MAX_CONTINUATIONS && ((result.detailRemaining ?? 0) > 0 || (result.zonesRemaining ?? 0) > 0)) {
+    await env.SCAN_QUEUE.send({ kind: 'continue', account: msg.account, step } satisfies ScanMessage);
+  }
+  return result;
 }

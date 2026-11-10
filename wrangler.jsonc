@@ -37,9 +37,30 @@
     "EMAIL_FROM": "",
     // Verified recipient(s), comma-separated. Must match send_email below.
     "DIGEST_TO": "",
-    // Optional: pin the account if the token can see more than one.
-    "CF_ACCOUNT_ID": ""
+    // Optional: pin the accounts to watch (comma-separated IDs). Empty: choose them in the setup wizard.
+    "CF_ACCOUNT_ID": "",
+    // Optional: Cloudflare Turnstile on the sign-in page. Put the site key here and the secret in
+    // the TURNSTILE_SECRET secret (npx wrangler secret put TURNSTILE_SECRET). Free.
+    "TURNSTILE_SITE_KEY": ""
   }
+
+  // ---- Optional bindings. Each is free and off until you uncomment it. -------------------------
+
+  // Scan queue (Queues, free plan: 10,000 operations a day). Every due account is scanned on time,
+  // each in its own run with its own subrequest budget, and large fleets finish in one go.
+  // Create the queue once first: npx wrangler queues create ambersight-scans
+  // "queues": {
+  //   "producers": [{ "binding": "SCAN_QUEUE", "queue": "ambersight-scans" }],
+  //   "consumers": [{ "queue": "ambersight-scans", "max_batch_size": 1, "max_concurrency": 1, "max_retries": 0 }]
+  // },
+
+  // Workers AI, for a plain-language summary at the top of the digest (turn it on in
+  // Settings › Digest). Free allocation: 10,000 neurons a day; one digest uses a few hundred.
+  // "ai": { "binding": "AI" },
+
+  // Browser Rendering, for PDF reports (free plan: 10 minutes of browser time a day).
+  // Without it, the report opens as a page you can print to PDF.
+  // "browser": { "binding": "BROWSER" },
 
   // Webhook alerts (optional): `npx wrangler secret put WEBHOOK_URL` with a Slack, Discord,
   // Telegram (…/sendMessage?chat_id=…), ntfy or generic JSON endpoint URL.

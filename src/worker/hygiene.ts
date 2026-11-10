@@ -38,10 +38,11 @@ const DOCS = {
 /**
  * Flags that do nothing once the compatibility date is on or after `since`, because the
  * behaviour became the default. Extend this list as Cloudflare graduates flags.
- * TODO(PRD M2): confirm which nodejs_compat flags become redundant on 2026-08-04 and add them here.
+ * From 2026-08-04 Node.js compatibility is on by default (workers changelog 2026-08-04-nodejs-compat-default).
  */
 export const REDUNDANT_FLAGS: { flag: string; since: string; note: string }[] = [
   { flag: 'nodejs_compat_v2', since: '2024-09-23', note: 'nodejs_compat includes v2 behaviour from 2024-09-23' },
+  { flag: 'nodejs_compat', since: '2026-08-04', note: 'Node.js compatibility is the default from 2026-08-04' },
 ];
 
 export function deprecationFindings(now: Date, meta: WorkerMeta[], tf: (n: string) => Thresholds): Finding[] {

@@ -43,14 +43,16 @@ export function inQuietHours(d: Date, timeZone: string, q: { start: string; end:
  * and no digest went out for this slot yet.
  */
 export function digestDue(
-  now: Date, timeZone: string, frequency: 'daily' | 'weekly' | 'off', weekday: number, hour: number, lastSentAt: string | null,
+  now: Date, timeZone: string, frequency: 'daily' | 'weekly' | 'monthly' | 'off', weekday: number, hour: number, lastSentAt: string | null,
 ): boolean {
   if (frequency === 'off') return false;
   const t = localTime(now, timeZone);
   if (frequency === 'weekly' && t.weekday !== weekday) return false;
+  // Monthly: the first of the month, local time.
+  if (frequency === 'monthly' && !t.date.endsWith('-01')) return false;
   if (t.hour < hour) return false;
   if (!lastSentAt) return true;
   const last = localTime(new Date(lastSentAt), timeZone);
-  const minGapMs = (frequency === 'weekly' ? 6 : 0.5) * 86_400_000;
+  const minGapMs = (frequency === 'monthly' ? 25 : frequency === 'weekly' ? 6 : 0.5) * 86_400_000;
   return last.date !== t.date && now.getTime() - new Date(lastSentAt).getTime() >= minGapMs;
 }

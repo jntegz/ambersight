@@ -225,6 +225,7 @@ export async function buildOverview(env: Env, requested?: string | null, now = n
     storage,
     cost,
     pages,
+    features: { queue: Boolean(env.SCAN_QUEUE), ai: Boolean(env.AI), pdf: Boolean(env.BROWSER), turnstile: Boolean(env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET) },
     findings: open,
     workers: summaries,
     groups: [...new Set(visible.flatMap((w) => w.groups))].sort(),

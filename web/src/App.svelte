@@ -182,22 +182,25 @@
     }
   }
 
+  let turnstileSiteKey = $state<string | null>(null);
   onMount(async () => {
-    const s = await api.session().catch(() => ({ authenticated: false }));
+    const s = await api.session().catch(() => ({ authenticated: false, turnstileSiteKey: null }));
+    turnstileSiteKey = s.turnstileSiteKey ?? null;
     if (s.authenticated) await load();
     else view = 'login';
   });
 
   const searchable = $derived(route !== 'settings');
   // An account that has not been scanned for 3 of its intervals: the cron may be detached.
-  const interval = $derived(Math.max(config?.scanIntervalMinutes ?? 60, (data?.accountCount ?? 1) * 15));
+  // Without the scan queue, one cron tick (every 15 min) scans one account.
+  const interval = $derived(data?.features?.queue ? (config?.scanIntervalMinutes ?? 60) : Math.max(config?.scanIntervalMinutes ?? 60, (data?.accountCount ?? 1) * 15));
   const stale = $derived(!!data?.lastScanAt && Date.now() - new Date(data.lastScanAt).getTime() > 3 * interval * 60_000);
 </script>
 
 <svelte:window onkeydown={onKey} onhashchange={onHash} />
 
 {#if view === 'login'}
-  <Login onSignedIn={load} message={loginMessage} />
+  <Login onSignedIn={load} message={loginMessage} {turnstileSiteKey} />
 {:else if view === 'loading'}
   <main class="center muted"><span class="draw"><Logo size={64} /></span><p>Reading your Workers…</p></main>
 {:else if view === 'error'}
@@ -309,13 +312,14 @@
         groups={data.groups ?? []}
         account={selected}
         accountCount={data.accountCount}
+        features={data.features ?? null}
         onAccountsChanged={load}
         onSaved={(c) => { config = c; load(); }}
         onSignedOut={signedOut}
         onUnauthorized={() => signedOut()}
       />
     {:else}
-      <Overview {data} {query} scanInterval={config?.scanIntervalMinutes ?? null} mutedChecks={config?.mutedChecks ?? []} onAcknowledge={acknowledge} onSnooze={snooze} onBulk={bulk} onMute={mute} />
+      <Overview {data} {query} scanInterval={config ? interval : null} mutedChecks={config?.mutedChecks ?? []} onAcknowledge={acknowledge} onSnooze={snooze} onBulk={bulk} onMute={mute} />
     {/if}
 
     <footer class="foot muted">

@@ -20,4 +20,25 @@ export interface Env {
   EMAIL?: EmailBinding;
   /** Optional webhook for instant alerts (Worker secret): Slack, Discord, Telegram, ntfy or any JSON endpoint. */
   WEBHOOK_URL?: string;
+  /** Optional scan queue (Queues, free plan: 10,000 operations a day): every due account scans at once. */
+  SCAN_QUEUE?: Queue<ScanMessage>;
+  /** Optional Workers AI binding, for the plain-language digest summary. */
+  AI?: AiBinding;
+  /** Optional Browser Rendering binding, for PDF reports. */
+  BROWSER?: Fetcher;
+  /** Optional Turnstile on the sign-in page: the site key (var) and secret (Worker secret). */
+  TURNSTILE_SITE_KEY?: string;
+  TURNSTILE_SECRET?: string;
+}
+
+/** One unit of work on the scan queue. `step` counts continuations of the same account's scan. */
+export interface ScanMessage {
+  kind: 'scan' | 'continue';
+  account: string;
+  step?: number;
+}
+
+/** Workers AI binding, only the call Ambersight makes. */
+export interface AiBinding {
+  run(model: string, input: { messages: { role: 'system' | 'user'; content: string }[]; max_tokens?: number }): Promise<{ response?: string } | unknown>;
 }

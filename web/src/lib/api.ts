@@ -31,8 +31,9 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
 const q = (account?: string) => (account ? `?account=${encodeURIComponent(account)}` : '');
 
 export const api = {
-  session: () => call<{ authenticated: boolean }>('/api/session'),
-  login: (passphrase: string) => call<{ ok: true }>('/api/login', { method: 'POST', body: JSON.stringify({ passphrase }) }),
+  session: () => call<{ authenticated: boolean; turnstileSiteKey?: string | null }>('/api/session'),
+  login: (passphrase: string, turnstile?: string) =>
+    call<{ ok: true }>('/api/login', { method: 'POST', body: JSON.stringify({ passphrase, ...(turnstile ? { turnstile } : {}) }) }),
   logout: () => call<{ ok: true }>('/api/logout', { method: 'POST' }),
   overview: (account?: string) => call<Overview>(`/api/overview${q(account)}`),
   /** The "All accounts" view. */

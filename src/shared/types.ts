@@ -107,6 +107,8 @@ export interface Overview {
   cost: CostEstimate | null;
   /** Pages projects, when the Pages module is on and the token can read them. */
   pages: PagesSummary[];
+  /** Optional bindings present on this install. */
+  features: { queue: boolean; ai: boolean; pdf: boolean; turnstile: boolean };
   findings: Finding[];
   workers: WorkerSummary[];
   groups: string[];
