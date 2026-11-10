@@ -3,6 +3,8 @@
 <script lang="ts">
   import type { Overview, Severity, WorkerSummary } from '../../../src/shared/types';
   import BudgetMeter from '../components/BudgetMeter.svelte';
+  import CostPanel from '../components/CostPanel.svelte';
+  import LimitsPanel from '../components/LimitsPanel.svelte';
   import { checkOf, groupFindings } from '../../../src/shared/findings';
   import FindingGroup from '../components/FindingGroup.svelte';
   import FindingRow from '../components/FindingRow.svelte';
@@ -183,6 +185,17 @@
   </section>
 </div>
 
+{#if !group}
+  {@const capped = (data.storage ?? []).some((s) => s.limit != null)}
+  {@const showLimits = (data.quotas ?? []).length > 0 || capped}
+  {#if showLimits || data.cost}
+    <div class="extras" class:pair={showLimits && data.cost}>
+      {#if showLimits}<LimitsPanel quotas={data.quotas ?? []} storage={data.storage ?? []} paid={data.account?.plan === 'paid'} warnAt={data.budget?.warnAt} criticalAt={data.budget?.criticalAt} />{/if}
+      {#if data.cost}<CostPanel cost={data.cost} />{/if}
+    </div>
+  {/if}
+{/if}
+
 <section aria-labelledby="attention-title">
   <div class="section-head">
     <h2 id="attention-title">Needs attention <span class="count">{scopedFindings.length}</span></h2>
@@ -315,6 +328,8 @@
   .swatch.healthy { background: color-mix(in srgb, var(--healthy) 30%, var(--surface)); }
 
   .kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+  .extras { display: grid; gap: 20px; }
+  .extras.pair { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .kpi { padding: 20px 24px; display: grid; gap: 16px; align-content: space-between; }
   .kpi-label { font-size: 13px; line-height: 18px; font-weight: 500; color: var(--ink-muted); }
   .kpi-value { margin-top: 4px; font-size: 36px; line-height: 40px; font-weight: 600; letter-spacing: -0.03em; }
@@ -364,7 +379,7 @@
   .caret { display: inline-flex; transition: transform 150ms; }
   .caret.open { transform: rotate(180deg); }
 
-  @media (max-width: 960px) { .hero { grid-template-columns: 1fr; } }
+  @media (max-width: 960px) { .hero, .extras.pair { grid-template-columns: 1fr; } }
   @media (max-width: 760px) {
     .kpis { grid-template-columns: 1fr; gap: 16px; }
     .status, .kpi { padding: 18px; }

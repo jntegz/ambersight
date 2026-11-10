@@ -40,13 +40,15 @@
   const visible = $derived(
     (entries ?? []).filter(
       (e) =>
-        (!group || e.groups.includes(group)) &&
+        // Cloudflare's own notifications are account-wide: they show under every group.
+        (!group || e.groups.includes(group) || e.kind === 'cf-alert') &&
         (!onlyFlagged || e.correlated.length) &&
         (!q || e.script.toLowerCase().includes(q) || (e.message ?? '').toLowerCase().includes(q) || (e.author ?? '').toLowerCase().includes(q)),
     ),
   );
   const flagged = $derived(visible.filter((e) => e.correlated.length).length);
-  const workersTouched = $derived(new Set(visible.map((e) => e.script)).size);
+  const deploys = $derived(visible.filter((e) => e.kind !== 'cf-alert'));
+  const workersTouched = $derived(new Set(deploys.map((e) => e.script)).size);
 
   const dayKey = (iso: string) => iso.slice(0, 10);
   const byDay = $derived.by(() => {
@@ -61,7 +63,7 @@
   // Deploys per day for the chart, oldest first, ending today (UTC).
   const perDay = $derived.by(() => {
     const counts = new Map<string, number>();
-    for (const e of visible) counts.set(dayKey(e.createdOn), (counts.get(dayKey(e.createdOn)) ?? 0) + 1);
+    for (const e of deploys) counts.set(dayKey(e.createdOn), (counts.get(dayKey(e.createdOn)) ?? 0) + 1);
     return Array.from({ length: days }, (_, i) => counts.get(new Date(Date.now() - (days - 1 - i) * 86_400_000).toISOString().slice(0, 10)) ?? 0);
   });
 
@@ -105,7 +107,7 @@
 {:else}
   <div class="summary card" class:stale={loading}>
     <dl class="facts">
-      <div><dt>Deploys</dt><dd>{num(visible.length)}</dd></div>
+      <div><dt>Deploys</dt><dd>{num(deploys.length)}</dd></div>
       <div><dt>Workers deployed</dt><dd>{num(workersTouched)}</dd></div>
       <div><dt>Followed by a problem</dt><dd class:bad={flagged > 0}>{num(flagged)}</dd></div>
     </dl>
@@ -126,9 +128,20 @@
           <h2 class="day-title">{dayTitle(d.day)} <span class="count">{d.items.length}</span></h2>
           <ol class="card entries">
             {#each d.items as e (e.script + e.id)}
-              <li class="entry" class:flagged={e.correlated.length > 0}>
+              <li class="entry" class:flagged={e.correlated.length > 0} class:cf={e.kind === 'cf-alert'}>
                 <time datetime={e.createdOn} title={new Date(e.createdOn).toUTCString()}>{time(e.createdOn)}<span class="muted"> UTC</span></time>
                 <span class="node" aria-hidden="true"></span>
+                {#if e.kind === 'cf-alert'}
+                <div class="body">
+                  <p class="line1">
+                    <span class="cf-badge"><Icon name="mail" size={13} /> Cloudflare notification</span>
+                    {#if e.source}<span class="tag-chip">{e.source}</span>{/if}
+                    <span class="ago muted">{timeAgo(e.createdOn)}</span>
+                  </p>
+                  <p class="msg">{e.message ?? 'Cloudflare sent a notification.'}</p>
+                </div>
+                <span></span>
+                {:else}
                 <div class="body">
                   <p class="line1">
                     <a class="script mono" href="#{workerId(e.script)}">{e.script}</a>
@@ -147,6 +160,7 @@
                   {/if}
                 </div>
                 <span class="id mono muted" title="Deployment ID">{e.id.slice(0, 8)}</span>
+                {/if}
               </li>
             {/each}
           </ol>
@@ -157,6 +171,8 @@
 {/if}
 
 <style>
+  .cf-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; font-weight: 600; color: var(--accent); }
+  .entry.cf .node { box-shadow: inset 0 0 0 2px var(--accent); }
   .controls { display: flex; gap: 8px; }
   .filters { display: flex; align-items: center; gap: 12px 20px; flex-wrap: wrap; }
   .flag-toggle { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; color: var(--ink-muted); }

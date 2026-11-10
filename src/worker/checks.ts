@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { DEFAULT_THRESHOLDS, defaultConfig, type Config, type Thresholds } from '../shared/config';
+import { FREE_DAILY, FREE_DAILY_REQUESTS, LOGS, STORAGE_LIMITS, unitPrice, type QuotaMetric, type StorageKind } from '../shared/limits';
 import type { Finding, Severity } from '../shared/types';
 import { hygieneFindings, type InventoryFacts } from './hygiene';
 
@@ -21,9 +22,12 @@ export const FLOORS = {
   runawayMinOps: 1_000,
   runawayMinHistoryHours: 72,
   logsVolumeRequests: 10_000,
+  /** Idle loop: operations an hour, every hour, with almost no requests behind them. */
+  idleMinOps: 2_000,
+  idleOpsPerRequest: 100,
 };
 
-export const FREE_DAILY_REQUESTS = 100_000;
+export { FREE_DAILY_REQUESTS };
 export const FREE_CPU_MS = 10;
 export const CRON_CPU_MS = { free: 10, paid: 30_000 };
 export const CRON_LIMIT = { free: 5, paid: 250 };
@@ -96,6 +100,10 @@ export interface ResourceStats {
   lastHour: number;
   median7d: number;
   historyHours: number;
+  /** Operations in each of the last 3 full hours, oldest first. */
+  recentOps?: number[];
+  /** Requests to the Workers bound to this resource in the same hours; null when none is known. */
+  recentRequests?: number[] | null;
 }
 
 export interface CheckInput {
@@ -112,6 +120,12 @@ export interface CheckInput {
   config?: Config;
   /** Per-Worker thresholds (overrides already applied). Falls back to config.thresholds. */
   thresholdsFor?: (name: string) => Thresholds;
+  /** Account-wide usage since 00:00 UTC per quota metric. */
+  quotaToday?: Partial<Record<QuotaMetric, number>>;
+  /** Latest storage sizes, with display labels. */
+  storage?: { kind: StorageKind; id: string; bytes: number; label: string }[];
+  /** When the API token expires; null when it does not or is unknown. */
+  tokenExpiresOn?: string | null;
 }
 
 const DOCS = {
@@ -154,14 +168,181 @@ export function budgetFindings(input: CheckInput, t: Thresholds): Finding[] {
 }
 
 /** Linear projection of when today's free limit is reached, or null if not today. */
-export function projectLimitTime(now: Date, usedToday: number): string | null {
+export function projectLimitTime(now: Date, usedToday: number, limit = FREE_DAILY_REQUESTS): string | null {
   const midnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   const elapsedMs = now.getTime() - midnight;
   if (usedToday <= 0 || elapsedMs <= 0) return null;
-  if (usedToday >= FREE_DAILY_REQUESTS) return now.toISOString();
+  if (usedToday >= limit) return now.toISOString();
   const rate = usedToday / elapsedMs;
-  const hitAt = midnight + FREE_DAILY_REQUESTS / rate;
+  const hitAt = midnight + limit / rate;
   return hitAt < midnight + 86_400_000 ? new Date(hitAt).toISOString() : null;
+}
+
+/**
+ * The other free daily limits: D1 rows, KV operations by type, Durable Objects, Queues, Workflows
+ * and Workers AI. On the Free plan each one fails hard until 00:00 UTC. Workers AI has the same
+ * allocation on Paid, where usage past it is billed.
+ */
+export function quotaFindings(input: CheckInput, t: Thresholds): Finding[] {
+  const out: Finding[] = [];
+  for (const q of FREE_DAILY) {
+    const used = input.quotaToday?.[q.metric] ?? 0;
+    if (!used) continue;
+    const share = used / q.limit;
+    if (input.plan === 'paid') {
+      if (q.metric === 'ai.neurons' && share >= 1) {
+        out.push(finding(
+          'budget', '*', `free-daily-${q.slug}`, 'info',
+          `Workers AI has used ${fmt(used)} neurons today, past the ${fmt(q.limit)} free daily allocation.`,
+          { usedToday: Math.round(used), freeAllocation: q.limit },
+          'Usage past the allocation is billed at $0.011 per 1,000 neurons. Check which Worker calls Workers AI if this is unexpected.',
+          q.docs,
+        ));
+      }
+      continue;
+    }
+    if (share < t.budgetWarn) continue;
+    const projected = projectLimitTime(input.now, used, q.limit);
+    out.push(finding(
+      'budget', '*', `free-daily-${q.slug}`, share >= t.budgetCritical ? 'critical' : 'warning',
+      share >= 1 ? `The account is out of free ${q.label} for today (${fmt(used)} of ${fmt(q.limit)}).` : `You have used ${pct(share)} of today's free ${q.label} (${fmt(used)} of ${fmt(q.limit)}).`,
+      { usedToday: Math.round(used), limit: q.limit, projectedLimitAt: share >= 1 ? 'reached' : projected ?? 'not today' },
+      share >= 1
+        ? `${q.exceeded} Find the Worker behind it, or move to Workers Paid.`
+        : projected
+          ? `At this pace the account runs out around ${projected.slice(11, 16)} UTC. ${q.exceeded} The limit is per account, so spreading the work over several Workers does not help.`
+          : 'Usage is high but should stay under the limit today.',
+      q.docs,
+    ));
+  }
+  return out;
+}
+
+const GB = 1e9;
+const gb = (bytes: number) => `${(bytes / GB).toFixed(bytes < 10 * GB ? 2 : 1)} GB`;
+const STORAGE_NAMES: Record<StorageKind, string> = { d1: 'D1', kv: 'KV', r2: 'R2', do: 'Durable Object' };
+const STORAGE_DOCS: Record<StorageKind, string> = {
+  d1: 'https://developers.cloudflare.com/d1/platform/limits/',
+  kv: 'https://developers.cloudflare.com/kv/platform/limits/',
+  r2: 'https://developers.cloudflare.com/r2/pricing/',
+  do: 'https://developers.cloudflare.com/durable-objects/platform/limits/',
+};
+
+/** Storage close to a cap: per D1 database, and per account for each product. */
+export function storageFindings(input: CheckInput): Finding[] {
+  const out: Finding[] = [];
+  const limits = STORAGE_LIMITS[input.plan];
+  const sev = (share: number): Severity | null => (share >= 0.95 ? 'critical' : share >= 0.8 ? 'warning' : null);
+  const totals = new Map<StorageKind, number>();
+  for (const s of input.storage ?? []) {
+    totals.set(s.kind, (totals.get(s.kind) ?? 0) + s.bytes);
+    const cap = limits[s.kind].perResource;
+    if (!cap || s.id === '*') continue;
+    const severity = sev(s.bytes / cap);
+    if (!severity) continue;
+    out.push(finding(
+      'budget', '*', `storage-${s.kind}-db-${s.id}`, severity,
+      `${STORAGE_NAMES[s.kind]} database ${s.label} is ${gb(s.bytes)}, ${pct(s.bytes / cap)} of the ${gb(cap)} limit per database.`,
+      { database: s.label, size: gb(s.bytes), limit: gb(cap) },
+      'A full database rejects writes. Delete old rows, split the data across databases, or move large values to R2.',
+      STORAGE_DOCS[s.kind],
+    ));
+  }
+  for (const [kind, bytes] of totals) {
+    const cap = limits[kind].account;
+    if (!cap) continue;
+    const share = bytes / cap;
+    const severity = sev(share);
+    if (!severity) continue;
+    const billed = limits[kind].billed;
+    out.push(finding(
+      'budget', '*', `storage-${kind}-account`, billed ? 'warning' : severity,
+      `${STORAGE_NAMES[kind]} storage is ${gb(bytes)}, ${pct(share)} of the ${gb(cap)} ${input.plan === 'free' ? 'free' : ''} account limit.`.replace('  ', ' '),
+      { stored: gb(bytes), limit: gb(cap) },
+      billed
+        ? 'Storage past the free amount is billed. Delete what you no longer need, or set lifecycle rules.'
+        : 'At the limit, new writes fail. Delete old data, or move to Workers Paid for more room.',
+      STORAGE_DOCS[kind],
+    ));
+  }
+  return out;
+}
+
+/** Ambersight's own health: a token that expires soon leaves it blind. */
+export function healthFindings(input: CheckInput): Finding[] {
+  if (!input.tokenExpiresOn) return [];
+  const days = (new Date(input.tokenExpiresOn).getTime() - input.now.getTime()) / 86_400_000;
+  if (!Number.isFinite(days) || days > 14) return [];
+  const when = input.tokenExpiresOn.slice(0, 10);
+  return [finding(
+    'health', '*', 'token-expiry', days <= 3 ? 'critical' : 'warning',
+    days <= 0 ? `Ambersight's API token expired on ${when}. Scans stop working.` : `Ambersight's API token expires on ${when}, in ${Math.max(1, Math.round(days))} day${Math.round(days) === 1 ? '' : 's'}.`,
+    { expiresOn: when },
+    'Create a new read-only token (or extend this one under My Profile › API Tokens), then update the CF_API_TOKEN secret.',
+    'https://developers.cloudflare.com/fundamentals/api/get-started/create-token/',
+  )];
+}
+
+/**
+ * Runaway work with nothing driving it: a Durable Object alarm or Queue retry loop keeps going
+ * while the Workers bound to it see almost no requests. The 5x baseline cannot catch a loop that
+ * started on day one; this can.
+ */
+export function idleLoopFindings(input: CheckInput): Finding[] {
+  const names = { d1: 'D1 queries', kv: 'KV operations', r2: 'R2 operations', do: 'Durable Object requests', queues: 'Queue operations' };
+  const out: Finding[] = [];
+  for (const r of input.resources ?? []) {
+    if (!r.recentOps || !r.recentRequests || r.recentOps.length < 3) continue;
+    const idle = r.recentOps.every((ops, i) => ops >= FLOORS.idleMinOps && r.recentRequests![i] * FLOORS.idleOpsPerRequest < ops);
+    if (!idle) continue;
+    const perHour = Math.round(r.recentOps.reduce((a, b) => a + b, 0) / 3);
+    const cost = input.plan === 'paid' ? costPerHour(r.kind, perHour) : 0;
+    out.push(finding(
+      'usage', r.script, `idle-loop-${r.kind}-${r.resource}`, input.plan === 'paid' ? 'critical' : 'warning',
+      `${names[r.kind]} on ${r.label} ran at about ${fmt(perHour)} an hour for 3 hours while its Workers had almost no requests.${cost >= 0.01 ? ` That is about $${cost.toFixed(2)} an hour.` : ''}`,
+      { resource: r.label, opsPerHour: perHour, requests3h: r.recentRequests.reduce((a, b) => a + b, 0) },
+      'Work with nothing driving it is usually a loop: a Durable Object alarm that always sets the next alarm, a Queue consumer that fails and retries every message, or a cron that never finishes. Find it before it runs all night.',
+      'https://developers.cloudflare.com/durable-objects/api/alarms/',
+    ));
+  }
+  return out;
+}
+
+/** List price of one hour of extra operations of a kind, for runaway messages on Paid. */
+function costPerHour(kind: ResourceStats['kind'], ops: number): number {
+  const metric: Partial<Record<ResourceStats['kind'], QuotaMetric>> = { do: 'do.requests', queues: 'queues.ops', kv: 'kv.read' };
+  return metric[kind] ? ops * unitPrice(metric[kind]!) : 0;
+}
+
+/** Absolute floors for Workers and resources too new for the 5x baseline (under 72 hours of history). */
+export function burstFindings(input: CheckInput, tf: (n: string) => Thresholds): Finding[] {
+  const out: Finding[] = [];
+  const t = input.config?.thresholds ?? DEFAULT_THRESHOLDS;
+  const sev: Severity = input.plan === 'paid' ? 'critical' : 'warning';
+  for (const w of input.workers) {
+    if (w.historyHours >= FLOORS.runawayMinHistoryHours) continue;
+    const limit = tf(w.name).newWorkerHourlyRequests;
+    if (w.lastHourRequests < limit) continue;
+    const cost = input.plan === 'paid' ? w.lastHourRequests * unitPrice('workers.requests') + (w.lastHourCpuUs / 1000) * unitPrice('workers.cpuMs') : 0;
+    out.push(finding(
+      'runaway', w.name, 'new-worker-burst', sev,
+      `This Worker is new and served ${fmt(w.lastHourRequests)} requests in the last hour.${cost >= 0.01 ? ` About $${cost.toFixed(2)} an hour at list price.` : ''}`,
+      { lastHour: w.lastHourRequests, threshold: limit, historyHours: w.historyHours },
+      'It has too little history for the usual comparison. If this traffic is not expected, look for a loop, a retry storm or a crawler.',
+      DOCS.budget,
+    ));
+  }
+  for (const r of input.resources ?? []) {
+    if (r.historyHours >= FLOORS.runawayMinHistoryHours || r.lastHour < t.newResourceHourlyOps) continue;
+    out.push(finding(
+      'usage', r.script, `new-resource-burst-${r.kind}-${r.resource}`, sev,
+      `${r.label} is new and had ${fmt(r.lastHour)} operations in the last hour.`,
+      { resource: r.label, lastHour: r.lastHour, threshold: t.newResourceHourlyOps },
+      'It has too little history for the usual comparison. If this is not expected, look for a loop writing or reading in a hot path.',
+      DOCS.pricing,
+    ));
+  }
+  return out;
 }
 
 export function errorFindings(input: CheckInput, tf: (n: string) => Thresholds): Finding[] {
@@ -232,10 +413,13 @@ export function runawayFindings(input: CheckInput, tf: (n: string) => Thresholds
       if (last < floor) continue;
       const ratio = last / Math.max(usual, 1);
       if (ratio < t.runawayMultiplier) continue;
+      const extra = input.plan === 'paid'
+        ? code === 'traffic-spike' ? (last - usual) * unitPrice('workers.requests') : code === 'cpu-spike' ? (last - usual) * unitPrice('workers.cpuMs') : 0
+        : 0;
       out.push(finding(
         'runaway', w.name, code, 'critical',
-        `${label} in the last hour ${label === 'CPU time' ? 'is' : 'are'} ${Math.round(ratio)}x this Worker's usual hourly level.`,
-        { lastHour: show(last), usualHour: show(usual) },
+        `${label} in the last hour ${label === 'CPU time' ? 'is' : 'are'} ${Math.round(ratio)}x this Worker's usual hourly level.${extra >= 0.01 ? ` About $${extra.toFixed(2)} an hour above usual.` : ''}`,
+        { lastHour: show(last), usualHour: show(usual), ...(extra >= 0.01 ? { extraPerHour: `$${extra.toFixed(2)}` } : {}) },
         'Check for a loop, a retry storm or a crawler. On Workers Paid this usage is billed; there is no hard spending cap.',
         DOCS.budget,
       ));
@@ -268,14 +452,39 @@ export function resourceFindings(input: CheckInput): Finding[] {
 export function loggingFindings(input: CheckInput): Finding[] {
   const out: Finding[] = [];
   const stats = new Map(input.workers.map((w) => [w.name, w]));
+  // Estimated log volume per Worker: requests a day x sampling rate x an average event size.
+  const volume = (input.meta ?? [])
+    .filter((m) => m.logsEnabled)
+    .map((m) => ({ name: m.name, gbPerDay: ((stats.get(m.name)?.requests24h ?? 0) * (m.samplingRate ?? 1) * LOGS.bytesPerEventEstimate) / 1e9 }))
+    .filter((v) => v.gbPerDay > 0)
+    .sort((a, b) => b.gbPerDay - a.gbPerDay);
+  const totalGb = volume.reduce((n, v) => n + v.gbPerDay, 0);
+  if (input.plan === 'free' && totalGb >= LOGS.freeGbPerDay * 0.7) {
+    const stopsAt = totalGb > LOGS.freeGbPerDay ? new Date(Date.UTC(input.now.getUTCFullYear(), input.now.getUTCMonth(), input.now.getUTCDate()) + (LOGS.freeGbPerDay / totalGb) * 86_400_000).toISOString().slice(11, 16) : null;
+    out.push(finding(
+      'usage', '*', 'logs-free-allowance', totalGb > LOGS.freeGbPerDay ? 'warning' : 'info',
+      stopsAt
+        ? `Workers send an estimated ${totalGb.toFixed(2)} GB of logs a day, more than the free 0.5 GB. Logs stop being stored around ${stopsAt} UTC each day.`
+        : `Workers send an estimated ${totalGb.toFixed(2)} GB of logs a day, close to the free 0.5 GB.`,
+      { estimatedGbPerDay: Number(totalGb.toFixed(2)), freeGbPerDay: LOGS.freeGbPerDay, largest: volume.slice(0, 3).map((v) => v.name).join(', ') },
+      'From 1 December 2026, Free accounts ingest 0.5 GB of logs and traces a day, then nothing until 00:00 UTC. Lower head_sampling_rate on the busiest Workers so the logs you need are kept. The estimate assumes about 1.5 KB per event.',
+      LOGS.docs,
+    ));
+  }
+  const paidExtra = input.plan === 'paid' ? Math.max(0, totalGb * 30 - LOGS.paidIncludedGbPerCycle) * LOGS.paidPerGb : 0;
   for (const m of input.meta ?? []) {
     const s = stats.get(m.name);
     if (m.logsEnabled && (m.samplingRate ?? 1) >= 1 && (s?.requests24h ?? 0) >= FLOORS.logsVolumeRequests) {
+      const gbMonth = ((s!.requests24h * LOGS.bytesPerEventEstimate) / 1e9) * 30;
+      const share = totalGb > 0 ? (gbMonth / 30) / totalGb : 0;
+      const cost = paidExtra * share;
       out.push(finding(
         'usage', m.name, 'logs-full-sampling', 'info',
-        `Logs are on at 100% sampling for ${fmt(s!.requests24h)} requests a day.`,
-        { samplingRate: '100%', requests24h: s!.requests24h },
-        'Logs are billed by volume from 1 December 2026. Lower head_sampling_rate if you do not need every request.',
+        `Logs are on at 100% sampling for ${fmt(s!.requests24h)} requests a day, an estimated ${gbMonth.toFixed(1)} GB a month.${cost >= 0.5 ? ` About $${cost.toFixed(2)} a month past the included 50 GB.` : ''}`,
+        { samplingRate: '100%', requests24h: s!.requests24h, estimatedGbPerMonth: Number(gbMonth.toFixed(1)) },
+        input.plan === 'paid'
+          ? 'From 1 December 2026 logs and traces are billed per GB: 50 GB a month included, then $0.25 per GB. Lower head_sampling_rate if you do not need every request.'
+          : 'From 1 December 2026 the Free plan stores 0.5 GB of logs a day for the whole account. Lower head_sampling_rate if you do not need every request.',
         DOCS.observability,
       ));
     }
@@ -400,7 +609,14 @@ export function runChecks(input: CheckInput): Finding[] {
   const m = config.modules;
   const tf = input.thresholdsFor ?? (() => config.thresholds);
   let out: Finding[] = [];
-  if (m.usage) out.push(...budgetFindings(input, config.thresholds), ...runawayFindings(input, tf), ...resourceFindings(input), ...loggingFindings(input));
+  if (m.usage) {
+    out.push(
+      ...budgetFindings(input, config.thresholds), ...quotaFindings(input, config.thresholds), ...storageFindings(input),
+      ...runawayFindings(input, tf), ...burstFindings(input, tf), ...resourceFindings(input), ...idleLoopFindings(input), ...loggingFindings(input),
+    );
+  }
+  // Ambersight's own health cannot be switched off.
+  out.push(...healthFindings(input));
   if (m.errors) out.push(...errorFindings(input, tf));
   if (m.cron) out.push(...cronFindings(input));
   if (input.meta && input.inventory) out.push(...hygieneFindings(input.now, input.meta, input.workers, input.inventory, config, tf));

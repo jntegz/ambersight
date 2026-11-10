@@ -4,7 +4,8 @@
 export type Severity = 'critical' | 'warning' | 'info';
 export type ModuleId =
   | 'budget' | 'errors' | 'runaway' | 'cron' | 'usage'
-  | 'deprecation' | 'exposure' | 'zombies' | 'timeline';
+  | 'deprecation' | 'exposure' | 'zombies' | 'timeline' | 'health'
+  | 'pages' | 'security' | 'drift' | 'deploys';
 
 export interface Finding {
   id: string;
@@ -46,6 +47,37 @@ export interface BudgetStatus {
   criticalAt: number;
 }
 
+export interface QuotaStatus {
+  metric: string;
+  label: string;
+  used: number;
+  limit: number;
+  share: number;
+  projectedLimitAt: string | null;
+}
+
+export interface StorageStatus {
+  kind: 'd1' | 'kv' | 'r2' | 'do';
+  /** Database, namespace or bucket name, or "All <product>" for an account total. */
+  label: string;
+  bytes: number;
+  /** The cap it is measured against; null when there is none. */
+  limit: number | null;
+  share: number | null;
+}
+
+export interface CostEstimate {
+  monthToDate: number;
+  forecast: number;
+  /** Forecast by product, largest first. */
+  breakdown: { label: string; amount: number }[];
+  /** Workers by list-price cost over the last 7 days, scaled to a month. */
+  topWorkers: { name: string; amount: number }[];
+  /** Ambersight started tracking this account after the month began, so the start is extrapolated. */
+  partialMonth: boolean;
+  pricesAsOf: string;
+}
+
 export interface Overview {
   /** The account shown; null before setup. */
   account: { id: string; label: string; plan: 'free' | 'paid' } | null;
@@ -58,6 +90,12 @@ export interface Overview {
   update: { current: string; latest: string; url: string } | null;
   totals: { workers: number; needAttention: number; requestsToday: number; errorsToday: number };
   budget: BudgetStatus | null;
+  /** The other free daily limits with usage today (Free plan only). */
+  quotas: QuotaStatus[];
+  /** Storage against its caps, largest share first. */
+  storage: StorageStatus[];
+  /** Estimated bill (Workers Paid only, when the cost module is on). */
+  cost: CostEstimate | null;
   findings: Finding[];
   workers: WorkerSummary[];
   groups: string[];
@@ -80,6 +118,8 @@ export interface AccountSummary {
 }
 
 export interface TimelineEntry {
+  /** deploy: a Worker deployment. cf-alert: a notification Cloudflare sent to the account. */
+  kind: 'deploy' | 'cf-alert';
   script: string;
   id: string;
   createdOn: string;

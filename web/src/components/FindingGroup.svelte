@@ -21,6 +21,7 @@
   const MODULE_ICON: Record<Finding['module'], IconName> = {
     budget: 'budget', errors: 'errors', runaway: 'runaway', cron: 'cron', usage: 'usage',
     deprecation: 'deprecation', exposure: 'exposure', zombies: 'zombies', timeline: 'timeline',
+    health: 'key', pages: 'grid', security: 'shield', drift: 'list', deploys: 'timeline',
   };
   const CHIPS = 6;
 

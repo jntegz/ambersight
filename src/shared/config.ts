@@ -24,6 +24,10 @@ export interface Thresholds {
   compatAgeMonths: number;
   zombieDays: number;
   deployWindowMinutes: number;
+  /** A Worker with under 72 hours of history: requests in one hour that are a burst on their own. */
+  newWorkerHourlyRequests: number;
+  /** Same for storage and Durable Object operations on a resource with under 72 hours of history. */
+  newResourceHourlyOps: number;
 }
 
 export interface ModuleSwitches {
@@ -36,6 +40,10 @@ export interface ModuleSwitches {
   timeline: boolean; // M8
   /** M3 option: check Cloudflare Access coverage (needs Access: Apps and Policies Read). */
   access: boolean;
+  /** Estimated cost in dollars on Workers Paid. */
+  cost: boolean;
+  /** Notifications Cloudflare sent to the account, on the timeline (needs Notifications Read). */
+  cfAlerts: boolean;
 }
 
 export interface SeverityRoute {
@@ -101,6 +109,8 @@ export const DEFAULT_THRESHOLDS: Thresholds = {
   compatAgeMonths: 12,
   zombieDays: 30,
   deployWindowMinutes: 60,
+  newWorkerHourlyRequests: 50_000,
+  newResourceHourlyOps: 100_000,
 };
 
 export function defaultConfig(): Config {
@@ -110,7 +120,7 @@ export function defaultConfig(): Config {
     scanIntervalMinutes: 60,
     inventoryIntervalHours: 24,
     inventoryHourUtc: 3,
-    modules: { usage: true, cron: true, errors: true, deprecation: true, exposure: true, zombies: true, timeline: true, access: false },
+    modules: { usage: true, cron: true, errors: true, deprecation: true, exposure: true, zombies: true, timeline: true, access: false, cost: true, cfAlerts: true },
     mutedChecks: [],
     thresholds: { ...DEFAULT_THRESHOLDS },
     overrides: {},
@@ -142,6 +152,8 @@ export const THRESHOLD_RANGES: Record<keyof Thresholds, [number, number]> = {
   compatAgeMonths: [1, 36],
   zombieDays: [7, 365],
   deployWindowMinutes: [5, 1440],
+  newWorkerHourlyRequests: [1_000, 100_000_000],
+  newResourceHourlyOps: [1_000, 100_000_000],
 };
 
 export class ConfigError extends Error {}

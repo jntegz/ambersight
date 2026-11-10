@@ -4,11 +4,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { CfClient } from './cf';
-import { configFrom, getSettings, listAccounts, pinnedAccounts, setAccountState, upsertAccount, type AccountRow } from './db';
+import { configFrom, getAccountState, getSettings, listAccounts, pinnedAccounts, setAccountState, upsertAccount, type AccountRow } from './db';
+import { sendSystemAlert } from './notify';
 import type { Env } from './env';
 import { runScan, type ScanResult } from './scan';
 
 const MINUTE = 60_000;
+/** Failed scans in a row before Ambersight alerts about itself. */
+export const FAILURE_ALERT_AFTER = 3;
 
 /**
  * Accounts to scan. CF_ACCOUNT_ID (comma-separated) pins the set. Otherwise the accounts chosen
@@ -75,12 +78,26 @@ export async function scanAccount(env: Env, account: string, now = new Date(), f
     return await runScan(env, now, { account, force });
   } catch (e) {
     const message = (e as Error).message || 'Unknown error';
-    const prev = await db.prepare(`SELECT value FROM account_state WHERE account = ?1 AND key = 'scan_failures'`).bind(account).first<{ value: string }>();
-    await setAccountState(db, account, {
+    const state = await getAccountState(db, account);
+    const failures = Number(state.scan_failures ?? 0) + 1;
+    const update: Record<string, string> = {
       last_attempt_at: now.toISOString(),
       last_scan_error: message.slice(0, 500),
-      scan_failures: String(Number(prev?.value ?? 0) + 1),
-    }).run();
+      scan_failures: String(failures),
+    };
+    // Three failures in a row: say so, at most once a day, on the critical-alert channel.
+    if (failures >= FAILURE_ALERT_AFTER && now.getTime() - new Date(state.failure_alert_at ?? 0).getTime() > 24 * 60 * MINUTE) {
+      const global = await getSettings(db);
+      const config = configFrom(global);
+      const name = config.accounts[account]?.label ?? (await db.prepare('SELECT name FROM accounts WHERE id = ?1').bind(account).first<{ name: string | null }>())?.name ?? account;
+      const sent = await sendSystemAlert(
+        env, now, config,
+        `The last ${failures} scans of ${name} failed: ${message.slice(0, 200)}`,
+        'Ambersight cannot see this account until this is fixed. Check that the CF_API_TOKEN secret is still valid and has not expired, then press Scan now.',
+      ).catch(() => false);
+      if (sent) update.failure_alert_at = now.toISOString();
+    }
+    await setAccountState(db, account, update).run();
     return { error: message };
   }
 }

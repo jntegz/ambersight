@@ -168,12 +168,14 @@
   ];
   const MODULES: { key: keyof Config['modules']; title: string; text: string; icon: IconName }[] = [
     { key: 'errors', title: 'Errors', text: 'Error-rate spikes and sustained errors per Worker.', icon: 'errors' },
-    { key: 'usage', title: 'CPU usage', text: 'CPU time getting close to the plan limit.', icon: 'usage' },
+    { key: 'usage', title: 'Usage and limits', text: 'Free plan limits, runaway usage, idle loops, storage caps and log volume.', icon: 'usage' },
     { key: 'cron', title: 'Cron triggers', text: 'Scheduled Workers that stop running or keep failing.', icon: 'cron' },
     { key: 'deprecation', title: 'Deprecations', text: 'Old compatibility dates and deprecated settings.', icon: 'deprecation' },
     { key: 'exposure', title: 'Exposure', text: 'Public preview URLs and forgotten workers.dev hostnames.', icon: 'exposure' },
     { key: 'zombies', title: 'Unused Workers', text: 'Workers with no traffic for a long time.', icon: 'zombies' },
     { key: 'timeline', title: 'Deploy timeline', text: 'Deploy history and deploy-to-problem correlation.', icon: 'timeline' },
+    { key: 'cost', title: 'Cost estimate', text: 'Estimated bill in dollars on Workers Paid, and the cost of runaway usage.', icon: 'usage' },
+    { key: 'cfAlerts', title: 'Cloudflare notifications', text: 'Notifications Cloudflare sent to the account, on the timeline. Needs Notifications Read.', icon: 'mail' },
   ];
   const listText = (l: string[]) => l.join(', ');
   const splitList = (s: string) => s.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);

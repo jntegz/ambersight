@@ -1,6 +1,8 @@
 // Read-only Cloudflare API client. Every method is a GET or a GraphQL query.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import type { QuotaMetric, StorageKind } from '../shared/limits';
+
 const API = 'https://api.cloudflare.com/client/v4';
 
 export class CfApiError extends Error {
@@ -85,6 +87,31 @@ export interface ResourceOps {
   resource: string;
   hour: string;
   ops: number;
+  /** Quota usage carried by the same rows: D1 rows, KV operations by type, Queue operations. */
+  metrics?: Partial<Record<QuotaMetric, number>>;
+}
+
+/** Account-wide usage for one metric and hour. */
+export interface QuotaRow {
+  metric: QuotaMetric;
+  hour: string;
+  value: number;
+}
+
+export interface StorageSize {
+  kind: StorageKind;
+  /** Database ID, namespace ID or bucket name; "*" for the account total (Durable Objects). */
+  id: string;
+  bytes: number;
+  objects?: number;
+}
+
+export interface CfAlert {
+  id: string;
+  sent: string;
+  alertType: string;
+  name: string;
+  description: string;
 }
 
 export interface InventoryItem {
@@ -146,14 +173,28 @@ export class CfClient {
   // ---- Token -------------------------------------------------------------
 
   /** Verifies the token. User tokens and account-owned tokens use different endpoints. */
-  async verifyToken(): Promise<{ id: string; status: string; owner: 'user' | 'account' }> {
+  async verifyToken(): Promise<{ id: string; status: string; owner: 'user' | 'account'; expiresOn: string | null }> {
+    type R = { id: string; status: string; expires_on?: string | null };
     try {
-      const r = await this.get<{ id: string; status: string }>('/user/tokens/verify');
-      return { ...r, owner: 'user' };
+      const r = await this.get<R>('/user/tokens/verify');
+      return { id: r.id, status: r.status, owner: 'user', expiresOn: r.expires_on ?? null };
     } catch (e) {
-      const r = await this.get<{ id: string; status: string }>(`/accounts/${this.accountId}/tokens/verify`);
-      return { ...r, owner: 'account' };
+      const r = await this.get<R>(`/accounts/${this.accountId}/tokens/verify`);
+      return { id: r.id, status: r.status, owner: 'account', expiresOn: r.expires_on ?? null };
     }
+  }
+
+  /** Cloudflare's own notifications sent to this account (Notifications Read). */
+  async alertHistory(since: Date): Promise<CfAlert[]> {
+    type R = { id: string; sent: string; alert_type?: string; name?: string; description?: string; alert_body?: string };
+    const r = await this.get<R[]>(`/accounts/${this.accountId}/alerting/v3/history?per_page=50&since=${enc(since.toISOString())}`);
+    return (r ?? []).map((a) => ({
+      id: a.id,
+      sent: a.sent,
+      alertType: a.alert_type ?? '',
+      name: a.name ?? a.alert_type ?? 'Cloudflare notification',
+      description: (a.description || a.alert_body || '').slice(0, 500),
+    }));
   }
 
   /**
@@ -393,41 +434,163 @@ export class CfClient {
   }
 
   /**
-   * Storage and Durable Object operations per resource per hour. Each dataset is tried on its
-   * own: which ones the Free plan exposes is an open PRD question, so failures are reported, not thrown.
+   * Storage and Durable Object operations per resource per hour, plus the quota usage the same
+   * rows carry. Each kind is tried in its richer form first (D1 rows, KV operations by type) and
+   * falls back to the plain count; `simple` lists kinds whose richer form the account rejected.
    */
-  async resourceOps(since: Date, until: Date, kinds: ResourceOps['kind'][]): Promise<{ rows: ResourceOps[]; failed: string[] }> {
-    const specs: Record<ResourceOps['kind'], { dataset: string; dim: string; sum: string }> = {
-      d1: { dataset: 'd1AnalyticsAdaptiveGroups', dim: 'databaseId', sum: 'sum { readQueries writeQueries }' },
-      kv: { dataset: 'kvOperationsAdaptiveGroups', dim: 'namespaceId', sum: 'sum { requests }' },
-      r2: { dataset: 'r2OperationsAdaptiveGroups', dim: 'bucketName', sum: 'sum { requests }' },
-      do: { dataset: 'durableObjectsInvocationsAdaptiveGroups', dim: 'scriptName', sum: 'sum { requests }' },
-      queues: { dataset: 'queueMessageOperationsAdaptiveGroups', dim: 'queueId', sum: 'count' },
+  async resourceOps(
+    since: Date, until: Date, kinds: ResourceOps['kind'][], simple: Set<string> = new Set(),
+  ): Promise<{ rows: ResourceOps[]; failed: string[]; downgraded: string[] }> {
+    type Spec = { dataset: string; dims: string; fields: string; read: (r: Row) => { ops: number; metrics?: ResourceOps['metrics'] } };
+    type Row = { dimensions: Record<string, string>; sum?: Record<string, number>; count?: number };
+    const s = (r: Row, k: string) => r.sum?.[k] ?? 0;
+    const kvMetric: Record<string, QuotaMetric> = { read: 'kv.read', write: 'kv.write', delete: 'kv.delete', list: 'kv.list' };
+    const specs: Record<ResourceOps['kind'], { rich?: Spec; plain: Spec; idDim: string }> = {
+      d1: {
+        idDim: 'databaseId',
+        rich: { dataset: 'd1AnalyticsAdaptiveGroups', dims: 'databaseId datetimeHour', fields: 'sum { readQueries writeQueries rowsRead rowsWritten }',
+          read: (r) => ({ ops: s(r, 'readQueries') + s(r, 'writeQueries'), metrics: { 'd1.rowsRead': s(r, 'rowsRead'), 'd1.rowsWritten': s(r, 'rowsWritten') } }) },
+        plain: { dataset: 'd1AnalyticsAdaptiveGroups', dims: 'databaseId datetimeHour', fields: 'sum { readQueries writeQueries }', read: (r) => ({ ops: s(r, 'readQueries') + s(r, 'writeQueries') }) },
+      },
+      kv: {
+        idDim: 'namespaceId',
+        rich: { dataset: 'kvOperationsAdaptiveGroups', dims: 'namespaceId datetimeHour actionType', fields: 'sum { requests }',
+          read: (r) => {
+            const m = kvMetric[r.dimensions.actionType];
+            return { ops: s(r, 'requests'), metrics: m ? { [m]: s(r, 'requests') } : {} };
+          } },
+        plain: { dataset: 'kvOperationsAdaptiveGroups', dims: 'namespaceId datetimeHour', fields: 'sum { requests }', read: (r) => ({ ops: s(r, 'requests') }) },
+      },
+      r2: { idDim: 'bucketName', plain: { dataset: 'r2OperationsAdaptiveGroups', dims: 'bucketName datetimeHour', fields: 'sum { requests }', read: (r) => ({ ops: s(r, 'requests') }) } },
+      do: {
+        idDim: 'scriptName',
+        plain: { dataset: 'durableObjectsInvocationsAdaptiveGroups', dims: 'scriptName datetimeHour', fields: 'sum { requests }',
+          read: (r) => ({ ops: s(r, 'requests'), metrics: { 'do.requests': s(r, 'requests') } }) },
+      },
+      queues: {
+        idDim: 'queueID',
+        // Field names from the Queues metrics docs: queueID and billableOperations.
+        rich: { dataset: 'queueMessageOperationsAdaptiveGroups', dims: 'queueID datetimeHour', fields: 'sum { billableOperations }',
+          read: (r) => ({ ops: s(r, 'billableOperations'), metrics: { 'queues.ops': s(r, 'billableOperations') } }) },
+        plain: { dataset: 'queueMessageOperationsAdaptiveGroups', dims: 'queueId datetimeHour', fields: 'count', read: (r) => ({ ops: r.count ?? 0, metrics: { 'queues.ops': r.count ?? 0 } }) },
+      },
     };
     const rows: ResourceOps[] = [];
     const failed: string[] = [];
-    for (const kind of kinds) {
-      const s = specs[kind];
+    const downgraded: string[] = [];
+    const run = async (kind: ResourceOps['kind'], spec: Spec, idDim: string) => {
       const query = `query($account: string!, $since: Time!, $until: Time!) {
         viewer { accounts(filter: { accountTag: $account }) {
-          ${s.dataset}(limit: 10000, filter: { datetime_geq: $since, datetime_lt: $until }) {
-            dimensions { ${s.dim} datetimeHour }
-            ${s.sum}
+          ${spec.dataset}(limit: 10000, filter: { datetime_geq: $since, datetime_lt: $until }) {
+            dimensions { ${spec.dims} }
+            ${spec.fields}
           }
         } }
       }`;
+      const data = await this.graphql<{ viewer: { accounts: Record<string, Row[]>[] } }>(query, this.window(since, until));
+      // KV comes back once per action type: merge into one row per namespace and hour.
+      const merged = new Map<string, ResourceOps>();
+      for (const r of data.viewer.accounts[0]?.[spec.dataset] ?? []) {
+        const resource = r.dimensions[idDim] ?? r.dimensions[idDim.replace('ID', 'Id')];
+        const key = `${resource}|${r.dimensions.datetimeHour}`;
+        const v = spec.read(r);
+        const row = merged.get(key) ?? { kind, resource, hour: r.dimensions.datetimeHour, ops: 0, metrics: {} };
+        row.ops += v.ops;
+        for (const [m, n] of Object.entries(v.metrics ?? {})) row.metrics![m as QuotaMetric] = (row.metrics![m as QuotaMetric] ?? 0) + (n ?? 0);
+        merged.set(key, row);
+      }
+      rows.push(...merged.values());
+    };
+    for (const kind of kinds) {
+      const sp = specs[kind];
       try {
-        type Row = { dimensions: Record<string, string>; sum?: Record<string, number>; count?: number };
-        const data = await this.graphql<{ viewer: { accounts: Record<string, Row[]>[] } }>(query, this.window(since, until));
-        for (const r of data.viewer.accounts[0]?.[s.dataset] ?? []) {
-          const ops = r.count ?? Object.values(r.sum ?? {}).reduce((a, b) => a + (b ?? 0), 0);
-          rows.push({ kind, resource: r.dimensions[s.dim], hour: r.dimensions.datetimeHour, ops });
+        if (sp.rich && !simple.has(kind)) {
+          try {
+            await run(kind, sp.rich, sp.idDim);
+            continue;
+          } catch {
+            downgraded.push(kind);
+          }
         }
+        await run(kind, sp.plain, sp.plain.dims.split(' ')[0]);
       } catch {
         failed.push(kind);
       }
     }
-    return { rows, failed };
+    return { rows, failed, downgraded };
+  }
+
+  /** Workflow steps started per hour (workflowsAdaptiveGroups, eventType STEP_START). */
+  async workflowSteps(since: Date, until: Date): Promise<QuotaRow[]> {
+    const query = `query($account: string!, $since: Time!, $until: Time!) {
+      viewer { accounts(filter: { accountTag: $account }) {
+        workflowsAdaptiveGroups(limit: 10000, filter: { datetime_geq: $since, datetime_lt: $until, eventType: "STEP_START" }) {
+          count
+          dimensions { datetimeHour }
+        }
+      } }
+    }`;
+    type R = { viewer: { accounts: { workflowsAdaptiveGroups: { count: number; dimensions: { datetimeHour: string } }[] }[] } };
+    const data = await this.graphql<R>(query, this.window(since, until));
+    return (data.viewer.accounts[0]?.workflowsAdaptiveGroups ?? []).map((r) => ({ metric: 'workflows.steps', hour: r.dimensions.datetimeHour, value: r.count }));
+  }
+
+  /**
+   * Workers AI neurons per hour. UNVERIFIED: the dataset and field are not in Cloudflare's docs;
+   * this follows the naming of the other adaptive datasets and the caller tolerates failure.
+   */
+  async aiNeurons(since: Date, until: Date): Promise<QuotaRow[]> {
+    const query = `query($account: string!, $since: Time!, $until: Time!) {
+      viewer { accounts(filter: { accountTag: $account }) {
+        aiInferenceAdaptiveGroups(limit: 10000, filter: { datetime_geq: $since, datetime_lt: $until }) {
+          sum { totalNeurons }
+          dimensions { datetimeHour }
+        }
+      } }
+    }`;
+    type R = { viewer: { accounts: { aiInferenceAdaptiveGroups: { sum: { totalNeurons: number }; dimensions: { datetimeHour: string } }[] }[] } };
+    const data = await this.graphql<R>(query, this.window(since, until));
+    return (data.viewer.accounts[0]?.aiInferenceAdaptiveGroups ?? []).map((r) => ({ metric: 'ai.neurons', hour: r.dimensions.datetimeHour, value: r.sum.totalNeurons }));
+  }
+
+  /** Current storage per D1 database, KV namespace and R2 bucket, and the Durable Object total. */
+  async storageSizes(kinds: StorageKind[], now: Date): Promise<{ sizes: StorageSize[]; failed: StorageKind[] }> {
+    const day = new Date(now.getTime() - 2 * 86_400_000).toISOString().slice(0, 10);
+    const since = new Date(now.getTime() - 86_400_000).toISOString();
+    const specs: Record<StorageKind, { dataset: string; filter: string; dims: string; fields: string; read: (r: Row) => StorageSize }> = {
+      d1: { dataset: 'd1StorageAdaptiveGroups', filter: `date_geq: "${day}"`, dims: 'dimensions { databaseId }', fields: 'max { databaseSizeBytes }',
+        read: (r) => ({ kind: 'd1', id: r.dimensions!.databaseId, bytes: r.max.databaseSizeBytes ?? 0 }) },
+      kv: { dataset: 'kvStorageAdaptiveGroups', filter: `date_geq: "${day}"`, dims: 'dimensions { namespaceId }', fields: 'max { byteCount keyCount }',
+        read: (r) => ({ kind: 'kv', id: r.dimensions!.namespaceId, bytes: r.max.byteCount ?? 0, objects: r.max.keyCount }) },
+      r2: { dataset: 'r2StorageAdaptiveGroups', filter: `datetime_geq: "${since}"`, dims: 'dimensions { bucketName }', fields: 'max { payloadSize metadataSize objectCount }',
+        read: (r) => ({ kind: 'r2', id: r.dimensions!.bucketName, bytes: (r.max.payloadSize ?? 0) + (r.max.metadataSize ?? 0), objects: r.max.objectCount }) },
+      do: { dataset: 'durableObjectsStorageGroups', filter: `date_geq: "${day}"`, dims: '', fields: 'max { storedBytes }',
+        read: (r) => ({ kind: 'do', id: '*', bytes: r.max.storedBytes ?? 0 }) },
+    };
+    type Row = { dimensions?: Record<string, string>; max: Record<string, number> };
+    const sizes: StorageSize[] = [];
+    const failed: StorageKind[] = [];
+    for (const kind of kinds) {
+      const sp = specs[kind];
+      const query = `query($account: string!) {
+        viewer { accounts(filter: { accountTag: $account }) {
+          ${sp.dataset}(limit: 10000, filter: { ${sp.filter} }) { ${sp.dims} ${sp.fields} }
+        } }
+      }`;
+      try {
+        const data = await this.graphql<{ viewer: { accounts: Record<string, Row[]>[] } }>(query, { account: this.accountId });
+        // Several rows per resource (one per day): keep the largest.
+        const best = new Map<string, StorageSize>();
+        for (const r of data.viewer.accounts[0]?.[sp.dataset] ?? []) {
+          const v = sp.read(r);
+          if (!best.has(v.id) || best.get(v.id)!.bytes < v.bytes) best.set(v.id, v);
+        }
+        sizes.push(...best.values());
+      } catch {
+        failed.push(kind);
+      }
+    }
+    return { sizes, failed };
   }
 }
 

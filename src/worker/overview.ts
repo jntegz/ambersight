@@ -4,7 +4,10 @@
 
 import { groupsFor, inScope } from '../shared/config';
 import { SEVERITY_WEIGHT, type AccountSummary, type Finding, type Overview, type SelfCost, type Severity, type TimelineEntry, type WorkerSummary } from '../shared/types';
+import { FREE_DAILY, STORAGE_LIMITS, type QuotaMetric, type StorageKind } from '../shared/limits';
+import type { CostEstimate, QuotaStatus, StorageStatus } from '../shared/types';
 import { FREE_DAILY_REQUESTS, projectLimitTime } from './checks';
+import { estimate } from './cost';
 import { configFrom, getAccountState, getSettings, isoHour, planFrom, utcMidnight, type AccountRow } from './db';
 import type { Env } from './env';
 import { updateNotice } from './scan';
@@ -63,7 +66,8 @@ export async function buildOverview(env: Env, requested?: string | null, now = n
   const dayAgo = isoHour(new Date(now.getTime() - DAY));
   const weekStart = isoHour(new Date(utcMidnight(now).getTime() - 6 * DAY));
 
-  const [workers, hourly, daily, today, findings, entries] = await db.batch([
+  const monthStart = isoHour(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)));
+  const [workers, hourly, daily, today, findings, entries, quotaToday, quotaMonth, storageR, resNames, week] = await db.batch([
     db.prepare('SELECT name, deployed_on, modified_on, handlers, tags, workers_dev FROM workers WHERE account = ?1 ORDER BY name').bind(A),
     db.prepare('SELECT script, hour, requests, errors FROM metrics_hourly WHERE account = ?1 AND hour >= ?2').bind(A, dayAgo),
     db.prepare(
@@ -73,7 +77,49 @@ export async function buildOverview(env: Env, requested?: string | null, now = n
     db.prepare('SELECT COALESCE(SUM(requests),0) AS requests, COALESCE(SUM(errors),0) AS errors FROM metrics_hourly WHERE account = ?1 AND hour >= ?2').bind(A, midnight),
     db.prepare(`SELECT * FROM findings WHERE account = ?1 AND status = 'open'`).bind(A),
     db.prepare(`SELECT name, script FROM resources WHERE account = ?1 AND kind IN ('route','domain')`).bind(A),
+    db.prepare('SELECT metric, SUM(value) AS v FROM quota_hourly WHERE account = ?1 AND hour >= ?2 GROUP BY metric').bind(A, midnight),
+    db.prepare('SELECT metric, SUM(value) AS v, MIN(hour) AS first FROM quota_hourly WHERE account = ?1 AND hour >= ?2 GROUP BY metric').bind(A, monthStart),
+    db.prepare('SELECT kind, id, bytes FROM storage_sizes WHERE account = ?1').bind(A),
+    db.prepare(`SELECT kind, id, name FROM resources WHERE account = ?1 AND kind IN ('d1','kv','r2')`).bind(A),
+    db.prepare(
+      `SELECT script, SUM(requests) AS requests, SUM(cpu_time_us) AS cpu FROM metrics_hourly WHERE account = ?1 AND hour >= ?2 GROUP BY script`,
+    ).bind(A, isoHour(new Date(now.getTime() - 7 * DAY))),
   ]);
+  const usedToday = Object.fromEntries((quotaToday.results as { metric: QuotaMetric; v: number }[]).map((r) => [r.metric, r.v]));
+  const quotas: QuotaStatus[] = plan === 'free'
+    ? FREE_DAILY.filter((q) => (usedToday[q.metric] ?? 0) > 0).map((q) => ({
+        metric: q.metric, label: q.label, used: usedToday[q.metric], limit: q.limit,
+        share: usedToday[q.metric] / q.limit, projectedLimitAt: projectLimitTime(now, usedToday[q.metric], q.limit),
+      })).sort((a, b) => b.share - a.share)
+    : [];
+  const names = new Map((resNames.results as { kind: string; id: string; name: string | null }[]).map((r) => [`${r.kind}|${r.id}`, r.name ?? r.id]));
+  const sizes = storageR.results as { kind: StorageKind; id: string; bytes: number }[];
+  const caps = STORAGE_LIMITS[plan];
+  const PRODUCT: Record<StorageKind, string> = { d1: 'D1', kv: 'KV', r2: 'R2', do: 'Durable Objects' };
+  const storage: StorageStatus[] = [];
+  const totals = new Map<StorageKind, number>();
+  for (const z of sizes) {
+    totals.set(z.kind, (totals.get(z.kind) ?? 0) + z.bytes);
+    const cap = caps[z.kind].perResource;
+    if (cap && z.id !== '*') storage.push({ kind: z.kind, label: names.get(`${z.kind}|${z.id}`) ?? z.id, bytes: z.bytes, limit: cap, share: z.bytes / cap });
+  }
+  for (const [kind, bytes] of totals) {
+    const cap = caps[kind].account;
+    storage.push({ kind, label: `All ${PRODUCT[kind]}`, bytes, limit: cap, share: cap ? bytes / cap : null });
+  }
+  storage.sort((a, b) => (b.share ?? -1) - (a.share ?? -1) || b.bytes - a.bytes);
+  let cost: CostEstimate | null = null;
+  if (plan === 'paid' && config.modules.cost) {
+    const month = quotaMonth.results as { metric: QuotaMetric; v: number; first: string }[];
+    const firstHour = month.reduce<string | null>((m, r) => (!m || r.first < m ? r.first : m), null);
+    cost = estimate(
+      now,
+      Object.fromEntries(month.map((r) => [r.metric, r.v])),
+      Object.fromEntries(totals),
+      (week.results as { script: string; requests: number; cpu: number }[]).map((r) => ({ name: r.script, requests: r.requests, cpuMs: (r.cpu ?? 0) / 1000 })),
+      firstHour,
+    );
+  }
 
   type W = { name: string; deployed_on: string | null; modified_on: string | null; handlers: string | null; tags: string | null; workers_dev: number | null };
   const all = (workers.results as W[]).map((w) => ({ ...w, groups: groupsFor(config, w.name, w.tags ? JSON.parse(w.tags) : []) }));
@@ -166,6 +212,9 @@ export async function buildOverview(env: Env, requested?: string | null, now = n
             criticalAt: config.thresholds.budgetCritical,
           }
         : null,
+    quotas,
+    storage,
+    cost,
     findings: open,
     workers: summaries,
     groups: [...new Set(visible.flatMap((w) => w.groups))].sort(),
@@ -178,10 +227,11 @@ export async function buildTimeline(env: Env, account: string, days = 14): Promi
   const settings = await getSettings(db);
   const config = configFrom(settings);
   const since = new Date(Date.now() - days * DAY).toISOString();
-  const [deps, workers, findings] = await db.batch([
+  const [deps, workers, findings, alerts] = await db.batch([
     db.prepare('SELECT script, id, created_on, author, message, source FROM deployments WHERE account = ?1 AND created_on >= ?2 ORDER BY created_on DESC LIMIT 300').bind(account, since),
     db.prepare('SELECT name, tags FROM workers WHERE account = ?1').bind(account),
     db.prepare(`SELECT code, evidence FROM findings WHERE account = ?1 AND status <> 'resolved' AND evidence LIKE '%deployId%'`).bind(account),
+    db.prepare('SELECT id, sent, alert_type, name, description FROM cf_alerts WHERE account = ?1 AND sent >= ?2 ORDER BY sent DESC LIMIT 100').bind(account, since),
   ]);
   const tags = new Map((workers.results as { name: string; tags: string | null }[]).map((w) => [w.name, w.tags ? (JSON.parse(w.tags) as string[]) : []]));
   const correlated = new Map<string, string[]>();
@@ -189,10 +239,11 @@ export async function buildTimeline(env: Env, account: string, days = 14): Promi
     const id = (JSON.parse(f.evidence) as { deployId?: string }).deployId;
     if (id) correlated.set(id, [...(correlated.get(id) ?? []), f.code]);
   }
-  return (deps.results as { script: string; id: string; created_on: string; author: string | null; message: string | null; source: string | null }[])
+  const deploys: TimelineEntry[] = (deps.results as { script: string; id: string; created_on: string; author: string | null; message: string | null; source: string | null }[])
     .map((d) => ({ d, groups: groupsFor(config, d.script, tags.get(d.script) ?? []) }))
     .filter(({ d, groups }) => !tags.has(d.script) || inScope(config, d.script, groups))
     .map(({ d, groups }) => ({
+      kind: 'deploy' as const,
       script: d.script,
       id: d.id,
       createdOn: d.created_on,
@@ -202,6 +253,19 @@ export async function buildTimeline(env: Env, account: string, days = 14): Promi
       groups,
       correlated: correlated.get(d.id) ?? [],
     }));
+  // Cloudflare's own notifications: account-wide, so they show under every group.
+  const cf: TimelineEntry[] = (alerts.results as { id: string; sent: string; alert_type: string | null; name: string | null; description: string | null }[]).map((a) => ({
+    kind: 'cf-alert',
+    script: '*',
+    id: `cf-${a.id}`,
+    createdOn: a.sent,
+    author: 'Cloudflare',
+    message: a.description || a.name,
+    source: a.name ?? a.alert_type,
+    groups: [],
+    correlated: [],
+  }));
+  return [...deploys, ...cf].sort((a, b) => b.createdOn.localeCompare(a.createdOn));
 }
 
 export async function buildSelfCost(env: Env, account: string): Promise<SelfCost> {

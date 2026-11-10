@@ -7,7 +7,8 @@
 import { groupsFor, inScope, thresholdsFor, type Config } from '../shared/config';
 import { checkOf } from '../shared/findings';
 import type { Finding } from '../shared/types';
-import { CfClient, CronRunsTruncated, type ApiScript, type ApiWorker, type CronRunRow, type Deployment, type InventoryItem, type ResourceOps, type ScriptSettings } from './cf';
+import type { QuotaMetric, StorageKind } from '../shared/limits';
+import { CfClient, CronRunsTruncated, type ApiScript, type ApiWorker, type CfAlert, type CronRunRow, type Deployment, type InventoryItem, type QuotaRow, type ResourceOps, type ScriptSettings, type StorageSize } from './cf';
 import { median, runChecks, type CronStats, type HourPoint, type ResourceStats, type WorkerMeta, type WorkerStats } from './checks';
 import { countRuns } from './cron';
 import { configFrom, getAccountState, getSettings, hourFloor, isoHour, planFrom, recordUsage, setAccountState, setSettings, upsertAccount, utcMidnight, type Settings } from './db';
@@ -30,6 +31,8 @@ export interface ScanResult {
   workers: number;
   findings: number;
   subrequests: number;
+  /** D1 statements this scan ran; the Free plan allows 50 per invocation. */
+  d1Queries?: number;
   warnings: string[];
   detailRemaining?: number;
 }
@@ -70,9 +73,13 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
   ]);
   const inventory = mergeInventory(scripts, apiWorkers ?? [], stamp);
   const { results: known } = await db
-    .prepare(`SELECT name, detail_checked_at, bindings LIKE '%durable_object_namespace%' AS has_do FROM workers WHERE account = ?1`)
+    .prepare(
+      `SELECT name, detail_checked_at, bindings LIKE '%durable_object_namespace%' AS has_do,
+         bindings LIKE '%"type":"workflow"%' AS has_workflow, bindings LIKE '%"type":"ai"%' AS has_ai
+       FROM workers WHERE account = ?1`,
+    )
     .bind(accountId)
-    .all<{ name: string; detail_checked_at: string | null; has_do: number | null }>();
+    .all<{ name: string; detail_checked_at: string | null; has_do: number | null; has_workflow: number | null; has_ai: number | null }>();
   const knownNames = new Set(known.map((k) => k.name));
   const currentNames = new Set(inventory.map((w) => w.name));
   const fleetEvents = knownNames.size
@@ -124,6 +131,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
 
   // 4. Storage and Durable Object operations, for kinds the account actually has.
   let resourceOps: ResourceOps[] = [];
+  const quotaRows: QuotaRow[] = [];
   if (config.modules.usage) {
     const { results: kindRows } = await db.prepare(`SELECT DISTINCT kind FROM resources WHERE account = ?1 AND kind IN ('kv','d1','r2','queues')`).bind(accountId).all<{ kind: ResourceOps['kind'] }>();
     const kinds = kindRows.map((k) => k.kind);
@@ -131,14 +139,60 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
     const failedBefore = new Set((settings.ops_unavailable ?? '').split(',').filter(Boolean));
     const retryFailed = now.getTime() - new Date(settings.ops_checked ?? 0).getTime() > DAY;
     const tryKinds = kinds.filter((k) => retryFailed || !failedBefore.has(k)).slice(0, Math.max(0, left() - 20));
+    // Whole hours since the last stored hour (at most 48 h): the daily quota totals need every hour,
+    // and a window starting mid-hour would overwrite a full hour with part of it.
+    const opsFrom = hourFloor(since);
     if (tryKinds.length) {
-      const r = await cf.resourceOps(new Date(Math.max(since.getTime(), now.getTime() - 3 * HOUR)), now, tryKinds);
+      // Kinds whose richer query (D1 rows, KV by action) the account rejected; retried with the others daily.
+      const simple = new Set(retryFailed ? [] : (settings.ops_simple ?? '').split(',').filter(Boolean));
+      const r = await cf.resourceOps(opsFrom, now, tryKinds, simple);
       resourceOps = r.rows;
-      if (retryFailed || r.failed.length) {
+      if (retryFailed || r.failed.length || r.downgraded.length) {
         settings.ops_unavailable = r.failed.join(',');
+        settings.ops_simple = [...new Set([...simple, ...r.downgraded])].join(',');
         settings.ops_checked = stamp;
       }
     }
+    // Workflows and Workers AI, only for accounts that bind them; an unavailable dataset is retried daily.
+    const extraFailed = new Set(retryFailed ? [] : (settings.quota_unavailable ?? '').split(',').filter(Boolean));
+    const extras: [string, boolean, () => Promise<QuotaRow[]>][] = [
+      ['workflows', known.some((k) => k.has_workflow), () => cf.workflowSteps(opsFrom, now)],
+      ['ai', known.some((k) => k.has_ai), () => cf.aiNeurons(opsFrom, now)],
+    ];
+    const failedNow: string[] = [];
+    for (const [name, used, run] of extras) {
+      if (!used || extraFailed.has(name) || left() <= 20) continue;
+      try {
+        quotaRows.push(...(await run()));
+      } catch {
+        failedNow.push(name);
+      }
+    }
+    if (retryFailed || failedNow.length) settings.quota_unavailable = [...new Set([...(retryFailed ? [] : extraFailed), ...failedNow])].join(',');
+    // Account-wide totals per metric and hour.
+    const totals = new Map<string, QuotaRow>();
+    const add = (metric: QuotaMetric, hour: string, value: number) => {
+      const key = `${metric}|${hour}`;
+      const row = totals.get(key) ?? { metric, hour, value: 0 };
+      row.value += value;
+      totals.set(key, row);
+    };
+    for (const r of resourceOps) for (const [m, v] of Object.entries(r.metrics ?? {})) add(m as QuotaMetric, r.hour, v ?? 0);
+    for (const r of quotaRows.splice(0)) add(r.metric, r.hour, r.value);
+    quotaRows.push(...totals.values());
+  }
+  // Workers requests and CPU per hour feed the cost estimate (and outlive the metrics retention).
+  {
+    const totals = new Map<string, QuotaRow>();
+    for (const h of hourly) {
+      for (const [metric, value] of [['workers.requests', h.requests], ['workers.cpuMs', h.cpuTimeUs / 1000]] as const) {
+        const key = `${metric}|${h.hour}`;
+        const row = totals.get(key) ?? { metric, hour: h.hour, value: 0 };
+        row.value += value;
+        totals.set(key, row);
+      }
+    }
+    quotaRows.push(...totals.values());
   }
 
   // 5. Full inventory refresh: custom domains, routes, storage, Access, update check.
@@ -179,10 +233,43 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
     if (config.plan === 'auto' && !config.accounts[accountId]?.plan) {
       detectedPlan = (await cf.detectPlan()) ?? detectedPlan;
     }
+    // The token's own expiry, so Ambersight can warn before it goes blind.
+    await cf.verifyToken().then((t) => {
+      settings.token_expires_on = t.expiresOn ?? '';
+      settings.token_status = t.status;
+    }).catch(() => {});
     // The update check is install-wide: one account's inventory run does it for all.
     if (config.updateCheck && now.getTime() - new Date(global.update_checked_at ?? 0).getTime() > 20 * HOUR) {
       await checkForUpdate(global).catch((e: Error) => warnings.push(`Update check failed: ${e.message}`));
       global.update_checked_at = stamp;
+    }
+  }
+
+  // 5b. Storage sizes, once a day with the inventory, for the kinds the account has.
+  let storageSizes: StorageSize[] | null = null;
+  if (refreshDue && config.modules.usage && left() > 12) {
+    const { results: kindRows } = await db.prepare(`SELECT DISTINCT kind FROM resources WHERE account = ?1 AND kind IN ('kv','d1','r2')`).bind(accountId).all<{ kind: StorageKind }>();
+    const kinds = new Set<StorageKind>([...kindRows.map((k) => k.kind), ...refreshed.filter((r) => ['kv', 'd1', 'r2'].includes(r.kind)).map((r) => r.kind as StorageKind)]);
+    if (known.some((k) => k.has_do)) kinds.add('do');
+    if (kinds.size) {
+      const r = await cf.storageSizes([...kinds], now);
+      storageSizes = r.sizes;
+      if (r.failed.length) warnings.push(`Storage sizes unavailable: ${r.failed.join(', ')}.`);
+    }
+  }
+
+  // 5c. Notifications Cloudflare sent to the account, every 6 hours, for the timeline.
+  let cfAlerts: CfAlert[] = [];
+  const alertsDue = config.modules.cfAlerts && now.getTime() - new Date(settings.cf_alerts_at ?? 0).getTime() > 6 * HOUR && left() > 12;
+  if (alertsDue) {
+    const from = new Date(Math.max(now.getTime() - 7 * DAY, new Date(settings.cf_alerts_at ?? 0).getTime() - HOUR));
+    try {
+      cfAlerts = await cf.alertHistory(from);
+      settings.cf_alerts_at = stamp;
+    } catch (e) {
+      // Usually the Notifications Read permission is missing: say so once a day, not every scan.
+      settings.cf_alerts_at = new Date(now.getTime() - 6 * HOUR + DAY).toISOString();
+      warnings.push(`Cloudflare notifications unavailable: ${(e as Error).message} (add Notifications Read to the token).`);
     }
   }
 
@@ -302,6 +389,34 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
       ).bind(A, j(resourceOps)),
     );
   }
+  if (quotaRows.length) {
+    writes.push(
+      db.prepare(
+        `INSERT INTO quota_hourly (account, metric, hour, value)
+         SELECT ?1, json_extract(value,'$.metric'), json_extract(value,'$.hour'), json_extract(value,'$.value') FROM json_each(?2) WHERE true
+         ON CONFLICT(account, metric, hour) DO UPDATE SET value = excluded.value`,
+      ).bind(A, j(quotaRows)),
+    );
+  }
+  if (storageSizes) {
+    writes.push(
+      db.prepare(`DELETE FROM storage_sizes WHERE account = ?1`).bind(A),
+      db.prepare(
+        `INSERT INTO storage_sizes (account, kind, id, bytes, objects, at)
+         SELECT ?1, json_extract(value,'$.kind'), json_extract(value,'$.id'), json_extract(value,'$.bytes'), json_extract(value,'$.objects'), ?3
+         FROM json_each(?2) WHERE true ON CONFLICT(account, kind, id) DO UPDATE SET bytes = excluded.bytes, objects = excluded.objects, at = excluded.at`,
+      ).bind(A, j(storageSizes), stamp),
+    );
+  }
+  if (cfAlerts.length) {
+    writes.push(
+      db.prepare(
+        `INSERT INTO cf_alerts (account, id, sent, alert_type, name, description)
+         SELECT ?1, json_extract(value,'$.id'), json_extract(value,'$.sent'), json_extract(value,'$.alertType'), json_extract(value,'$.name'), json_extract(value,'$.description')
+         FROM json_each(?2) WHERE true ON CONFLICT(account, id) DO NOTHING`,
+      ).bind(A, j(cfAlerts)),
+    );
+  }
   if (refreshDue) {
     writes.push(
       db.prepare(`DELETE FROM resources WHERE account = ?1 AND kind IN (SELECT value FROM json_each(?2))`)
@@ -323,7 +438,10 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
     setAccountState(db, A, {
       ...(settings.cpu_sum ? { cpu_sum: settings.cpu_sum } : {}),
       ...(settings.cron_cpu ? { cron_cpu: settings.cron_cpu } : {}),
-      ...(settings.ops_checked ? { ops_unavailable: settings.ops_unavailable ?? '', ops_checked: settings.ops_checked } : {}),
+      ...(settings.ops_checked ? { ops_unavailable: settings.ops_unavailable ?? '', ops_simple: settings.ops_simple ?? '', ops_checked: settings.ops_checked } : {}),
+      ...(settings.quota_unavailable != null ? { quota_unavailable: settings.quota_unavailable } : {}),
+      ...(settings.token_status ? { token_expires_on: settings.token_expires_on ?? '', token_status: settings.token_status } : {}),
+      ...(settings.cf_alerts_at ? { cf_alerts_at: settings.cf_alerts_at } : {}),
       ...(refreshDue ? { inventory_at: stamp, workers_subdomain: subdomain ?? '' } : {}),
       ...(settings.access_listed_at ? { access_listed_at: settings.access_listed_at } : {}),
       ...(settings.first_metrics_at ? {} : { first_metrics_at: stamp }),
@@ -357,6 +475,9 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
     inventory: facts.inventory,
     config,
     thresholdsFor: facts.thresholdsFor,
+    quotaToday: facts.quotaToday,
+    storage: facts.storage,
+    tokenExpiresOn: facts.tokenExpiresOn,
   });
   // Checks the user switched off are dropped here, so their open findings resolve like fixed ones.
   const muted = new Set(config.mutedChecks);
@@ -378,7 +499,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
     recordUsage(db, now, { cronRuns: 1, subrequests: cf.calls, rowsRead: meter.rowsRead, rowsWritten: meter.rowsWritten }),
   ]);
 
-  return { workers: inventory.length, findings: findings.length, subrequests: cf.calls, warnings, detailRemaining };
+  return { workers: inventory.length, findings: findings.length, subrequests: cf.calls, d1Queries: meter.queries, warnings, detailRemaining };
 }
 
 export function inventoryDue(now: Date, last: string | null, config: Config): boolean {
@@ -401,6 +522,9 @@ function retentionDeletes(db: D1Database, account: string, now: Date, days: numb
     db.prepare(`DELETE FROM findings WHERE account = ?1 AND status = 'resolved' AND last_seen < ?2`).bind(account, iso),
     db.prepare('DELETE FROM deployments WHERE account = ?1 AND created_on < ?2').bind(account, iso),
     db.prepare('DELETE FROM fleet_events WHERE account = ?1 AND at < ?2').bind(account, iso),
+    db.prepare('DELETE FROM cf_alerts WHERE account = ?1 AND sent < ?2').bind(account, iso),
+    // Quota totals stay at least 35 days: the cost estimate needs the whole month so far.
+    db.prepare('DELETE FROM quota_hourly WHERE account = ?1 AND hour < ?2').bind(account, isoHour(new Date(now.getTime() - Math.max(days, 35) * DAY))),
     // Install-wide tables: any account's refresh may tidy them.
     db.prepare('DELETE FROM usage_daily WHERE day < ?1').bind(iso.slice(0, 10)),
     db.prepare('DELETE FROM sessions WHERE expires_at < ?1').bind(now.toISOString()),
@@ -501,6 +625,9 @@ export interface Facts {
   resources: ResourceStats[];
   inventory: InventoryFacts;
   thresholdsFor: (name: string) => ReturnType<typeof thresholdsFor>;
+  quotaToday: Partial<Record<QuotaMetric, number>>;
+  storage: (StorageSize & { label: string })[];
+  tokenExpiresOn: string | null;
 }
 
 /** Everything the checks need, from D1, in one batch. Out-of-scope Workers are left out. */
@@ -515,7 +642,7 @@ export async function loadFacts(
   const cronFrom = cronWindow ? isoHour(cronWindow.from) : lastFullHour;
   const cronTo = cronWindow ? isoHour(cronWindow.to) : lastFullHour;
 
-  const [workersR, histR, windowR, todayR, schedR, runsR, resR, opsR, depR] = await db.batch([
+  const [workersR, histR, windowR, todayR, schedR, runsR, resR, opsR, depR, quotaR, storageR] = await db.batch([
     db.prepare('SELECT * FROM workers WHERE account = ?1').bind(account),
     db.prepare(
       `SELECT script, hour, requests, errors, subrequests, cpu_time_us, exceeded, cpu_p99 FROM metrics_hourly
@@ -528,6 +655,8 @@ export async function loadFacts(
     db.prepare('SELECT kind, id, name, script, extra FROM resources WHERE account = ?1').bind(account),
     db.prepare('SELECT kind, resource, hour, ops FROM resource_hourly WHERE account = ?1 AND hour >= ?2').bind(account, weekAgo),
     db.prepare('SELECT script, id, created_on FROM deployments WHERE account = ?1 AND created_on >= ?2').bind(account, deployFrom),
+    db.prepare('SELECT metric, SUM(value) AS v FROM quota_hourly WHERE account = ?1 AND hour >= ?2 GROUP BY metric').bind(account, isoHour(utcMidnight(now))),
+    db.prepare('SELECT kind, id, bytes, objects FROM storage_sizes WHERE account = ?1').bind(account),
   ]);
 
   const allRows = workersR.results as unknown as WorkerRow[];
@@ -628,7 +757,18 @@ export async function loadFacts(
   const res = resR.results as unknown as Res[];
   const labelOf = new Map(res.map((r) => [`${r.kind}|${r.id}`, r.name ?? r.id]));
   const bindingOwner = new Map<string, string>();
-  for (const m of meta) for (const b of m.bindings ?? []) if (b.target && !bindingOwner.has(b.target)) bindingOwner.set(b.target, m.name);
+  // Every Worker bound to a resource, for the idle-loop check. Queues are bound by name, not ID.
+  const boundBy = new Map<string, string[]>();
+  for (const m of meta) {
+    for (const b of m.bindings ?? []) {
+      if (!b.target) continue;
+      if (!bindingOwner.has(b.target)) bindingOwner.set(b.target, m.name);
+      boundBy.set(b.target, [...(boundBy.get(b.target) ?? []), m.name]);
+    }
+  }
+  const recentHours = [3, 2, 1].map((n) => isoHour(new Date(hourFloor(now).getTime() - n * HOUR)));
+  const requestsAt = (names: string[], hour: string) =>
+    names.reduce((sum, n) => sum + ((hist.get(n) ?? []).find((h) => h.hour === hour)?.requests ?? 0), 0);
   type Op = { kind: ResourceStats['kind']; resource: string; hour: string; ops: number };
   const opsBy = new Map<string, Op[]>();
   for (const o of opsR.results as unknown as Op[]) {
@@ -640,8 +780,15 @@ export async function loadFacts(
     const last = list.find((o) => o.hour === lastFullHour);
     const before = list.filter((o) => o.hour < lastFullHour);
     const label = kind === 'do' ? `Durable Objects in ${resource}` : (labelOf.get(`${kind}|${resource}`) ?? resource);
-    const script = kind === 'do' ? resource : (bindingOwner.get(resource) ?? '*');
-    return { kind, resource, label, script, lastHour: last?.ops ?? 0, median7d: median(before.map((o) => o.ops)), historyHours: before.length + (last ? 1 : 0) };
+    const target = kind === 'queues' ? (labelOf.get(`${kind}|${resource}`) ?? resource) : resource;
+    const script = kind === 'do' ? resource : (bindingOwner.get(target) ?? '*');
+    const owners = kind === 'do' ? [resource] : (boundBy.get(target) ?? []);
+    return {
+      kind, resource, label, script, lastHour: last?.ops ?? 0, median7d: median(before.map((o) => o.ops)), historyHours: before.length + (last ? 1 : 0),
+      recentOps: recentHours.map((h) => list.find((o) => o.hour === h)?.ops ?? 0),
+      // null when no Worker is known to use it: the idle check then has nothing to compare with.
+      recentRequests: owners.length ? recentHours.map((h) => requestsAt(owners, h)) : null,
+    };
   });
 
   const firstMetrics = settings.first_metrics_at ? new Date(settings.first_metrics_at).getTime() : now.getTime();
@@ -660,7 +807,14 @@ export async function loadFacts(
     retentionDays: config.retentionDays,
   };
 
+  const storage = (storageR.results as { kind: StorageSize['kind']; id: string; bytes: number; objects: number | null }[]).map((r) => ({
+    kind: r.kind, id: r.id, bytes: r.bytes, objects: r.objects ?? undefined,
+    label: r.id === '*' ? 'Durable Objects' : (labelOf.get(`${r.kind}|${r.id}`) ?? r.id),
+  }));
   return {
+    quotaToday: Object.fromEntries((quotaR.results as { metric: QuotaMetric; v: number }[]).map((r) => [r.metric, r.v])),
+    storage,
+    tokenExpiresOn: settings.token_expires_on || null,
     accountToday: (todayR.results[0] as { n: number }).n,
     stats,
     meta,

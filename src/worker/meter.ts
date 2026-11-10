@@ -12,8 +12,10 @@ type Meta = { rows_read?: number; rows_written?: number } | undefined;
 
 export function metered(db: D1Database): { db: D1Database; meter: Meter } {
   const meter: Meter = { rowsRead: 0, rowsWritten: 0, queries: 0 };
-  const add = (meta: Meta) => {
-    meter.queries++;
+  // `queries` counts calls the way D1's per-invocation limit does: a db.batch() is one query,
+  // however many statements it holds (d1/platform/limits, "Batch limits").
+  const add = (meta: Meta, count = true) => {
+    if (count) meter.queries++;
     meter.rowsRead += meta?.rows_read ?? 0;
     meter.rowsWritten += meta?.rows_written ?? 0;
   };
@@ -50,7 +52,8 @@ export function metered(db: D1Database): { db: D1Database; meter: Meter } {
         return async (stmts: D1PreparedStatement[]) => {
           const inner = stmts.map((s) => ((s as unknown as { __inner?: D1PreparedStatement }).__inner ?? s));
           const results = await target.batch(inner);
-          for (const r of results) add(r.meta as Meta);
+          meter.queries++;
+          for (const r of results) add(r.meta as Meta, false);
           return results;
         };
       }

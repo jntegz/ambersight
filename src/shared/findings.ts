@@ -4,7 +4,7 @@
 import type { Finding, Severity } from './types';
 
 /** Codes that end in a resource id or name; the check is the prefix. */
-const DYNAMIC = /^(unbound-(?:kv|d1|r2|queues)|ops-spike-(?:kv|d1|r2|queues|do)|orphan-route|orphan-domain|missing-service|missing-tail)-.+$/;
+const DYNAMIC = /^(unbound-(?:kv|d1|r2|queues)|ops-spike-(?:kv|d1|r2|queues|do)|idle-loop-(?:kv|d1|r2|queues|do)|new-resource-burst-(?:kv|d1|r2|queues|do)|storage-d1-db|orphan-route|orphan-domain|missing-service|missing-tail)-.+$/;
 
 /** "module:code" with ids stripped, e.g. "zombies:unbound-queues". Stable across scans and Workers. */
 export function checkOf(f: Pick<Finding, 'module' | 'code'>): string {
@@ -16,6 +16,34 @@ export const CHECK_PATTERN = /^[a-z]+:[a-z0-9-]+$/;
 /** Group headings. A check not listed here uses its first finding's message. */
 export const CHECK_TITLES: Record<string, string> = {
   'budget:free-daily-requests': 'Free plan request budget',
+  'budget:free-daily-d1-rows-read': 'Free D1 rows read running out',
+  'budget:free-daily-d1-rows-written': 'Free D1 rows written running out',
+  'budget:free-daily-kv-reads': 'Free KV reads running out',
+  'budget:free-daily-kv-writes': 'Free KV writes running out',
+  'budget:free-daily-kv-deletes': 'Free KV deletes running out',
+  'budget:free-daily-kv-lists': 'Free KV list requests running out',
+  'budget:free-daily-do-requests': 'Free Durable Object requests running out',
+  'budget:free-daily-queue-ops': 'Free Queue operations running out',
+  'budget:free-daily-workflow-steps': 'Free Workflow steps running out',
+  'budget:free-daily-ai-neurons': 'Workers AI daily allocation',
+  'budget:storage-d1-db': 'D1 databases close to their size limit',
+  'budget:storage-d1-account': 'D1 storage close to the account limit',
+  'budget:storage-kv-account': 'KV storage close to the account limit',
+  'budget:storage-r2-account': 'R2 storage past the free amount',
+  'budget:storage-do-account': 'Durable Object storage close to the account limit',
+  'health:token-expiry': 'Ambersight\'s API token expires soon',
+  'runaway:new-worker-burst': 'Traffic burst on a new Worker',
+  'usage:new-resource-burst-kv': 'Burst on a new KV namespace',
+  'usage:new-resource-burst-d1': 'Burst on a new D1 database',
+  'usage:new-resource-burst-r2': 'Burst on a new R2 bucket',
+  'usage:new-resource-burst-queues': 'Burst on a new queue',
+  'usage:new-resource-burst-do': 'Burst on new Durable Objects',
+  'usage:idle-loop-do': 'Durable Objects busy with no traffic (likely an alarm loop)',
+  'usage:idle-loop-queues': 'Queue busy with no traffic (likely a retry loop)',
+  'usage:idle-loop-d1': 'D1 busy with no traffic',
+  'usage:idle-loop-kv': 'KV busy with no traffic',
+  'usage:idle-loop-r2': 'R2 busy with no traffic',
+  'usage:logs-free-allowance': 'Logs close to the free daily allowance',
   'runaway:traffic-spike': 'Traffic spike',
   'runaway:cpu-spike': 'CPU time spike',
   'runaway:subrequest-spike': 'Subrequest spike',

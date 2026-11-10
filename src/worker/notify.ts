@@ -247,6 +247,26 @@ async function digestData(db: D1Database, now: Date, config: Config, days: numbe
   };
 }
 
+/**
+ * An alert about Ambersight itself (scans failing), sent on the channel set for critical findings.
+ * There is no finding behind it: a scan that fails cannot store one.
+ */
+export async function sendSystemAlert(env: Env, now: Date, config: Config, message: string, action: string): Promise<boolean> {
+  const route = config.alerts.critical.instant;
+  if (route === 'off' || inQuietHours(now, config.timeZone, config.alerts.quietHours)) return false;
+  const rows: Row[] = [{ id: 'ambersight-health', script: '*', severity: 'critical', message, action }];
+  let sent = false;
+  if ((route === 'email' || route === 'both') && emailReady(env)) {
+    await sendEmail(env, recipients(env), 'Ambersight: scans are failing', render('Scans are failing', 'Ambersight cannot read your account.', rows));
+    sent = true;
+  }
+  if ((route === 'webhook' || route === 'both') && env.WEBHOOK_URL) {
+    await sendWebhook(env.WEBHOOK_URL, 'Ambersight: scans are failing', rows);
+    sent = true;
+  }
+  return sent;
+}
+
 /** Settings › Test message. */
 export async function sendTest(env: Env, channel: 'email' | 'webhook'): Promise<void> {
   const rows: Row[] = [{ id: 'test', script: '*', severity: 'info', message: 'This is a test message from Ambersight.', action: 'Nothing to do. Alerts will arrive here.' }];

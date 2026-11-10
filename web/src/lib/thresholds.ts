@@ -9,14 +9,14 @@ export interface ThresholdMeta {
   label: string;
   help: string;
   /** Shares (0..1) are shown and typed as percentages. */
-  unit: '%' | '×' | 'months' | 'days' | 'min';
+  unit: '%' | '×' | 'months' | 'days' | 'min' | 'requests' | 'ops';
 }
 
 export const THRESHOLD_GROUPS: { title: string; items: ThresholdMeta[] }[] = [
   {
-    title: 'Free request budget',
+    title: 'Free plan limits',
     items: [
-      { key: 'budgetWarn', label: 'Warn at', help: 'Share of the 100,000 daily free requests.', unit: '%' },
+      { key: 'budgetWarn', label: 'Warn at', help: 'Share of a free daily limit: requests, D1 rows, KV operations and the rest.', unit: '%' },
       { key: 'budgetCritical', label: 'Critical at', help: 'Must be above the warning level.', unit: '%' },
     ],
   },
@@ -33,6 +33,8 @@ export const THRESHOLD_GROUPS: { title: string; items: ThresholdMeta[] }[] = [
     items: [
       { key: 'runawayMultiplier', label: 'Runaway traffic', help: 'Last full hour vs the 7-day hourly median.', unit: '×' },
       { key: 'cpuShareWarn', label: 'CPU time warning', help: 'p99 CPU time as a share of the plan limit.', unit: '%' },
+      { key: 'newWorkerHourlyRequests', label: 'New Worker burst', help: 'Requests in one hour that count as a burst for a Worker with under 3 days of history.', unit: 'requests' },
+      { key: 'newResourceHourlyOps', label: 'New resource burst', help: 'Storage or Durable Object operations in one hour, for a resource with under 3 days of history.', unit: 'ops' },
     ],
   },
   {

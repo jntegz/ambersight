@@ -18,6 +18,7 @@
   const MODULE_ICON: Record<Finding['module'], IconName> = {
     budget: 'budget', errors: 'errors', runaway: 'runaway', cron: 'cron', usage: 'usage',
     deprecation: 'deprecation', exposure: 'exposure', zombies: 'zombies', timeline: 'timeline',
+    health: 'key', pages: 'grid', security: 'shield', drift: 'list', deploys: 'timeline',
   };
   // Timestamps in evidence (e.g. deployedAt) read better as "Nov 9, 19:58 UTC".
   const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
