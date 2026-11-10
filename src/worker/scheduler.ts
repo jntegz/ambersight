@@ -72,10 +72,10 @@ export function effectiveIntervalMinutes(configured: number, accounts: number, q
 }
 
 /** Runs one account's scan and records a failure instead of throwing, so the next tick moves on. */
-export async function scanAccount(env: Env, account: string, now = new Date(), force = true): Promise<ScanResult | { error: string }> {
+export async function scanAccount(env: Env, account: string, now = new Date(), force = true, continuation = false): Promise<ScanResult | { error: string }> {
   const db = env.DB;
   try {
-    return await runScan(env, now, { account, force });
+    return await runScan(env, now, { account, force, continuation });
   } catch (e) {
     const message = (e as Error).message || 'Unknown error';
     const state = await getAccountState(db, account);
@@ -132,7 +132,7 @@ export const MAX_CONTINUATIONS = 20;
 export async function handleQueueMessage(env: Env, msg: ScanMessage, now = new Date()): Promise<ScanResult | { error: string }> {
   const accounts = await activeAccounts(env, now);
   if (!accounts.some((a) => a.id === msg.account)) return { error: 'Account is no longer watched.' };
-  const result = await scanAccount(env, msg.account, now, true);
+  const result = await scanAccount(env, msg.account, now, true, msg.kind === 'continue');
   const step = (msg.step ?? 0) + 1;
   if (!('error' in result) && env.SCAN_QUEUE && step <= MAX_CONTINUATIONS && ((result.detailRemaining ?? 0) > 0 || (result.zonesRemaining ?? 0) > 0)) {
     await env.SCAN_QUEUE.send({ kind: 'continue', account: msg.account, step } satisfies ScanMessage);

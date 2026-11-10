@@ -26,6 +26,7 @@ Everything here is built on free Cloudflare features and keeps the read-only tok
 - **Zones** are read on a cursor, so all of them are covered instead of the first 20.
 - **Optional, free bindings**, all off by default: a scan queue (every account on time, large fleets in one go), a Workers AI digest summary, and Turnstile on sign-in.
 - The pre-filled token link adds Pages, SSL and Certificates, and DNS Read.
+- **Lighter on D1 and CPU.** With 200 Workers and 30 days of history, an hourly scan now reads about 34,000 D1 rows instead of 293,000 and writes about 640 instead of 2,300 (roughly 0.8 million reads and 16,000 writes a day, inside the Free plan's 5 million and 100,000). Writes skip unchanged rows, the no-traffic check uses each Worker's last active hour, four unused indexes are gone (migration 0008), the overview reads the metrics once, and medians use quickselect.
 
 ## 0.1.0 (2026-11-09)
 

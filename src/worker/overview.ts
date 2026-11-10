@@ -67,24 +67,26 @@ export async function buildOverview(env: Env, requested?: string | null, now = n
   const weekStart = isoHour(new Date(utcMidnight(now).getTime() - 6 * DAY));
 
   const monthStart = isoHour(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)));
-  const [workers, hourly, daily, today, findings, entries, quotaToday, quotaMonth, storageR, resNames, week, pagesR] = await db.batch([
+  // One read of each range: the last 24 hours (sparklines, today's totals) and the last 7 days by
+  // day (weekly sparkline and per-Worker cost). Queries a view does not need read nothing.
+  const wantCost = plan === 'paid' && config.modules.cost;
+  const none = db.prepare('SELECT 1 WHERE 0');
+  const [workers, hourly, daily, findings, entries, quotaToday, quotaMonth, storageR, resNames, pagesR] = await db.batch([
     db.prepare('SELECT name, deployed_on, modified_on, handlers, tags, workers_dev FROM workers WHERE account = ?1 ORDER BY name').bind(A),
     db.prepare('SELECT script, hour, requests, errors FROM metrics_hourly WHERE account = ?1 AND hour >= ?2').bind(A, dayAgo),
     db.prepare(
-      `SELECT script, substr(hour, 1, 10) AS day, SUM(requests) AS requests FROM metrics_hourly
+      `SELECT script, substr(hour, 1, 10) AS day, SUM(requests) AS requests, SUM(cpu_time_us) AS cpu FROM metrics_hourly
        WHERE account = ?1 AND hour >= ?2 GROUP BY script, day`,
     ).bind(A, weekStart),
-    db.prepare('SELECT COALESCE(SUM(requests),0) AS requests, COALESCE(SUM(errors),0) AS errors FROM metrics_hourly WHERE account = ?1 AND hour >= ?2').bind(A, midnight),
     db.prepare(`SELECT * FROM findings WHERE account = ?1 AND status = 'open'`).bind(A),
     db.prepare(`SELECT name, script FROM resources WHERE account = ?1 AND kind IN ('route','domain')`).bind(A),
     db.prepare('SELECT metric, SUM(value) AS v FROM quota_hourly WHERE account = ?1 AND hour >= ?2 GROUP BY metric').bind(A, midnight),
-    db.prepare('SELECT metric, SUM(value) AS v, MIN(hour) AS first FROM quota_hourly WHERE account = ?1 AND hour >= ?2 GROUP BY metric').bind(A, monthStart),
+    wantCost
+      ? db.prepare('SELECT metric, SUM(value) AS v, MIN(hour) AS first FROM quota_hourly WHERE account = ?1 AND hour >= ?2 GROUP BY metric').bind(A, monthStart)
+      : none,
     db.prepare('SELECT kind, id, bytes FROM storage_sizes WHERE account = ?1').bind(A),
     db.prepare(`SELECT kind, id, name FROM resources WHERE account = ?1 AND kind IN ('d1','kv','r2')`).bind(A),
-    db.prepare(
-      `SELECT script, SUM(requests) AS requests, SUM(cpu_time_us) AS cpu FROM metrics_hourly WHERE account = ?1 AND hour >= ?2 GROUP BY script`,
-    ).bind(A, isoHour(new Date(now.getTime() - 7 * DAY))),
-    db.prepare(`SELECT id, script, extra FROM resources WHERE account = ?1 AND kind = 'pages' ORDER BY id`).bind(A),
+    config.modules.pages ? db.prepare(`SELECT id, script, extra FROM resources WHERE account = ?1 AND kind = 'pages' ORDER BY id`).bind(A) : none,
   ]);
   const usedToday = Object.fromEntries((quotaToday.results as { metric: QuotaMetric; v: number }[]).map((r) => [r.metric, r.v]));
   const quotas: QuotaStatus[] = plan === 'free'
@@ -110,14 +112,14 @@ export async function buildOverview(env: Env, requested?: string | null, now = n
   }
   storage.sort((a, b) => (b.share ?? -1) - (a.share ?? -1) || b.bytes - a.bytes);
   let cost: CostEstimate | null = null;
-  if (plan === 'paid' && config.modules.cost) {
+  if (wantCost) {
     const month = quotaMonth.results as { metric: QuotaMetric; v: number; first: string }[];
     const firstHour = month.reduce<string | null>((m, r) => (!m || r.first < m ? r.first : m), null);
     cost = estimate(
       now,
       Object.fromEntries(month.map((r) => [r.metric, r.v])),
       Object.fromEntries(totals),
-      (week.results as { script: string; requests: number; cpu: number }[]).map((r) => ({ name: r.script, requests: r.requests, cpuMs: (r.cpu ?? 0) / 1000 })),
+      perWorkerWeek(daily.results as { script: string; requests: number; cpu: number | null }[], (now.getTime() - new Date(weekStart).getTime()) / DAY),
       firstHour,
     );
   }
@@ -183,7 +185,14 @@ export async function buildOverview(env: Env, requested?: string | null, now = n
     (a, b) => b.score - a.score || (b.latestFindingAt ?? '').localeCompare(a.latestFindingAt ?? '') || b.requests24h - a.requests24h || a.name.localeCompare(b.name),
   );
 
-  const t = today.results[0] as { requests: number; errors: number };
+  // Today (since 00:00 UTC) is part of the last 24 hours already read.
+  const t = { requests: 0, errors: 0 };
+  for (const r of hourly.results as { hour: string; requests: number; errors: number }[]) {
+    if (r.hour >= midnight) {
+      t.requests += r.requests;
+      t.errors += r.errors;
+    }
+  }
   // Pages Functions run as a Worker named after the project (production_script_name), so their
   // requests are in metrics_hourly under that name.
   const pages: PagesSummary[] = config.modules.pages
@@ -230,6 +239,19 @@ export async function buildOverview(env: Env, requested?: string | null, now = n
     workers: summaries,
     groups: [...new Set(visible.flatMap((w) => w.groups))].sort(),
   };
+}
+
+/** Requests and CPU per Worker from the daily rows, scaled to 7 days for the cost estimate. */
+function perWorkerWeek(rows: { script: string; requests: number; cpu: number | null }[], days: number): { name: string; requests: number; cpuMs: number }[] {
+  const by = new Map<string, { name: string; requests: number; cpuMs: number }>();
+  for (const r of rows) {
+    const w = by.get(r.script) ?? { name: r.script, requests: 0, cpuMs: 0 };
+    w.requests += r.requests;
+    w.cpuMs += (r.cpu ?? 0) / 1000;
+    by.set(r.script, w);
+  }
+  const scale = 7 / Math.max(1, days);
+  return [...by.values()].map((w) => ({ name: w.name, requests: w.requests * scale, cpuMs: w.cpuMs * scale }));
 }
 
 /** M8: every deployment across the fleet, newest first, with correlated findings marked. */

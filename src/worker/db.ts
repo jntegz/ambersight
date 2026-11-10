@@ -17,7 +17,7 @@ export function setSettings(db: D1Database, values: Settings): D1PreparedStateme
     .prepare(
       `INSERT INTO settings (key, value)
        SELECT json_extract(value, '$.key'), json_extract(value, '$.value') FROM json_each(?1) WHERE true
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE settings.value IS NOT excluded.value`,
     )
     .bind(JSON.stringify(rows));
 }
@@ -56,7 +56,7 @@ export function setAccountState(db: D1Database, account: string, values: Setting
     .prepare(
       `INSERT INTO account_state (account, key, value)
        SELECT ?1, json_extract(value, '$.key'), json_extract(value, '$.value') FROM json_each(?2) WHERE true
-       ON CONFLICT(account, key) DO UPDATE SET value = excluded.value`,
+       ON CONFLICT(account, key) DO UPDATE SET value = excluded.value WHERE account_state.value IS NOT excluded.value`,
     )
     .bind(account, JSON.stringify(rows));
 }

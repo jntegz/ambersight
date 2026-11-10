@@ -185,7 +185,7 @@ All of these are info-level housekeeping. They stay folded away in the overview 
 
 | Check | Severity | Fires when | What to do |
 | --- | --- | --- | --- |
-| `zombies:no-traffic` | Info | A Worker with only a `fetch` handler had no requests in the last 30 days. Ambersight waits until it has tracked the account that long, and never uses a window longer than its own history retention. | If nobody uses it, delete the Worker and any storage only it uses. |
+| `zombies:no-traffic` | Info | A Worker with only a `fetch` handler had no requests in the last 30 days (Ambersight keeps each Worker's last hour with a request). It waits until it has tracked the account that long, and never uses a window longer than its own history retention. | If nobody uses it, delete the Worker and any storage only it uses. |
 | `zombies:never-deployed` | Info | The Worker was created but never deployed. | Deploy it or delete it. |
 | `zombies:missing-service` | Info | A service binding points at a Worker that no longer exists. | Calls through it fail. Remove the binding or deploy the missing Worker. |
 | `zombies:missing-tail` | Info | A tail consumer no longer exists. | Remove it from `tail_consumers`. |
@@ -220,7 +220,7 @@ Read once a day with the inventory (needs *Pages Read*). Pages Functions count t
 | `security:dangling-pages` | Critical | A DNS record points at `<name>.pages.dev`, and the account has no Pages project of that name. | Anyone can create a project with that name and serve content on your hostname. Delete the record. |
 | `security:dangling-workers-dev` | Warning | A DNS record points at `<worker>.<your-subdomain>.workers.dev`, and that Worker no longer exists. | Requests to the hostname fail. Delete the record or deploy the Worker again. |
 
-The audit log is read every scan (it needs *Account Settings Read*, which the token already has). Certificates and DNS records are read per zone on a rotating cursor, a few zones per scan, each zone at least once a day (*SSL and Certificates Read*, *DNS Read*). The dangling Pages check waits until the Pages project list has loaded once, so a missing permission cannot make every record look dangling.
+The audit log is read every 6 hours (it needs *Account Settings Read*, which the token already has). Certificates and DNS records are read per zone on a rotating cursor, a few zones per scan, each zone at least once a day (*SSL and Certificates Read*, *DNS Read*). The dangling Pages check waits until the Pages project list has loaded once, so a missing permission cannot make every record look dangling.
 
 ## Config drift
 

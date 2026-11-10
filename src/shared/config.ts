@@ -213,13 +213,20 @@ function route(v: unknown, path: string): SeverityRoute {
   return { instant: v.instant as InstantChannel, digest: v.digest };
 }
 
+const zoneCheck = new Map<string, boolean>();
+/** Memoised: building an Intl.DateTimeFormat is slow, and the config is parsed several times per scan. */
 export function isValidTimeZone(tz: string): boolean {
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: tz });
-    return true;
-  } catch {
-    return false;
+  let ok = zoneCheck.get(tz);
+  if (ok === undefined) {
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: tz });
+      ok = true;
+    } catch {
+      ok = false;
+    }
+    if (zoneCheck.size < 100) zoneCheck.set(tz, ok);
   }
+  return ok;
 }
 
 /**

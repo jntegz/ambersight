@@ -644,9 +644,40 @@ export function runChecks(input: CheckInput): Finding[] {
   return out;
 }
 
+/** Median by quickselect: linear on average, where a sort is n log n. Runs 3 times per Worker per scan. */
 export function median(values: number[]): number {
-  if (!values.length) return 0;
-  const s = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(s.length / 2);
-  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+  const n = values.length;
+  if (!n) return 0;
+  const a = Float64Array.from(values);
+  const mid = n >> 1;
+  const upper = select(a, mid);
+  if (n % 2) return upper;
+  // The lower middle is the largest value left of `mid` after partitioning.
+  let lower = -Infinity;
+  for (let i = 0; i < mid; i++) if (a[i] > lower) lower = a[i];
+  return (lower + upper) / 2;
+}
+
+/** k-th smallest value; partitions `a` in place so everything left of k is no larger. */
+function select(a: Float64Array, k: number): number {
+  let lo = 0;
+  let hi = a.length - 1;
+  while (lo < hi) {
+    const pivot = a[(lo + hi) >> 1];
+    let i = lo;
+    let j = hi;
+    while (i <= j) {
+      while (a[i] < pivot) i++;
+      while (a[j] > pivot) j--;
+      if (i <= j) {
+        const t = a[i]; a[i] = a[j]; a[j] = t;
+        i++;
+        j--;
+      }
+    }
+    if (k <= j) hi = j;
+    else if (k >= i) lo = i;
+    else return a[k];
+  }
+  return a[k];
 }
