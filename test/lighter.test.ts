@@ -146,3 +146,31 @@ describe('median', () => {
     expect(median([7, 7, 7, 1, 9, 7])).toBe(7);
   });
 });
+
+describe('deleted Workers leave "Needs attention" on the next scan', () => {
+  it('resolves their findings even in a module whose findings are being kept, acknowledged ones too', async () => {
+    stub();
+    const e = await setup();
+    await runScan(e, NOW, { account: 'acc1' });
+    const cron = await e.DB.prepare(`SELECT id FROM findings WHERE script = 'cron-job' AND status = 'open'`).all<{ id: string }>();
+    expect(cron.results.length).toBeGreaterThan(0);
+    await e.DB.prepare(`UPDATE findings SET status = 'acknowledged' WHERE id = ?1`).bind(cron.results[0].id).run();
+
+    // cron-job is deleted in Cloudflare; the next run is a continuation, which keeps cron findings.
+    const original = { workers: fleet.workers, scripts: fleet.scripts };
+    fleet.workers = fleet.workers.filter((w) => w.name !== 'cron-job');
+    fleet.scripts = fleet.scripts.filter((s) => s.id !== 'cron-job');
+    try {
+      await runScan(e, new Date(NOW.getTime() + 60_000), { account: 'acc1', force: true, continuation: true });
+    } finally {
+      fleet.workers = original.workers;
+      fleet.scripts = original.scripts;
+    }
+    const left = await e.DB.prepare(`SELECT status FROM findings WHERE script = 'cron-job'`).all<{ status: string }>();
+    expect(left.results.every((r) => r.status === 'resolved')).toBe(true);
+    const { buildOverview } = await import('../src/worker/overview');
+    const o = await buildOverview(e, 'acc1', NOW);
+    expect(o.findings.some((f) => f.script === 'cron-job')).toBe(false);
+    expect(o.workers.some((w) => w.name === 'cron-job')).toBe(false);
+  });
+});

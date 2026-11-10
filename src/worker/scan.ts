@@ -681,7 +681,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
   // findings as they are rather than resolving them as if every cron had recovered.
   // Cron findings stay as they are when this scan did not read cron runs (paused, or a continuation).
   const keepModules = cronTruncated || cronDataEmpty || light ? ['cron'] : [];
-  await saveFindings(db, accountId, muted.size ? findings.filter((f) => !muted.has(checkOf(f))) : findings, stamp, keepModules);
+  await saveFindings(db, accountId, muted.size ? findings.filter((f) => !muted.has(checkOf(f))) : findings, stamp, keepModules, inventory.map((w) => w.name));
 
   // 9. Alerts and digest, then the run's own cost.
   if (!light) await sendAlerts(env, now, config).catch((e: Error) => warnings.push(`Alerts failed: ${e.message}`));
@@ -1152,7 +1152,7 @@ export function cronStats(
 /** Stored finding IDs carry the account, so the same check on a same-named Worker in two accounts stays apart. */
 export const findingKey = (account: string, id: string) => `${account}/${id}`;
 
-async function saveFindings(db: D1Database, account: string, findings: Finding[], stamp: string, keepModules: string[] = []): Promise<void> {
+async function saveFindings(db: D1Database, account: string, findings: Finding[], stamp: string, keepModules: string[] = [], workerNames: string[] = []): Promise<void> {
   const rows = findings.map((f) => ({ ...f, id: findingKey(account, f.id), evidence: JSON.stringify(f.evidence), docsUrl: f.docsUrl ?? null }));
   await db.batch([
     db.prepare(
@@ -1177,11 +1177,15 @@ async function saveFindings(db: D1Database, account: string, findings: Finding[]
          OR findings.evidence IS NOT excluded.evidence OR findings.action IS NOT excluded.action OR findings.docs_url IS NOT excluded.docs_url
          OR (findings.status = 'snoozed' AND findings.snooze_until < excluded.last_seen)`,
     ).bind(JSON.stringify(rows), stamp, account),
-    // Resolved: open findings of this account that this scan did not raise.
+    // Resolved: findings of this account that this scan did not raise. Findings of a Worker that no
+    // longer exists resolve too, even in a module whose findings are being kept (paused cron data),
+    // so a deleted Worker leaves "Needs attention" on the next scan.
     db.prepare(
       `UPDATE findings SET status = 'resolved', last_seen = ?1
-       WHERE account = ?3 AND status <> 'resolved' AND module NOT IN (SELECT value FROM json_each(?2))
-         AND id NOT IN (SELECT json_extract(value,'$.id') FROM json_each(?4))`,
-    ).bind(stamp, JSON.stringify(keepModules), account, JSON.stringify(rows)),
+       WHERE account = ?3 AND status <> 'resolved'
+         AND id NOT IN (SELECT json_extract(value,'$.id') FROM json_each(?4))
+         AND (module NOT IN (SELECT value FROM json_each(?2))
+              OR (script <> '*' AND script NOT IN (SELECT value FROM json_each(?5))))`,
+    ).bind(stamp, JSON.stringify(keepModules), account, JSON.stringify(rows), JSON.stringify(workerNames)),
   ]);
 }
