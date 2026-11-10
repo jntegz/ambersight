@@ -8,13 +8,15 @@ import { groupsFor, inScope, thresholdsFor, type Config } from '../shared/config
 import { checkOf } from '../shared/findings';
 import type { Finding } from '../shared/types';
 import type { QuotaMetric, StorageKind } from '../shared/limits';
-import { CfClient, CronRunsTruncated, type ApiScript, type ApiWorker, type CfAlert, type CronRunRow, type Deployment, type InventoryItem, type QuotaRow, type ResourceOps, type ScriptSettings, type StorageSize } from './cf';
+import { CfClient, CronRunsTruncated, type ApiScript, type ApiWorker, type AuditEvent, type CfAlert, type CronRunRow, type D1Query, type Deployment, type InventoryItem, type QuotaRow, type ResourceOps, type ScriptSettings, type StorageSize, type Zone } from './cf';
 import { median, runChecks, type CronStats, type HourPoint, type ResourceStats, type WorkerMeta, type WorkerStats } from './checks';
 import { countRuns } from './cron';
 import { configFrom, getAccountState, getSettings, hourFloor, isoHour, planFrom, recordUsage, setAccountState, setSettings, upsertAccount, utcMidnight, type Settings } from './db';
 import type { Env } from './env';
 import type { InventoryFacts } from './hygiene';
+import type { ChangeFacts } from './security';
 import { metered } from './meter';
+import { fetchIncidents, type Incident } from './incidents';
 import { allowedFetch } from './net';
 import { sendAlerts } from './notify';
 import { isNewer, REPO, VERSION } from './version';
@@ -24,7 +26,8 @@ const DAY = 24 * HOUR;
 /** Subrequests per run, leaving room for alerts and the update check. */
 const BUDGET = { free: 42, paid: 900 };
 const DETAIL_MAX_AGE = 6 * HOUR;
-const MAX_ZONES = 20;
+/** Per-zone tasks (routes, certificates, DNS) are refreshed this often, a few zones per scan. */
+const ZONE_TASK_MAX_AGE = DAY - HOUR;
 
 export interface ScanResult {
   skipped?: boolean;
@@ -74,15 +77,15 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
   const inventory = mergeInventory(scripts, apiWorkers ?? [], stamp);
   const { results: known } = await db
     .prepare(
-      `SELECT name, detail_checked_at, bindings LIKE '%durable_object_namespace%' AS has_do,
+      `SELECT name, detail_checked_at, bindings, bindings LIKE '%durable_object_namespace%' AS has_do,
          bindings LIKE '%"type":"workflow"%' AS has_workflow, bindings LIKE '%"type":"ai"%' AS has_ai
        FROM workers WHERE account = ?1`,
     )
     .bind(accountId)
-    .all<{ name: string; detail_checked_at: string | null; has_do: number | null; has_workflow: number | null; has_ai: number | null }>();
+    .all<{ name: string; detail_checked_at: string | null; bindings: string | null; has_do: number | null; has_workflow: number | null; has_ai: number | null }>();
   const knownNames = new Set(known.map((k) => k.name));
   const currentNames = new Set(inventory.map((w) => w.name));
-  const fleetEvents = knownNames.size
+  const fleetEvents: { at: string; kind: string; script: string; detail?: string }[] = knownNames.size
     ? [
         ...inventory.filter((w) => !knownNames.has(w.name)).map((w) => ({ at: stamp, kind: 'added', script: w.name })),
         ...[...knownNames].filter((n) => !currentNames.has(n)).map((n) => ({ at: stamp, kind: 'removed', script: n })),
@@ -199,7 +202,8 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
   const refreshDue = inventoryDue(now, settings.inventory_at ?? null, config);
   const refreshed: InventoryItem[] = [];
   const refreshedKinds = new Set<InventoryItem['kind']>();
-  let routeZones: string[] | null = null; // set when only some zones' routes were read
+  let zoneList: Zone[] | null = null;
+  let incidents: Incident[] | null = null;
   let subdomain = settings.workers_subdomain ?? null;
   if (refreshDue) {
     subdomain = (await cf.workersSubdomain()) ?? subdomain;
@@ -212,15 +216,19 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
       }
     };
     await step(['domain'], 'Custom domains', () => cf.customDomains());
-    await step(['route'], 'Routes', async () => {
-      const r = await cf.routes(Math.max(1, Math.min(MAX_ZONES, left() - 15)));
-      if (r.zonesSkipped) {
-        warnings.push(`Routes: ${r.zonesSkipped} zones not checked this run.`);
-        // Replace stored routes only for the zones read; keep the rest instead of deleting them.
-        routeZones = r.zonesChecked;
-      }
-      return r.items;
-    });
+    // Routes, certificates and DNS are read per zone on a cursor (step 5d); here only the list.
+    try {
+      zoneList = await cf.listZones();
+    } catch (e) {
+      warnings.push(`Zones unavailable: ${(e as Error).message}`);
+    }
+    if (config.modules.pages) {
+      await step(['pages'], 'Pages projects', async () =>
+        (await cf.pagesProjects()).map((p) => ({ kind: 'pages' as const, id: p.name, name: p.name, script: p.productionScript, extra: { ...p } })),
+      );
+      // Only a list that loaded counts as "these are all the projects" for the dangling-DNS check.
+      if (refreshedKinds.has('pages')) settings.pages_listed_at = stamp;
+    }
     const st = await cf.storage();
     refreshed.push(...st.items);
     const storageLabel = { kv: 'KV', d1: 'D1', r2: 'R2', queues: 'Queues' } as const;
@@ -243,6 +251,23 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
       await checkForUpdate(global).catch((e: Error) => warnings.push(`Update check failed: ${e.message}`));
       global.update_checked_at = stamp;
     }
+    // Recent Cloudflare incidents for the timeline, install-wide, when switched on.
+    if (config.modules.incidents && now.getTime() - new Date(global.incidents_at ?? 0).getTime() > 20 * HOUR) {
+      incidents = await fetchIncidents('incidents').catch((e: Error) => {
+        warnings.push(`Cloudflare status page unavailable: ${e.message}`);
+        return null;
+      });
+      if (incidents) global.incidents_at = stamp;
+    }
+  }
+
+  // 5a. Expensive D1 queries, once a day with the inventory.
+  let d1Queries: D1Query[] | null = null;
+  if (refreshDue && config.modules.usage && left() > 12 && (refreshed.some((r) => r.kind === 'd1') || known.some((k) => (k.bindings ?? '').includes('"type":"d1"')))) {
+    d1Queries = await cf.d1TopQueries(now).catch(() => {
+      warnings.push('D1 query insights unavailable.');
+      return null;
+    });
   }
 
   // 5b. Storage sizes, once a day with the inventory, for the kinds the account has.
@@ -273,12 +298,71 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
     }
   }
 
+  // 5d. Zones: routes, certificates and DNS, the most overdue first, with a share of the budget.
+  const { results: zoneRows } = await db.prepare('SELECT id, name, routes_at, certs_at, dns_at FROM zones WHERE account = ?1').bind(accountId).all<{
+    id: string; name: string; routes_at: string | null; certs_at: string | null; dns_at: string | null;
+  }>();
+  const zoneState = new Map(zoneRows.map((z) => [z.id, z]));
+  const zones = zoneList ?? zoneRows.map((z) => ({ id: z.id, name: z.name }));
+  type ZoneTask = 'routes' | 'certs' | 'dns';
+  const wantTasks: ZoneTask[] = [
+    ...(config.modules.exposure || config.modules.zombies ? ['routes' as const] : []),
+    ...(config.modules.security ? ['certs' as const, 'dns' as const] : []),
+  ];
+  const tasks = zones
+    .flatMap((z) => wantTasks.map((task) => ({ zone: z, task, last: zoneState.get(z.id)?.[`${task}_at` as 'routes_at'] ?? null })))
+    .filter((t) => !t.last || now.getTime() - new Date(t.last).getTime() > ZONE_TASK_MAX_AGE)
+    .sort((a, b) => (a.last ?? '').localeCompare(b.last ?? '') || (a.task === 'routes' ? -1 : 1));
+  const zoneBudget = plan === 'paid' ? 120 : refreshDue ? 12 : 6;
+  const zoneDone: { id: string; task: ZoneTask }[] = [];
+  const zoneItems: InventoryItem[] = [];
+  const zoneFailed = new Set<ZoneTask>();
+  for (const t of tasks) {
+    if (zoneDone.length >= zoneBudget || left() <= 8) break;
+    if (zoneFailed.has(t.task)) continue; // a missing permission fails every zone the same way
+    try {
+      if (t.task === 'routes') zoneItems.push(...(await cf.zoneRoutes(t.zone)));
+      if (t.task === 'certs') {
+        for (const c of await cf.certPacks(t.zone)) {
+          zoneItems.push({ kind: 'cert', id: c.id, name: c.hosts[0] ?? c.id, script: null, extra: { zone: t.zone.name, ...c } });
+        }
+      }
+      if (t.task === 'dns') {
+        for (const d of await cf.cnameTargets(t.zone)) zoneItems.push({ kind: 'dns', id: d.id, name: d.name, script: null, extra: { zone: t.zone.name, target: d.target } });
+      }
+      zoneDone.push({ id: t.zone.id, task: t.task });
+    } catch (e) {
+      zoneFailed.add(t.task);
+      const perm = { routes: 'Zone and Workers Routes', certs: 'SSL and Certificates', dns: 'DNS' }[t.task];
+      warnings.push(`${t.task === 'routes' ? 'Routes' : t.task === 'certs' ? 'Certificates' : 'DNS records'} unavailable for ${t.zone.name}: ${(e as Error).message} (add ${perm} Read to the token).`);
+    }
+  }
+  const zonesLeft = tasks.length - zoneDone.length;
+  if (zonesLeft > 0 && !zoneFailed.size) warnings.push(`${zonesLeft} zone checks will run on the next scans.`);
+
+  // 5e. Audit log since the last read, one page per scan.
+  let auditEvents: AuditEvent[] = [];
+  if (config.modules.security && left() > 6 && now.getTime() >= new Date(settings.audit_retry_at ?? 0).getTime()) {
+    const from = new Date(settings.audit_at || now.getTime() - DAY);
+    try {
+      const r = await cf.auditLogs(from, now, settings.audit_cursor || undefined);
+      auditEvents = r.events;
+      settings.audit_cursor = r.cursor ?? '';
+      // With more pages to read, keep the same window and continue from the cursor next scan.
+      if (!r.cursor) settings.audit_at = stamp;
+    } catch (e) {
+      settings.audit_retry_at = new Date(now.getTime() + DAY).toISOString();
+      settings.audit_cursor = '';
+      warnings.push(`Audit log unavailable: ${(e as Error).message} (needs Account Settings Read).`);
+    }
+  }
+
   // 6. Per-Worker detail on a rotating cursor: settings (bindings), deployments, schedules.
   const checkedAt = new Map(known.map((k) => [k.name, k.detail_checked_at]));
   const due = inventory
     .filter((w) => !checkedAt.get(w.name) || now.getTime() - new Date(checkedAt.get(w.name)!).getTime() > DETAIL_MAX_AGE)
     .sort((a, b) => (checkedAt.get(a.name) ?? '').localeCompare(checkedAt.get(b.name) ?? ''));
-  const wantSettings = config.modules.deprecation || config.modules.zombies;
+  const wantSettings = config.modules.deprecation || config.modules.zombies || config.modules.drift;
   const wantDeploys = config.modules.timeline;
   const details: { name: string; settings: ScriptSettings | null; deployments: Deployment[] | null; crons: string[] | null }[] = [];
   let detailRemaining = 0;
@@ -291,7 +375,17 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
     }
     const d: (typeof details)[number] = { name: w.name, settings: null, deployments: null, crons: null };
     try {
-      if (wantSettings) d.settings = await cf.scriptSettings(w.name);
+      if (wantSettings) {
+        d.settings = await cf.scriptSettings(w.name);
+        // Config drift: a binding (or secret) that was there at the last read and is gone now.
+        const before = known.find((k) => k.name === w.name)?.bindings;
+        if (before && config.modules.drift) {
+          const now_ = new Set(d.settings.bindings.map((b) => b.name));
+          for (const b of parse<{ name: string; type: string }[]>(before, [])) {
+            if (b.type !== 'tail_consumer' && !now_.has(b.name)) fleetEvents.push({ at: stamp, kind: 'binding-removed', script: w.name, detail: b.name });
+          }
+        }
+      }
       if (wantDeploys) d.deployments = await cf.deployments(w.name);
       if (isCron) d.crons = await cf.schedules(w.name);
     } catch (e) {
@@ -360,13 +454,16 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
     ).bind(A, j(details.filter((d) => d.crons).map((d) => ({ script: d.name, crons: j(d.crons) }))), stamp),
     db.prepare(`DELETE FROM schedules WHERE account = ?1 AND script NOT IN (SELECT value FROM json_each(?2))`).bind(A, j(scheduled)),
     db.prepare(
-      `INSERT INTO deployments (account, script, id, created_on, author, message, source)
+      `INSERT INTO deployments (account, script, id, created_on, author, message, source, versions)
        SELECT ?1, json_extract(value,'$.script'), json_extract(value,'$.id'), json_extract(value,'$.created_on'),
-         json_extract(value,'$.author'), json_extract(value,'$.message'), json_extract(value,'$.source')
+         json_extract(value,'$.author'), json_extract(value,'$.message'), json_extract(value,'$.source'), json_extract(value,'$.versions')
        FROM json_each(?2) WHERE true
-       ON CONFLICT(account, script, id) DO NOTHING`,
-    ).bind(A, j(details.flatMap((d) => (d.deployments ?? []).map((x) => ({ ...x, script: d.name }))))),
-    db.prepare(`INSERT INTO fleet_events (account, at, kind, script) SELECT ?1, json_extract(value,'$.at'), json_extract(value,'$.kind'), json_extract(value,'$.script') FROM json_each(?2) WHERE true`).bind(A, j(fleetEvents)),
+       ON CONFLICT(account, script, id) DO UPDATE SET versions = COALESCE(deployments.versions, excluded.versions)`,
+    ).bind(A, j(details.flatMap((d) => (d.deployments ?? []).map((x) => ({ ...x, versions: j(x.versions), script: d.name }))))),
+    db.prepare(
+      `INSERT INTO fleet_events (account, at, kind, script, detail)
+       SELECT ?1, json_extract(value,'$.at'), json_extract(value,'$.kind'), json_extract(value,'$.script'), json_extract(value,'$.detail') FROM json_each(?2) WHERE true`,
+    ).bind(A, j(fleetEvents)),
   ];
   if (cronRuns) {
     writes.push(
@@ -417,13 +514,75 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
       ).bind(A, j(cfAlerts)),
     );
   }
+  if (zoneList) {
+    // Zones gone from the account take their routes, certificates and DNS records with them.
+    writes.push(
+      db.prepare(`DELETE FROM zones WHERE account = ?1 AND id NOT IN (SELECT value FROM json_each(?2))`).bind(A, j(zoneList.map((z) => z.id))),
+      db.prepare(
+        `INSERT INTO zones (account, id, name) SELECT ?1, json_extract(value,'$.id'), json_extract(value,'$.name') FROM json_each(?2) WHERE true
+         ON CONFLICT(account, id) DO UPDATE SET name = excluded.name`,
+      ).bind(A, j(zoneList)),
+      db.prepare(`DELETE FROM resources WHERE account = ?1 AND kind IN ('route','cert','dns') AND json_extract(extra, '$.zone') NOT IN (SELECT value FROM json_each(?2))`)
+        .bind(A, j(zoneList.map((z) => z.name))),
+    );
+  }
+  if (zoneDone.length) {
+    const nameOf = new Map(zones.map((z) => [z.id, z.name]));
+    const kindOf = { routes: 'route', certs: 'cert', dns: 'dns' } as const;
+    writes.push(
+      // Replace exactly what was read: each (kind, zone) pair that completed.
+      db.prepare(
+        `DELETE FROM resources WHERE account = ?1 AND EXISTS (SELECT 1 FROM json_each(?2) AS t
+           WHERE json_extract(t.value,'$.kind') = resources.kind AND json_extract(t.value,'$.zone') = json_extract(resources.extra, '$.zone'))`,
+      ).bind(A, j(zoneDone.map((d) => ({ kind: kindOf[d.task], zone: nameOf.get(d.id) })))),
+      db.prepare(
+        `INSERT INTO resources (account, kind, id, name, script, extra)
+         SELECT ?1, json_extract(value,'$.kind'), json_extract(value,'$.id'), json_extract(value,'$.name'), json_extract(value,'$.script'), json_extract(value,'$.extra')
+         FROM json_each(?2) WHERE true ON CONFLICT(account, kind, id) DO UPDATE SET name = excluded.name, script = excluded.script, extra = excluded.extra`,
+      ).bind(A, j(zoneItems.map((r) => ({ ...r, extra: r.extra ? j(r.extra) : null })))),
+      db.prepare(
+        `UPDATE zones SET
+           routes_at = CASE WHEN EXISTS (SELECT 1 FROM json_each(?2) AS t WHERE json_extract(t.value,'$.id') = zones.id AND json_extract(t.value,'$.task') = 'routes') THEN ?3 ELSE routes_at END,
+           certs_at = CASE WHEN EXISTS (SELECT 1 FROM json_each(?2) AS t WHERE json_extract(t.value,'$.id') = zones.id AND json_extract(t.value,'$.task') = 'certs') THEN ?3 ELSE certs_at END,
+           dns_at = CASE WHEN EXISTS (SELECT 1 FROM json_each(?2) AS t WHERE json_extract(t.value,'$.id') = zones.id AND json_extract(t.value,'$.task') = 'dns') THEN ?3 ELSE dns_at END
+         WHERE account = ?1`,
+      ).bind(A, j(zoneDone), stamp),
+    );
+  }
+  if (auditEvents.length) {
+    writes.push(
+      db.prepare(
+        `INSERT INTO audit_events (account, id, at, actor, action, description, product, resource_type, resource_id, result)
+         SELECT ?1, json_extract(value,'$.id'), json_extract(value,'$.at'), json_extract(value,'$.actor'), json_extract(value,'$.action'),
+           json_extract(value,'$.description'), json_extract(value,'$.product'), json_extract(value,'$.resourceType'), json_extract(value,'$.resourceId'), json_extract(value,'$.result')
+         FROM json_each(?2) WHERE true ON CONFLICT(account, id) DO NOTHING`,
+      ).bind(A, j(auditEvents)),
+    );
+  }
+  if (d1Queries) {
+    writes.push(
+      db.prepare('DELETE FROM d1_queries WHERE account = ?1').bind(A),
+      db.prepare(
+        `INSERT INTO d1_queries (account, hash, database_id, query, rows_read, rows_returned, runs, at)
+         SELECT ?1, json_extract(value,'$.hash'), json_extract(value,'$.databaseId'), json_extract(value,'$.query'), json_extract(value,'$.rowsRead'),
+           json_extract(value,'$.rowsReturned'), json_extract(value,'$.runs'), ?3 FROM json_each(?2) WHERE true ON CONFLICT(account, hash) DO NOTHING`,
+      ).bind(A, j(d1Queries.map((q) => ({ ...q, query: q.query.slice(0, 2000), hash: hashText(`${q.databaseId}|${q.query}`) }))), stamp),
+    );
+  }
+  if (incidents?.length) {
+    writes.push(
+      db.prepare(
+        `INSERT INTO cf_incidents (id, name, impact, status, created_at, resolved_at, url)
+         SELECT json_extract(value,'$.id'), json_extract(value,'$.name'), json_extract(value,'$.impact'), json_extract(value,'$.status'),
+           json_extract(value,'$.createdAt'), json_extract(value,'$.resolvedAt'), json_extract(value,'$.url') FROM json_each(?1) WHERE true
+         ON CONFLICT(id) DO UPDATE SET status = excluded.status, resolved_at = excluded.resolved_at, impact = excluded.impact`,
+      ).bind(j(incidents)),
+    );
+  }
   if (refreshDue) {
     writes.push(
       db.prepare(`DELETE FROM resources WHERE account = ?1 AND kind IN (SELECT value FROM json_each(?2))`)
-        .bind(A, j([...refreshedKinds].filter((k) => !(k === 'route' && routeZones)))),
-      ...(routeZones
-        ? [db.prepare(`DELETE FROM resources WHERE account = ?1 AND kind = 'route' AND json_extract(extra, '$.zone') IN (SELECT value FROM json_each(?2))`).bind(A, j(routeZones))]
-        : []),
+        .bind(A, j([...refreshedKinds])),
       db.prepare(
         `INSERT INTO resources (account, kind, id, name, script, extra)
          SELECT ?1, json_extract(value,'$.kind'), json_extract(value,'$.id'), json_extract(value,'$.name'), json_extract(value,'$.script'), json_extract(value,'$.extra')
@@ -442,15 +601,20 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
       ...(settings.quota_unavailable != null ? { quota_unavailable: settings.quota_unavailable } : {}),
       ...(settings.token_status ? { token_expires_on: settings.token_expires_on ?? '', token_status: settings.token_status } : {}),
       ...(settings.cf_alerts_at ? { cf_alerts_at: settings.cf_alerts_at } : {}),
+      ...(settings.audit_at != null ? { audit_at: settings.audit_at } : {}),
+      ...(settings.audit_cursor != null ? { audit_cursor: settings.audit_cursor } : {}),
+      ...(settings.audit_retry_at ? { audit_retry_at: settings.audit_retry_at } : {}),
+      ...(settings.pages_listed_at ? { pages_listed_at: settings.pages_listed_at } : {}),
       ...(refreshDue ? { inventory_at: stamp, workers_subdomain: subdomain ?? '' } : {}),
       ...(settings.access_listed_at ? { access_listed_at: settings.access_listed_at } : {}),
       ...(settings.first_metrics_at ? {} : { first_metrics_at: stamp }),
       ...(config.modules.cron && scheduled.length && cronRetryDue ? { cron_dataset: cronRuns || cronTruncated ? 'available' : 'unavailable', cron_dataset_checked: stamp } : {}),
     }),
   );
-  if (global.update_checked_at === stamp) {
+  if (global.update_checked_at === stamp || global.incidents_at === stamp) {
     writes.push(setSettings(db, {
-      update_checked_at: stamp,
+      ...(global.incidents_at ? { incidents_at: global.incidents_at } : {}),
+      update_checked_at: global.update_checked_at ?? '',
       ...(global.latest_version ? { latest_version: global.latest_version, latest_url: global.latest_url ?? '' } : {}),
     }));
   }
@@ -478,6 +642,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
     quotaToday: facts.quotaToday,
     storage: facts.storage,
     tokenExpiresOn: facts.tokenExpiresOn,
+    changes: facts.changes,
   });
   // Checks the user switched off are dropped here, so their open findings resolve like fixed ones.
   const muted = new Set(config.mutedChecks);
@@ -523,12 +688,24 @@ function retentionDeletes(db: D1Database, account: string, now: Date, days: numb
     db.prepare('DELETE FROM deployments WHERE account = ?1 AND created_on < ?2').bind(account, iso),
     db.prepare('DELETE FROM fleet_events WHERE account = ?1 AND at < ?2').bind(account, iso),
     db.prepare('DELETE FROM cf_alerts WHERE account = ?1 AND sent < ?2').bind(account, iso),
+    db.prepare('DELETE FROM audit_events WHERE account = ?1 AND at < ?2').bind(account, iso),
+    db.prepare('DELETE FROM cf_incidents WHERE created_at < ?1').bind(iso),
     // Quota totals stay at least 35 days: the cost estimate needs the whole month so far.
     db.prepare('DELETE FROM quota_hourly WHERE account = ?1 AND hour < ?2').bind(account, isoHour(new Date(now.getTime() - Math.max(days, 35) * DAY))),
     // Install-wide tables: any account's refresh may tidy them.
     db.prepare('DELETE FROM usage_daily WHERE day < ?1').bind(iso.slice(0, 10)),
     db.prepare('DELETE FROM sessions WHERE expires_at < ?1').bind(now.toISOString()),
   ];
+}
+
+/** Short stable hash for IDs (FNV-1a, hex). Not for security. */
+export function hashText(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, '0');
 }
 
 async function checkForUpdate(settings: Settings): Promise<void> {
@@ -628,6 +805,7 @@ export interface Facts {
   quotaToday: Partial<Record<QuotaMetric, number>>;
   storage: (StorageSize & { label: string })[];
   tokenExpiresOn: string | null;
+  changes: ChangeFacts;
 }
 
 /** Everything the checks need, from D1, in one batch. Out-of-scope Workers are left out. */
@@ -642,7 +820,8 @@ export async function loadFacts(
   const cronFrom = cronWindow ? isoHour(cronWindow.from) : lastFullHour;
   const cronTo = cronWindow ? isoHour(cronWindow.to) : lastFullHour;
 
-  const [workersR, histR, windowR, todayR, schedR, runsR, resR, opsR, depR, quotaR, storageR] = await db.batch([
+  const weekAgoIso = new Date(now.getTime() - 7 * DAY).toISOString();
+  const [workersR, histR, windowR, todayR, schedR, runsR, resR, opsR, depR, quotaR, storageR, latestR, removedR, auditR, d1qR] = await db.batch([
     db.prepare('SELECT * FROM workers WHERE account = ?1').bind(account),
     db.prepare(
       `SELECT script, hour, requests, errors, subrequests, cpu_time_us, exceeded, cpu_p99 FROM metrics_hourly
@@ -657,6 +836,17 @@ export async function loadFacts(
     db.prepare('SELECT script, id, created_on FROM deployments WHERE account = ?1 AND created_on >= ?2').bind(account, deployFrom),
     db.prepare('SELECT metric, SUM(value) AS v FROM quota_hourly WHERE account = ?1 AND hour >= ?2 GROUP BY metric').bind(account, isoHour(utcMidnight(now))),
     db.prepare('SELECT kind, id, bytes, objects FROM storage_sizes WHERE account = ?1').bind(account),
+    // Each Worker's latest deployment, for stuck gradual rollouts.
+    db.prepare(
+      `SELECT d.script, d.created_on, d.versions FROM deployments d WHERE d.account = ?1
+         AND d.created_on = (SELECT MAX(created_on) FROM deployments x WHERE x.account = d.account AND x.script = d.script)`,
+    ).bind(account),
+    db.prepare(`SELECT script, detail, at FROM fleet_events WHERE account = ?1 AND kind = 'binding-removed' AND at >= ?2`).bind(account, weekAgoIso),
+    db.prepare(
+      `SELECT id, at, actor, action, description, product, resource_type, resource_id FROM audit_events
+       WHERE account = ?1 AND at >= ?2 ORDER BY at DESC LIMIT 300`,
+    ).bind(account, weekAgoIso),
+    db.prepare('SELECT hash, database_id, query, rows_read, rows_returned, runs FROM d1_queries WHERE account = ?1').bind(account),
   ]);
 
   const allRows = workersR.results as unknown as WorkerRow[];
@@ -683,6 +873,7 @@ export async function loadFacts(
     const cpu = day.map((h) => h.cpu_p99).filter((v): v is number => v != null);
     return {
       name,
+      subrequests24h: day.reduce((a, h) => a + (h.subrequests ?? 0), 0),
       requests24h: sum(day, 'requests'),
       errors24h: sum(day, 'errors'),
       requestsPrev: sum(prev, 'requests'),
@@ -807,6 +998,26 @@ export async function loadFacts(
     retentionDays: config.retentionDays,
   };
 
+  const ex = <T>(r: { extra: string | null }) => parse<T>(r.extra, {} as T);
+  const changes: ChangeFacts = {
+    latestDeploys: (latestR.results as { script: string; created_on: string; versions: string | null }[])
+      .filter((d) => inScopeNames.has(d.script))
+      .map((d) => ({ script: d.script, createdOn: d.created_on, versions: parse<{ id: string; percentage: number }[]>(d.versions, []) })),
+    removedBindings: (removedR.results as { script: string; detail: string | null; at: string }[])
+      .filter((e) => e.detail && inScopeNames.has(e.script)).map((e) => ({ script: e.script, name: e.detail!, at: e.at })),
+    audit: (auditR.results as { id: string; at: string; actor: string | null; action: string | null; description: string | null; product: string | null; resource_type: string | null; resource_id: string | null }[])
+      .map((a) => ({ id: a.id, at: a.at, actor: a.actor, action: a.action ?? '', description: a.description, product: a.product, resourceType: a.resource_type, resourceId: a.resource_id })),
+    pages: settings.pages_listed_at
+      ? res.filter((r) => r.kind === 'pages').map((r) => ({ name: r.id, ...ex<{ subdomain: string | null; domains: string[]; latest: { id: string; createdOn: string; status: string; stage: string; environment: string; branch: string | null } | null }>(r) }))
+      : null,
+    certs: res.filter((r) => r.kind === 'cert').map((r) => ({ id: r.id, ...ex<{ zone: string; type: string; status: string; hosts: string[]; expiresOn: string | null; errors: string[] }>(r) })),
+    dns: res.filter((r) => r.kind === 'dns').map((r) => ({ id: r.id, name: r.name ?? '', ...ex<{ zone: string; target: string }>(r) })),
+    d1Queries: (d1qR.results as { hash: string; database_id: string; query: string; rows_read: number; rows_returned: number; runs: number }[]).map((q) => ({
+      hash: q.hash, database: labelOf.get(`d1|${q.database_id}`) ?? q.database_id, query: q.query, rowsRead: q.rows_read, rowsReturned: q.rows_returned, runs: q.runs,
+    })),
+    workerNames: new Set(allRows.map((w) => w.name)),
+    workersSubdomain: subdomain || null,
+  };
   const storage = (storageR.results as { kind: StorageSize['kind']; id: string; bytes: number; objects: number | null }[]).map((r) => ({
     kind: r.kind, id: r.id, bytes: r.bytes, objects: r.objects ?? undefined,
     label: r.id === '*' ? 'Durable Objects' : (labelOf.get(`${r.kind}|${r.id}`) ?? r.id),
@@ -815,6 +1026,7 @@ export async function loadFacts(
     quotaToday: Object.fromEntries((quotaR.results as { metric: QuotaMetric; v: number }[]).map((r) => [r.metric, r.v])),
     storage,
     tokenExpiresOn: settings.token_expires_on || null,
+    changes,
     accountToday: (todayR.results[0] as { n: number }).n,
     stats,
     meta,

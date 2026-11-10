@@ -78,6 +78,15 @@ export interface CostEstimate {
   pricesAsOf: string;
 }
 
+export interface PagesSummary {
+  name: string;
+  subdomain: string | null;
+  domains: string[];
+  latest: { createdOn: string; status: string; stage: string; environment: string; branch: string | null } | null;
+  /** Pages Functions requests in the last 24 hours (they share the Workers daily budget). */
+  requests24h: number;
+}
+
 export interface Overview {
   /** The account shown; null before setup. */
   account: { id: string; label: string; plan: 'free' | 'paid' } | null;
@@ -96,6 +105,8 @@ export interface Overview {
   storage: StorageStatus[];
   /** Estimated bill (Workers Paid only, when the cost module is on). */
   cost: CostEstimate | null;
+  /** Pages projects, when the Pages module is on and the token can read them. */
+  pages: PagesSummary[];
   findings: Finding[];
   workers: WorkerSummary[];
   groups: string[];
@@ -118,8 +129,11 @@ export interface AccountSummary {
 }
 
 export interface TimelineEntry {
-  /** deploy: a Worker deployment. cf-alert: a notification Cloudflare sent to the account. */
-  kind: 'deploy' | 'cf-alert';
+  /**
+   * deploy: a Worker deployment. cf-alert: a notification Cloudflare sent to the account.
+   * audit: an audit log entry. pages: a Pages project's latest deploy. incident: a Cloudflare status incident.
+   */
+  kind: 'deploy' | 'cf-alert' | 'audit' | 'pages' | 'incident';
   script: string;
   id: string;
   createdOn: string;

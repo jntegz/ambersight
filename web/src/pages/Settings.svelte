@@ -176,6 +176,10 @@
     { key: 'timeline', title: 'Deploy timeline', text: 'Deploy history and deploy-to-problem correlation.', icon: 'timeline' },
     { key: 'cost', title: 'Cost estimate', text: 'Estimated bill in dollars on Workers Paid, and the cost of runaway usage.', icon: 'usage' },
     { key: 'cfAlerts', title: 'Cloudflare notifications', text: 'Notifications Cloudflare sent to the account, on the timeline. Needs Notifications Read.', icon: 'mail' },
+    { key: 'pages', title: 'Pages', text: 'Failed Pages deploys and public pages.dev addresses. Needs Pages Read.', icon: 'grid' },
+    { key: 'security', title: 'Security', text: 'Audit log (new members, new tokens), certificates and DNS records left pointing at deleted Workers or Pages. Needs SSL and DNS Read.', icon: 'shield' },
+    { key: 'drift', title: 'Config drift', text: 'Bindings that disappeared after a deploy, staging and production that differ, Workers near the 64-variable limit.', icon: 'list' },
+    { key: 'incidents', title: 'Cloudflare incidents', text: 'Adds active incidents from cloudflarestatus.com to alerts and the timeline. Contacts that public site; sends nothing about your account.', icon: 'info' },
   ];
   const listText = (l: string[]) => l.join(', ');
   const splitList = (s: string) => s.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);

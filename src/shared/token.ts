@@ -14,6 +14,10 @@ export const TOKEN_PERMISSION_KEYS = [
   'zone',
   'workers_routes',
   'billing',
+  // Pages projects, certificates and DNS records (keys from the cloudflare-docs token template reference).
+  'page',
+  'ssl_and_certificates',
+  'dns',
   // Optional checks: the Access coverage check, and the setup wizard proving the token has no write scopes.
   'access',
   'api_tokens',

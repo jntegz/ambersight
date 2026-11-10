@@ -40,14 +40,20 @@
   const visible = $derived(
     (entries ?? []).filter(
       (e) =>
-        // Cloudflare's own notifications are account-wide: they show under every group.
-        (!group || e.groups.includes(group) || e.kind === 'cf-alert') &&
+        // Notifications, audit entries, incidents and Pages are not tied to a group: they show under every group.
+        (!group || e.groups.includes(group) || e.kind !== 'deploy') &&
         (!onlyFlagged || e.correlated.length) &&
         (!q || e.script.toLowerCase().includes(q) || (e.message ?? '').toLowerCase().includes(q) || (e.author ?? '').toLowerCase().includes(q)),
     ),
   );
-  const flagged = $derived(visible.filter((e) => e.correlated.length).length);
-  const deploys = $derived(visible.filter((e) => e.kind !== 'cf-alert'));
+  const deploys = $derived(visible.filter((e) => e.kind === 'deploy'));
+  const flagged = $derived(deploys.filter((e) => e.correlated.length).length);
+  const BADGE: Record<Exclude<TimelineEntry['kind'], 'deploy'>, { label: string; icon: 'mail' | 'shield' | 'info' | 'grid' }> = {
+    'cf-alert': { label: 'Cloudflare notification', icon: 'mail' },
+    audit: { label: 'Audit log', icon: 'shield' },
+    incident: { label: 'Cloudflare incident', icon: 'info' },
+    pages: { label: 'Pages deploy', icon: 'grid' },
+  };
   const workersTouched = $derived(new Set(deploys.map((e) => e.script)).size);
 
   const dayKey = (iso: string) => iso.slice(0, 10);
@@ -128,17 +134,19 @@
           <h2 class="day-title">{dayTitle(d.day)} <span class="count">{d.items.length}</span></h2>
           <ol class="card entries">
             {#each d.items as e (e.script + e.id)}
-              <li class="entry" class:flagged={e.correlated.length > 0} class:cf={e.kind === 'cf-alert'}>
+              <li class="entry" class:flagged={e.correlated.length > 0} class:cf={e.kind !== 'deploy'}>
                 <time datetime={e.createdOn} title={new Date(e.createdOn).toUTCString()}>{time(e.createdOn)}<span class="muted"> UTC</span></time>
                 <span class="node" aria-hidden="true"></span>
-                {#if e.kind === 'cf-alert'}
+                {#if e.kind !== 'deploy'}
                 <div class="body">
                   <p class="line1">
-                    <span class="cf-badge"><Icon name="mail" size={13} /> Cloudflare notification</span>
+                    <span class="cf-badge"><Icon name={BADGE[e.kind].icon} size={13} /> {BADGE[e.kind].label}</span>
+                    {#if e.script !== '*'}<span class="script mono">{e.script}</span>{/if}
                     {#if e.source}<span class="tag-chip">{e.source}</span>{/if}
                     <span class="ago muted">{timeAgo(e.createdOn)}</span>
                   </p>
-                  <p class="msg">{e.message ?? 'Cloudflare sent a notification.'}</p>
+                  <p class="msg">{e.message ?? BADGE[e.kind].label}</p>
+                  {#if e.author && e.kind === 'audit'}<p class="author muted">by {e.author}</p>{/if}
                 </div>
                 <span></span>
                 {:else}

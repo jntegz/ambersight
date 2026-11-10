@@ -6,6 +6,7 @@ import { groupsFor, type Config } from '../shared/config';
 import type { Severity } from '../shared/types';
 import { getSettings, isoHour, setSettings } from './db';
 import type { Env } from './env';
+import { fetchIncidents } from './incidents';
 import { allowedFetch } from './net';
 import { digestDue, inQuietHours } from './time';
 
@@ -115,17 +116,17 @@ function chatSafe(s: string, kind: ReturnType<typeof webhookKind>): string {
   return flat;
 }
 
-export async function sendWebhook(url: string, title: string, rows: Row[]): Promise<void> {
+export async function sendWebhook(url: string, title: string, rows: Row[], note?: string): Promise<void> {
   const kind = webhookKind(url);
   const lines = rows.slice(0, 20).map((r) => `• [${label(r.severity)}] ${chatSafe(`${who(r.script, r.account)}: ${r.message}`, kind)}`);
-  const text = [title, ...lines].join('\n').slice(0, 3900);
+  const text = [title, ...(note ? [chatSafe(note, kind)] : []), ...lines].join('\n').slice(0, 3900);
   const json = (body: unknown) => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const init: RequestInit =
     kind === 'slack' ? json({ text })
     : kind === 'discord' ? json({ content: text.slice(0, 1900), allowed_mentions: { parse: [] } })
     : kind === 'telegram' ? json({ chat_id: new URL(url).searchParams.get('chat_id'), text })
     : kind === 'ntfy' ? { method: 'POST', headers: { Title: title.slice(0, 200) }, body: lines.join('\n') || title }
-    : json({ title, findings: rows.map((r) => ({ id: r.id, ...(r.account ? { account: r.account } : {}), worker: r.script, severity: r.severity, message: r.message, action: r.action })) });
+    : json({ title, ...(note ? { note } : {}), findings: rows.map((r) => ({ id: r.id, ...(r.account ? { account: r.account } : {}), worker: r.script, severity: r.severity, message: r.message, action: r.action })) });
   const res = await allowedFetch(url, init, url);
   if (!res.ok) throw new Error(`Webhook answered ${res.status}`);
 }
@@ -167,14 +168,20 @@ export async function sendAlerts(env: Env, now: Date, config: Config): Promise<v
     const viaHook = results.filter((r) => ['webhook', 'both'].includes(config.alerts[r.severity].instant));
     const sent: string[] = [];
     const crit = (rows: Row[]) => rows.filter((r) => r.severity === 'critical').length;
+    // "Is it us or Cloudflare?": name an active Cloudflare incident next to the alert (opt-in).
+    let note = '';
+    if (config.modules.incidents && (viaEmail.length || viaHook.length)) {
+      const open = await fetchIncidents('unresolved').catch(() => []);
+      if (open.length) note = `Cloudflare reports ${open.length === 1 ? 'an active incident' : `${open.length} active incidents`}: ${open[0].name}. Some of this may be on Cloudflare's side.`;
+    }
     const title = (rows: Row[]) =>
       crit(rows) ? `${crit(rows)} critical ${crit(rows) === 1 ? 'finding' : 'findings'} in your Workers` : `${rows.length} new ${rows.length === 1 ? 'finding' : 'findings'} in your Workers`;
     if (canEmail && viaEmail.length) {
-      await sendEmail(env, recipients(env), `Ambersight: ${title(viaEmail)}`, render(title(viaEmail), 'Ambersight found something that needs attention.', viaEmail));
+      await sendEmail(env, recipients(env), `Ambersight: ${title(viaEmail)}`, render(title(viaEmail), note || 'Ambersight found something that needs attention.', viaEmail));
       sent.push(...viaEmail.map((r) => r.id));
     }
     if (canHook && viaHook.length) {
-      await sendWebhook(env.WEBHOOK_URL!, `Ambersight: ${title(viaHook)}`, viaHook);
+      await sendWebhook(env.WEBHOOK_URL!, `Ambersight: ${title(viaHook)}`, viaHook, note || undefined);
       sent.push(...viaHook.map((r) => r.id));
     }
     if (sent.length) {

@@ -4,7 +4,7 @@
 import type { Finding, Severity } from './types';
 
 /** Codes that end in a resource id or name; the check is the prefix. */
-const DYNAMIC = /^(unbound-(?:kv|d1|r2|queues)|ops-spike-(?:kv|d1|r2|queues|do)|idle-loop-(?:kv|d1|r2|queues|do)|new-resource-burst-(?:kv|d1|r2|queues|do)|storage-d1-db|orphan-route|orphan-domain|missing-service|missing-tail)-.+$/;
+const DYNAMIC = /^(unbound-(?:kv|d1|r2|queues)|ops-spike-(?:kv|d1|r2|queues|do)|idle-loop-(?:kv|d1|r2|queues|do)|new-resource-burst-(?:kv|d1|r2|queues|do)|storage-d1-db|orphan-route|orphan-domain|missing-service|missing-tail|deploy-failed|pages-dev-public|member-change|token-created|cert-failed|cert-pending|cert-expiring|dangling-pages|dangling-workers-dev|binding-removed|env-mismatch|d1-inefficient-query)-.+$/;
 
 /** "module:code" with ids stripped, e.g. "zombies:unbound-queues". Stable across scans and Workers. */
 export function checkOf(f: Pick<Finding, 'module' | 'code'>): string {
@@ -44,6 +44,21 @@ export const CHECK_TITLES: Record<string, string> = {
   'usage:idle-loop-kv': 'KV busy with no traffic',
   'usage:idle-loop-r2': 'R2 busy with no traffic',
   'usage:logs-free-allowance': 'Logs close to the free daily allowance',
+  'usage:d1-inefficient-query': 'D1 queries reading far more rows than they return',
+  'errors:subrequests-near-limit': 'Close to 50 subrequests per invocation',
+  'pages:deploy-failed': 'Pages deploys that failed',
+  'exposure:pages-dev-public': 'Pages projects also public on pages.dev',
+  'security:member-change': 'Account members added or changed',
+  'security:token-created': 'API tokens created',
+  'security:cert-failed': 'Certificates expired or failed',
+  'security:cert-pending': 'Certificates stuck in validation',
+  'security:cert-expiring': 'Certificates expiring without renewal',
+  'security:dangling-pages': 'DNS records pointing at Pages projects that do not exist',
+  'security:dangling-workers-dev': 'DNS records pointing at deleted Workers',
+  'deploys:stuck-rollout': 'Gradual rollouts left split',
+  'drift:binding-removed': 'Bindings that disappeared',
+  'drift:env-mismatch': 'Staging and production bindings differ',
+  'drift:vars-near-limit': 'Close to 64 variables and secrets',
   'runaway:traffic-spike': 'Traffic spike',
   'runaway:cpu-spike': 'CPU time spike',
   'runaway:subrequest-spike': 'Subrequest spike',

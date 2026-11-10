@@ -5,7 +5,7 @@
 import { groupsFor, inScope } from '../shared/config';
 import { SEVERITY_WEIGHT, type AccountSummary, type Finding, type Overview, type SelfCost, type Severity, type TimelineEntry, type WorkerSummary } from '../shared/types';
 import { FREE_DAILY, STORAGE_LIMITS, type QuotaMetric, type StorageKind } from '../shared/limits';
-import type { CostEstimate, QuotaStatus, StorageStatus } from '../shared/types';
+import type { CostEstimate, PagesSummary, QuotaStatus, StorageStatus } from '../shared/types';
 import { FREE_DAILY_REQUESTS, projectLimitTime } from './checks';
 import { estimate } from './cost';
 import { configFrom, getAccountState, getSettings, isoHour, planFrom, utcMidnight, type AccountRow } from './db';
@@ -67,7 +67,7 @@ export async function buildOverview(env: Env, requested?: string | null, now = n
   const weekStart = isoHour(new Date(utcMidnight(now).getTime() - 6 * DAY));
 
   const monthStart = isoHour(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)));
-  const [workers, hourly, daily, today, findings, entries, quotaToday, quotaMonth, storageR, resNames, week] = await db.batch([
+  const [workers, hourly, daily, today, findings, entries, quotaToday, quotaMonth, storageR, resNames, week, pagesR] = await db.batch([
     db.prepare('SELECT name, deployed_on, modified_on, handlers, tags, workers_dev FROM workers WHERE account = ?1 ORDER BY name').bind(A),
     db.prepare('SELECT script, hour, requests, errors FROM metrics_hourly WHERE account = ?1 AND hour >= ?2').bind(A, dayAgo),
     db.prepare(
@@ -84,6 +84,7 @@ export async function buildOverview(env: Env, requested?: string | null, now = n
     db.prepare(
       `SELECT script, SUM(requests) AS requests, SUM(cpu_time_us) AS cpu FROM metrics_hourly WHERE account = ?1 AND hour >= ?2 GROUP BY script`,
     ).bind(A, isoHour(new Date(now.getTime() - 7 * DAY))),
+    db.prepare(`SELECT id, script, extra FROM resources WHERE account = ?1 AND kind = 'pages' ORDER BY id`).bind(A),
   ]);
   const usedToday = Object.fromEntries((quotaToday.results as { metric: QuotaMetric; v: number }[]).map((r) => [r.metric, r.v]));
   const quotas: QuotaStatus[] = plan === 'free'
@@ -183,6 +184,14 @@ export async function buildOverview(env: Env, requested?: string | null, now = n
   );
 
   const t = today.results[0] as { requests: number; errors: number };
+  // Pages Functions run as a Worker named after the project (production_script_name), so their
+  // requests are in metrics_hourly under that name.
+  const pages: PagesSummary[] = config.modules.pages
+    ? (pagesR.results as { id: string; script: string | null; extra: string | null }[]).map((r) => {
+        const x = r.extra ? (JSON.parse(r.extra) as Omit<PagesSummary, 'name' | 'requests24h'>) : { subdomain: null, domains: [], latest: null };
+        return { name: r.id, subdomain: x.subdomain ?? null, domains: x.domains ?? [], latest: x.latest ?? null, requests24h: r.script ? (dayTotals.get(r.script)?.requests ?? 0) : 0 };
+      })
+    : [];
   return {
     account: acct ? { id: acct.id, label: accountLabel(acct, config), plan } : null,
     accountCount: accounts.length,
@@ -215,6 +224,7 @@ export async function buildOverview(env: Env, requested?: string | null, now = n
     quotas,
     storage,
     cost,
+    pages,
     findings: open,
     workers: summaries,
     groups: [...new Set(visible.flatMap((w) => w.groups))].sort(),
@@ -227,12 +237,20 @@ export async function buildTimeline(env: Env, account: string, days = 14): Promi
   const settings = await getSettings(db);
   const config = configFrom(settings);
   const since = new Date(Date.now() - days * DAY).toISOString();
-  const [deps, workers, findings, alerts] = await db.batch([
+  const [deps, workers, findings, alerts, audit, incidents, pagesR] = await db.batch([
     db.prepare('SELECT script, id, created_on, author, message, source FROM deployments WHERE account = ?1 AND created_on >= ?2 ORDER BY created_on DESC LIMIT 300').bind(account, since),
     db.prepare('SELECT name, tags FROM workers WHERE account = ?1').bind(account),
     db.prepare(`SELECT code, evidence FROM findings WHERE account = ?1 AND status <> 'resolved' AND evidence LIKE '%deployId%'`).bind(account),
     db.prepare('SELECT id, sent, alert_type, name, description FROM cf_alerts WHERE account = ?1 AND sent >= ?2 ORDER BY sent DESC LIMIT 100').bind(account, since),
+    db.prepare(
+      `SELECT id, at, actor, action, description, product, resource_type, resource_id FROM audit_events
+       WHERE account = ?1 AND at >= ?2 ORDER BY at DESC LIMIT 300`,
+    ).bind(account, since),
+    db.prepare('SELECT id, name, impact, status, created_at, resolved_at, url FROM cf_incidents WHERE created_at >= ?1 ORDER BY created_at DESC LIMIT 50').bind(since),
+    db.prepare(`SELECT id, extra FROM resources WHERE account = ?1 AND kind = 'pages'`).bind(account),
   ]);
+  type Audit = { id: string; at: string; actor: string | null; action: string | null; description: string | null; product: string | null; resource_type: string | null; resource_id: string | null };
+  const auditRows = audit.results as Audit[];
   const tags = new Map((workers.results as { name: string; tags: string | null }[]).map((w) => [w.name, w.tags ? (JSON.parse(w.tags) as string[]) : []]));
   const correlated = new Map<string, string[]>();
   for (const f of findings.results as { code: string; evidence: string }[]) {
@@ -247,7 +265,8 @@ export async function buildTimeline(env: Env, account: string, days = 14): Promi
       script: d.script,
       id: d.id,
       createdOn: d.created_on,
-      author: d.author,
+      // A deploy from CI or the dashboard may carry no author: take it from the audit log.
+      author: d.author ?? auditActor(auditRows, d.script, d.created_on),
       message: d.message,
       source: d.source,
       groups,
@@ -265,7 +284,57 @@ export async function buildTimeline(env: Env, account: string, days = 14): Promi
     groups: [],
     correlated: [],
   }));
-  return [...deploys, ...cf].sort((a, b) => b.createdOn.localeCompare(a.createdOn));
+  // Audit log: changes to things Ambersight watches, not every API read.
+  const RELEVANT = /worker|script|route|domain|pages|dns|ssl|certificate|access|member|token|d1|kv|r2|queue|zone/i;
+  const auditEntries: TimelineEntry[] = auditRows
+    .filter((a) => RELEVANT.test(`${a.product ?? ''} ${a.resource_type ?? ''}`))
+    .slice(0, 150)
+    .map((a) => ({
+      kind: 'audit',
+      script: a.resource_id && tags.has(a.resource_id) ? a.resource_id : '*',
+      id: `audit-${a.id}`,
+      createdOn: a.at,
+      author: a.actor,
+      message: a.description || `${a.action ?? 'change'} ${a.resource_type ?? ''}`.trim(),
+      source: a.product ?? a.resource_type,
+      groups: [],
+      correlated: [],
+    }));
+  const incidentEntries: TimelineEntry[] = config.modules.incidents
+    ? (incidents.results as { id: string; name: string; impact: string | null; status: string | null; created_at: string; resolved_at: string | null; url: string | null }[]).map((i) => ({
+        kind: 'incident',
+        script: '*',
+        id: `incident-${i.id}`,
+        createdOn: i.created_at,
+        author: 'cloudflarestatus.com',
+        message: `${i.name}${i.resolved_at ? ` (resolved ${i.resolved_at.slice(0, 16).replace('T', ' ')} UTC)` : ' (not resolved yet)'}`,
+        source: i.impact && i.impact !== 'none' ? `${i.impact} impact` : null,
+        groups: [],
+        correlated: [],
+      }))
+    : [];
+  const pagesEntries: TimelineEntry[] = (pagesR.results as { id: string; extra: string | null }[]).flatMap((r) => {
+    const latest = r.extra ? (JSON.parse(r.extra) as { latest?: { id: string; createdOn: string; status: string; stage: string; environment: string; branch: string | null } | null }).latest : null;
+    if (!latest || latest.createdOn < since) return [];
+    return [{
+      kind: 'pages' as const,
+      script: r.id,
+      id: `pages-${latest.id}`,
+      createdOn: latest.createdOn,
+      author: null,
+      message: `${latest.environment || 'Pages'} deploy${latest.branch ? ` of ${latest.branch}` : ''}: ${latest.status === 'failure' ? `failed at ${latest.stage}` : latest.status || 'in progress'}`,
+      source: 'Pages',
+      groups: [],
+      correlated: latest.status === 'failure' ? ['deploy-failed'] : [],
+    }];
+  });
+  return [...deploys, ...cf, ...auditEntries, ...incidentEntries, ...pagesEntries].sort((a, b) => b.createdOn.localeCompare(a.createdOn));
+}
+
+/** The person behind a change to a Worker within 5 minutes of `at`, from the audit log. */
+function auditActor(rows: { at: string; actor: string | null; resource_id: string | null }[], script: string, at: string): string | null {
+  const t = new Date(at).getTime();
+  return rows.find((r) => r.actor && r.resource_id === script && Math.abs(new Date(r.at).getTime() - t) <= 5 * 60_000)?.actor ?? null;
 }
 
 export async function buildSelfCost(env: Env, account: string): Promise<SelfCost> {

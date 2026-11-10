@@ -14,7 +14,7 @@
   import TrendBars from '../components/TrendBars.svelte';
   import WorkerCard from '../components/WorkerCard.svelte';
   import WorkerTable from '../components/WorkerTable.svelte';
-  import { compact, num, pct, workerId } from '../lib/api';
+  import { compact, num, pct, timeAgo, workerId } from '../lib/api';
   import { loadPrefs, savePrefs } from '../lib/prefs';
 
   let { data, query, scanInterval, mutedChecks = [], onAcknowledge, onSnooze, onBulk, onMute }: {
@@ -287,7 +287,42 @@
   {/if}
 </section>
 
+{#if !group && data.pages?.length}
+  {@const pagesShown = data.pages.filter((p) => !q || p.name.toLowerCase().includes(q))}
+  <section aria-labelledby="pages-title">
+    <div class="section-head"><h2 id="pages-title">Pages projects <span class="count">{data.pages.length}</span></h2></div>
+    <ul class="card pages-list">
+      {#each pagesShown as p (p.name)}
+        <li class:failed={p.latest?.status === 'failure'}>
+          <span class="p-name mono">{p.name}</span>
+          <span class="p-host muted">{p.domains.find((d) => !d.endsWith('.pages.dev')) ?? p.subdomain ?? ''}</span>
+          <span class="p-state">
+            {#if !p.latest}<span class="muted">No deploys</span>
+            {:else if p.latest.status === 'failure'}<Icon name="critical" size={14} /> Last deploy failed
+            {:else}<span class="muted">Deployed {timeAgo(p.latest.createdOn)}</span>{/if}
+          </span>
+          <span class="p-req num muted">{p.requests24h ? `${compact(p.requests24h)} function requests · 24 h` : ''}</span>
+        </li>
+      {/each}
+    </ul>
+  </section>
+{/if}
+
 <style>
+  .pages-list { list-style: none; margin: 0; padding: 4px 0; }
+  .pages-list li {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto auto; gap: 8px 16px; align-items: center;
+    padding: 10px 20px; border-top: 1px solid var(--line); font-size: 14px;
+  }
+  .pages-list li:first-child { border-top: 0; }
+  .p-name, .p-host { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .p-state { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .failed .p-state { color: var(--critical); font-weight: 500; }
+  .p-req { font-size: 12px; white-space: nowrap; }
+  @media (max-width: 760px) {
+    .pages-list li { grid-template-columns: minmax(0, 1fr) auto; padding: 10px 16px; }
+    .p-host, .p-req { grid-column: 1 / -1; }
+  }
   .scope { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .scope-note { font-size: 13px; }
   .scope-note strong { color: var(--ink); font-weight: 600; }

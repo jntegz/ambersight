@@ -9,7 +9,7 @@ export interface ThresholdMeta {
   label: string;
   help: string;
   /** Shares (0..1) are shown and typed as percentages. */
-  unit: '%' | '×' | 'months' | 'days' | 'min' | 'requests' | 'ops';
+  unit: '%' | '×' | 'months' | 'days' | 'min' | 'hours' | 'requests' | 'ops';
 }
 
 export const THRESHOLD_GROUPS: { title: string; items: ThresholdMeta[] }[] = [
@@ -43,6 +43,7 @@ export const THRESHOLD_GROUPS: { title: string; items: ThresholdMeta[] }[] = [
       { key: 'compatAgeMonths', label: 'Old compatibility date', help: 'Flag compatibility dates older than this.', unit: 'months' },
       { key: 'zombieDays', label: 'Unused Worker', help: 'No requests for this many days.', unit: 'days' },
       { key: 'deployWindowMinutes', label: 'Deploy correlation window', help: 'A problem starting this soon after a deploy is linked to it.', unit: 'min' },
+      { key: 'rolloutMaxHours', label: 'Stuck rollout', help: 'A gradual rollout that splits traffic between versions for longer than this.', unit: 'hours' },
     ],
   },
 ];

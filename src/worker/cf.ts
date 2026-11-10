@@ -62,6 +62,58 @@ export interface Deployment {
   author: string | null;
   message: string | null;
   source: string | null;
+  /** Traffic split between versions; more than one entry is a gradual rollout. */
+  versions: { id: string; percentage: number }[];
+}
+
+export interface Zone {
+  id: string;
+  name: string;
+}
+
+export interface CertPack {
+  id: string;
+  type: string;
+  status: string;
+  hosts: string[];
+  /** Earliest expiry among the pack's certificates. */
+  expiresOn: string | null;
+  errors: string[];
+}
+
+export interface DnsTarget {
+  id: string;
+  name: string;
+  target: string;
+}
+
+export interface PagesProject {
+  name: string;
+  subdomain: string | null;
+  domains: string[];
+  productionScript: string | null;
+  usesFunctions: boolean;
+  latest: { id: string; createdOn: string; status: string; stage: string; environment: string; branch: string | null } | null;
+}
+
+export interface AuditEvent {
+  id: string;
+  at: string;
+  actor: string | null;
+  action: string;
+  description: string | null;
+  product: string | null;
+  resourceType: string | null;
+  resourceId: string | null;
+  result: string | null;
+}
+
+export interface D1Query {
+  databaseId: string;
+  query: string;
+  rowsRead: number;
+  rowsReturned: number;
+  runs: number;
 }
 
 export interface HourlyRow {
@@ -115,7 +167,7 @@ export interface CfAlert {
 }
 
 export interface InventoryItem {
-  kind: 'kv' | 'd1' | 'r2' | 'queues' | 'route' | 'domain' | 'access';
+  kind: 'kv' | 'd1' | 'r2' | 'queues' | 'route' | 'domain' | 'access' | 'pages' | 'cert' | 'dns';
   id: string;
   name: string | null;
   script: string | null;
@@ -130,11 +182,11 @@ export class CfClient {
 
   constructor(private readonly token: string, readonly accountId: string) {}
 
-  private static async request<T>(token: string, path: string): Promise<{ result: T; status: number }> {
+  private static async request<T>(token: string, path: string): Promise<{ result: T; status: number; info?: { cursor?: string; total_pages?: number } }> {
     const res = await fetch(`${API}${path}`, { headers: { Authorization: `Bearer ${token}` } });
-    const body = (await res.json().catch(() => ({ success: false }))) as { success: boolean; result: T; errors?: { message: string }[] };
+    const body = (await res.json().catch(() => ({ success: false }))) as { success: boolean; result: T; result_info?: { cursor?: string; total_pages?: number }; errors?: { message: string }[] };
     if (!body.success) throw new CfApiError(body.errors?.[0]?.message ?? `GET ${path} failed (${res.status})`, res.status);
-    return { result: body.result, status: res.status };
+    return { result: body.result, status: res.status, info: body.result_info };
   }
 
   /** Accounts the token can see (first page). */
@@ -152,6 +204,11 @@ export class CfClient {
   private async get<T>(path: string): Promise<T> {
     this.calls++;
     return (await CfClient.request<T>(this.token, path)).result;
+  }
+
+  private async getPaged<T>(path: string) {
+    this.calls++;
+    return CfClient.request<T>(this.token, path);
   }
 
   async graphql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
@@ -263,7 +320,7 @@ export class CfClient {
 
   async deployments(script: string): Promise<Deployment[]> {
     type Raw = {
-      deployments?: { id: string; created_on: string; source?: string; author_email?: string; annotations?: Record<string, string> }[];
+      deployments?: { id: string; created_on: string; source?: string; author_email?: string; annotations?: Record<string, string>; versions?: { version_id?: string; percentage?: number }[] }[];
     };
     const r = await this.get<Raw>(`/accounts/${this.accountId}/workers/scripts/${enc(script)}/deployments`);
     return (r.deployments ?? []).map((d) => ({
@@ -272,6 +329,7 @@ export class CfClient {
       author: d.author_email ?? null,
       message: d.annotations?.['workers/message'] ?? null,
       source: d.source ?? null,
+      versions: (d.versions ?? []).map((v) => ({ id: v.version_id ?? '', percentage: v.percentage ?? 0 })),
     }));
   }
 
@@ -288,16 +346,116 @@ export class CfClient {
     return r.map((d) => ({ kind: 'domain', id: d.id, name: d.hostname, script: d.service }));
   }
 
-  /** Routes across the account's zones (first `maxZones` zones). */
-  async routes(maxZones: number): Promise<{ items: InventoryItem[]; zonesSkipped: number; zonesChecked: string[] }> {
-    const zones = await this.get<{ id: string; name: string }[]>(`/zones?account.id=${this.accountId}&per_page=50`);
-    const items: InventoryItem[] = [];
-    const checked = zones.slice(0, maxZones);
-    for (const z of checked) {
-      const routes = await this.get<{ id: string; pattern: string; script?: string | null }[]>(`/zones/${z.id}/workers/routes`);
-      for (const r of routes) items.push({ kind: 'route', id: r.id, name: r.pattern, script: r.script ?? null, extra: { zone: z.name } });
+  /** The account's zones, up to 250. */
+  async listZones(): Promise<Zone[]> {
+    const out: Zone[] = [];
+    for (let page = 1; page <= 5; page++) {
+      const batch = await this.get<{ id: string; name: string }[]>(`/zones?account.id=${enc(this.accountId)}&per_page=50&page=${page}`);
+      out.push(...batch.map((z) => ({ id: z.id, name: z.name })));
+      if (batch.length < 50) break;
     }
-    return { items, zonesSkipped: Math.max(0, zones.length - maxZones), zonesChecked: checked.map((z) => z.name) };
+    return out;
+  }
+
+  async zoneRoutes(zone: Zone): Promise<InventoryItem[]> {
+    const routes = await this.get<{ id: string; pattern: string; script?: string | null }[]>(`/zones/${zone.id}/workers/routes`);
+    return routes.map((r) => ({ kind: 'route', id: r.id, name: r.pattern, script: r.script ?? null, extra: { zone: zone.name } }));
+  }
+
+  /** Every certificate pack in a zone, whatever its status (SSL and Certificates Read). */
+  async certPacks(zone: Zone): Promise<CertPack[]> {
+    type R = { id: string; type?: string; status?: string; hosts?: string[]; certificates?: { expires_on?: string }[]; validation_errors?: { message?: string }[] };
+    const packs = await this.get<R[]>(`/zones/${zone.id}/ssl/certificate_packs?status=all&per_page=50`);
+    return packs.map((p) => {
+      const exp = (p.certificates ?? []).map((c) => c.expires_on).filter((x): x is string => !!x).sort()[0] ?? null;
+      return { id: p.id, type: p.type ?? '', status: p.status ?? '', hosts: p.hosts ?? [], expiresOn: exp, errors: (p.validation_errors ?? []).map((e) => e.message ?? '').filter(Boolean) };
+    });
+  }
+
+  /** CNAME records that point at workers.dev or pages.dev (DNS Read). */
+  async cnameTargets(zone: Zone): Promise<DnsTarget[]> {
+    const records = await this.get<{ id: string; name: string; content?: string }[]>(`/zones/${zone.id}/dns_records?type=CNAME&per_page=1000`);
+    return records
+      .map((r) => ({ id: r.id, name: r.name, target: (r.content ?? '').toLowerCase().replace(/\.$/, '') }))
+      .filter((r) => r.target.endsWith('.workers.dev') || r.target.endsWith('.pages.dev'));
+  }
+
+  /** Pages projects with their latest deployment (Pages Read). */
+  async pagesProjects(): Promise<PagesProject[]> {
+    type R = {
+      name: string; subdomain?: string; domains?: string[]; production_script_name?: string; uses_functions?: boolean;
+      latest_deployment?: { id: string; created_on: string; environment?: string; latest_stage?: { name?: string; status?: string }; deployment_trigger?: { metadata?: { branch?: string } } } | null;
+    };
+    const out: PagesProject[] = [];
+    for (let page = 1; page <= 3; page++) {
+      const batch = await this.get<R[]>(`/accounts/${this.accountId}/pages/projects?per_page=10&page=${page}`);
+      out.push(...batch.map((p) => ({
+        name: p.name,
+        subdomain: p.subdomain ?? null,
+        domains: p.domains ?? [],
+        productionScript: p.production_script_name ?? null,
+        usesFunctions: p.uses_functions === true,
+        latest: p.latest_deployment
+          ? {
+              id: p.latest_deployment.id,
+              createdOn: p.latest_deployment.created_on,
+              status: p.latest_deployment.latest_stage?.status ?? '',
+              stage: p.latest_deployment.latest_stage?.name ?? '',
+              environment: p.latest_deployment.environment ?? '',
+              branch: p.latest_deployment.deployment_trigger?.metadata?.branch ?? null,
+            }
+          : null,
+      })));
+      if (batch.length < 10) break;
+    }
+    return out;
+  }
+
+  /** Audit Logs v2 since a time, oldest first, without "view" actions. Returns a cursor when there is more. */
+  async auditLogs(since: Date, until: Date, cursor?: string): Promise<{ events: AuditEvent[]; cursor: string | null }> {
+    type R = {
+      id: string;
+      action?: { type?: string; description?: string; result?: string; time?: string };
+      actor?: { email?: string; token_name?: string; type?: string };
+      resource?: { product?: string; type?: string; id?: string };
+    };
+    const q = `since=${enc(since.toISOString())}&before=${enc(until.toISOString())}&direction=asc&limit=200&action_type.not=view${cursor ? `&cursor=${enc(cursor)}` : ''}`;
+    const r = await this.getPaged<R[]>(`/accounts/${this.accountId}/logs/audit?${q}`);
+    return {
+      events: (r.result ?? []).map((e) => ({
+        id: e.id,
+        at: e.action?.time ?? '',
+        actor: e.actor?.email ?? e.actor?.token_name ?? e.actor?.type ?? null,
+        action: (e.action?.type ?? '').toLowerCase(),
+        description: e.action?.description ?? null,
+        product: e.resource?.product ?? null,
+        resourceType: e.resource?.type ?? null,
+        resourceId: e.resource?.id ?? null,
+        result: e.action?.result ?? null,
+      })).filter((e) => e.at),
+      cursor: (r.result ?? []).length && r.info?.cursor ? r.info.cursor : null,
+    };
+  }
+
+  /**
+   * Top D1 queries by rows read over 24 hours (d1QueriesAdaptiveGroups). The dataset is in the
+   * docs; the field names follow the D1 insights output and are read defensively.
+   */
+  async d1TopQueries(now: Date): Promise<D1Query[]> {
+    const query = `query($account: string!, $since: Time!, $until: Time!) {
+      viewer { accounts(filter: { accountTag: $account }) {
+        d1QueriesAdaptiveGroups(limit: 10, filter: { datetime_geq: $since, datetime_lt: $until }, orderBy: [sum_rowsRead_DESC]) {
+          count
+          dimensions { query databaseId }
+          sum { rowsRead rowsReturned }
+        }
+      } }
+    }`;
+    type R = { viewer: { accounts: { d1QueriesAdaptiveGroups: { count: number; dimensions: { query: string; databaseId: string }; sum: { rowsRead: number; rowsReturned: number } }[] }[] } };
+    const data = await this.graphql<R>(query, this.window(new Date(now.getTime() - 86_400_000), now));
+    return (data.viewer.accounts[0]?.d1QueriesAdaptiveGroups ?? []).map((r) => ({
+      databaseId: r.dimensions.databaseId, query: r.dimensions.query ?? '', rowsRead: r.sum.rowsRead ?? 0, rowsReturned: r.sum.rowsReturned ?? 0, runs: r.count ?? 0,
+    }));
   }
 
   async storage(): Promise<{ items: InventoryItem[]; failed: string[] }> {

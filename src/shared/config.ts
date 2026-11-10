@@ -28,6 +28,8 @@ export interface Thresholds {
   newWorkerHourlyRequests: number;
   /** Same for storage and Durable Object operations on a resource with under 72 hours of history. */
   newResourceHourlyOps: number;
+  /** A gradual rollout (traffic split between versions) older than this is reported as stuck. */
+  rolloutMaxHours: number;
 }
 
 export interface ModuleSwitches {
@@ -44,6 +46,14 @@ export interface ModuleSwitches {
   cost: boolean;
   /** Notifications Cloudflare sent to the account, on the timeline (needs Notifications Read). */
   cfAlerts: boolean;
+  /** Pages projects: failed deploys, pages.dev exposure (needs Pages Read). */
+  pages: boolean;
+  /** Audit log, certificates and dangling DNS (Account Settings, SSL and DNS Read). */
+  security: boolean;
+  /** Bindings that disappeared, staging/production differences, the vars limit. */
+  drift: boolean;
+  /** Incidents from the public Cloudflare status page on alerts and the timeline. Off by default. */
+  incidents: boolean;
 }
 
 export interface SeverityRoute {
@@ -111,6 +121,7 @@ export const DEFAULT_THRESHOLDS: Thresholds = {
   deployWindowMinutes: 60,
   newWorkerHourlyRequests: 50_000,
   newResourceHourlyOps: 100_000,
+  rolloutMaxHours: 24,
 };
 
 export function defaultConfig(): Config {
@@ -120,7 +131,7 @@ export function defaultConfig(): Config {
     scanIntervalMinutes: 60,
     inventoryIntervalHours: 24,
     inventoryHourUtc: 3,
-    modules: { usage: true, cron: true, errors: true, deprecation: true, exposure: true, zombies: true, timeline: true, access: false, cost: true, cfAlerts: true },
+    modules: { usage: true, cron: true, errors: true, deprecation: true, exposure: true, zombies: true, timeline: true, access: false, cost: true, cfAlerts: true, pages: true, security: true, drift: true, incidents: false },
     mutedChecks: [],
     thresholds: { ...DEFAULT_THRESHOLDS },
     overrides: {},
@@ -154,6 +165,7 @@ export const THRESHOLD_RANGES: Record<keyof Thresholds, [number, number]> = {
   deployWindowMinutes: [5, 1440],
   newWorkerHourlyRequests: [1_000, 100_000_000],
   newResourceHourlyOps: [1_000, 100_000_000],
+  rolloutMaxHours: [1, 720],
 };
 
 export class ConfigError extends Error {}

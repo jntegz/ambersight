@@ -7,6 +7,7 @@ import { DEFAULT_THRESHOLDS, defaultConfig, type Config, type Thresholds } from 
 import { FREE_DAILY, FREE_DAILY_REQUESTS, LOGS, STORAGE_LIMITS, unitPrice, type QuotaMetric, type StorageKind } from '../shared/limits';
 import type { Finding, Severity } from '../shared/types';
 import { hygieneFindings, type InventoryFacts } from './hygiene';
+import { changeFindings, type ChangeFacts } from './security';
 
 export { DEFAULT_THRESHOLDS };
 export type { Thresholds };
@@ -25,6 +26,8 @@ export const FLOORS = {
   /** Idle loop: operations an hour, every hour, with almost no requests behind them. */
   idleMinOps: 2_000,
   idleOpsPerRequest: 100,
+  /** Average subrequests per invocation that is close to the Free plan's 50. */
+  subrequestsAvgWarn: 40,
 };
 
 export { FREE_DAILY_REQUESTS };
@@ -41,6 +44,8 @@ export interface HourPoint {
 export interface WorkerStats {
   name: string;
   requests24h: number;
+  /** Subrequests over the same 24 hours. */
+  subrequests24h?: number;
   errors24h: number;
   /** The 6 days before the last 24 hours, for the error baseline. */
   requestsPrev: number;
@@ -126,6 +131,8 @@ export interface CheckInput {
   storage?: { kind: StorageKind; id: string; bytes: number; label: string }[];
   /** When the API token expires; null when it does not or is unknown. */
   tokenExpiresOn?: string | null;
+  /** Deploys, audit log, Pages, certificates, DNS and D1 queries (security.ts). */
+  changes?: ChangeFacts;
 }
 
 const DOCS = {
@@ -386,6 +393,18 @@ export function errorFindings(input: CheckInput, tf: (n: string) => Thresholds):
         DOCS.limits,
       ));
     }
+    // Free allows 50 external subrequests per invocation and the 51st fails, often silently.
+    // Only the 24-hour average is known, so some invocations are likely already over.
+    if (input.plan === 'free' && w.requests24h >= 100 && (w.subrequests24h ?? 0) / w.requests24h >= FLOORS.subrequestsAvgWarn) {
+      const avg = (w.subrequests24h ?? 0) / w.requests24h;
+      out.push(finding(
+        'errors', w.name, 'subrequests-near-limit', 'warning',
+        `Invocations make ${avg.toFixed(0)} subrequests on average, close to the Free plan's 50 per invocation.`,
+        { averageSubrequests: Number(avg.toFixed(1)), limit: 50 },
+        'This is an average, so some invocations are probably already over the limit, and the 51st fetch throws. Batch the calls, cache results, or move fan-out work to a Queue.',
+        DOCS.limits,
+      ));
+    }
     if (cpuLimit && w.cpuP99Max24h != null && w.cpuP99Max24h >= cpuLimit * t.cpuShareWarn && w.exceeded24h === 0) {
       out.push(finding(
         'errors', w.name, 'cpu-near-limit', 'info',
@@ -620,6 +639,7 @@ export function runChecks(input: CheckInput): Finding[] {
   if (m.errors) out.push(...errorFindings(input, tf));
   if (m.cron) out.push(...cronFindings(input));
   if (input.meta && input.inventory) out.push(...hygieneFindings(input.now, input.meta, input.workers, input.inventory, config, tf));
+  if (input.meta && input.changes) out.push(...changeFindings(input.now, input.meta, input.changes, config, tf));
   if (m.timeline) out = correlateDeploys(out, input, tf);
   return out;
 }
