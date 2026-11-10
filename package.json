@@ -1,6 +1,6 @@
 {
   "name": "ambersight",
-  "version": "0.2.0",
+  "version": "0.1.1",
   "private": true,
   "description": "See your whole Cloudflare Workers fleet on one page. Read-only. Free. No code changes.",
   "license": "AGPL-3.0-only",

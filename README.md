@@ -17,7 +17,7 @@
 </p>
 
 <picture>
-  <img src="docs/screenshots/overview.png" alt="The Ambersight overview: 9 of 12 Workers need attention, the free request budget, requests and errors today, and a list of findings ranked by severity">
+  <img src="docs/screenshots/overview.png" alt="The Ambersight overview for one of several accounts: 9 of 12 Workers need attention, requests and errors today, storage limits and the estimated bill for the month">
 </picture>
 
 ---
@@ -30,6 +30,15 @@ It runs as **one Worker in your own Cloudflare account**. Every hour it reads yo
 
 - **On the Free plan**, the risk is an outage. Past 100,000 requests in a day, every Worker in the account answers with Error 1027 until midnight UTC, and the same goes for 1,000 KV writes, 5 million D1 rows read and the other daily limits. Ambersight warns you at 70% and again at 90% of each one, with the time you will hit it at today's pace.
 - **On Workers Paid**, the risk is the bill. There is no hard spending cap, so a loop, a retry storm or a crawler is billed for every hour it runs. Ambersight compares each Worker's last hour with its usual hour and alerts you at 5x, for requests, CPU time, subrequests and D1, KV, R2, Queues and Durable Object operations. It also catches Durable Object or Queue work that runs while nobody uses the app, and shows the estimated bill in dollars.
+
+> **New in 0.1.1**
+> - **Several accounts in one install**, with an account switcher, an **All accounts** view, and a label, plan and client digest per account.
+> - **74 checks, up from 39**: every free daily limit (D1, KV, Durable Objects, Queues, Workflows, Workers AI), storage caps, idle loops, Pages, audit log, certificates, dangling DNS, stuck rollouts and config drift.
+> - **Estimated bill** on Workers Paid: month to date, month-end forecast, the costliest Workers, and dollars on every runaway alert.
+> - **Richer timeline and digest**: audit log, Cloudflare notifications and Pages deploys on the timeline; a monthly digest; a printable client report.
+> - **Lighter**: an hourly scan of 200 Workers reads about 34,000 D1 rows instead of 293,000.
+>
+> Everything is still read-only and free. The full list is in the [changelog](CHANGELOG.md).
 
 ## What it catches
 
@@ -70,12 +79,19 @@ Also included: several accounts in one install with an "All accounts" view, grou
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/screenshots/timeline.png" alt="Deploy timeline: every deploy across the fleet, with a deploy of auth-gateway flagged because the error rate rose right after it"><br><sub><b>Deploy timeline.</b> Every deploy across the fleet. The one followed by a new problem is flagged.</sub></td>
-    <td width="50%"><img src="docs/screenshots/settings.png" alt="Settings: plan, scan frequency, time zone, history retention and the list of checks with on/off switches"><br><sub><b>Settings.</b> Every check, threshold, schedule and alert route, stored in D1. Export and import as JSON.</sub></td>
+    <td width="50%"><img src="docs/screenshots/accounts.png" alt="All accounts: three Cloudflare accounts side by side, each with its critical, warning and info counts, Workers, requests today, error rate and free request budget"><br><sub><b>All accounts.</b> One install watches every account the token can see. Open one to see its fleet.</sub></td>
+    <td width="50%"><img src="docs/screenshots/limits.png" alt="Free plan limits: D1 rows read at 4.2M of 5M and a D1 database at 431 MB of 500 MB in orange, KV reads, KV writes and D1 rows written in green"><br><sub><b>Free plan limits.</b> Every daily limit and storage cap, not just requests. Orange from 70%.</sub></td>
   </tr>
   <tr>
+    <td width="50%"><img src="docs/screenshots/cost.png" alt="Estimated bill: $5.42 so far this month, $5.59 at month end at this pace, split by product, with the costliest Workers listed"><br><sub><b>Estimated bill.</b> On Workers Paid: month to date, the month-end forecast and the costliest Workers.</sub></td>
+    <td width="50%"><img src="docs/screenshots/timeline.png" alt="Deploy timeline: deploys, a failed Pages deploy and audit log entries, with a deploy of auth-gateway flagged because the error rate rose right after it"><br><sub><b>Deploy timeline.</b> Deploys, Pages builds and audit log changes. The deploy followed by a new problem is flagged.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/settings.png" alt="Settings › Accounts: the accounts to watch, and a label, client digest address and plan for each one"><br><sub><b>Settings.</b> Accounts, checks, thresholds, schedules and alert routes, stored in D1. Export and import as JSON.</sub></td>
     <td width="50%"><img src="docs/screenshots/overview-dark.png" alt="The overview in dark mode"><br><sub><b>Dark mode.</b> Follows your system, or pick one.</sub></td>
-    <td width="50%" align="center"><img src="docs/screenshots/mobile.png" width="240" alt="The overview on a phone"><br><sub><b>On your phone.</b> Check the fleet from anywhere.</sub></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><img src="docs/screenshots/mobile.png" width="240" alt="The overview on a phone: a client account at 74% of its free requests, on track to reach 78% by midnight"><br><sub><b>On your phone.</b> Check the fleet from anywhere.</sub></td>
   </tr>
 </table>
 

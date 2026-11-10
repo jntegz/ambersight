@@ -2,7 +2,7 @@
 
 All notable changes to Ambersight. Each version here has a matching [GitHub release](https://github.com/jntegz/ambersight/releases), which is what the update notice in the dashboard reads.
 
-## 0.2.0 (unreleased)
+## 0.1.1 (2026-11-10)
 
 Everything here is built on free Cloudflare features and keeps the read-only token. See [docs/research/free-cloudflare-features.md](docs/research/free-cloudflare-features.md) for why each one was chosen.
 
