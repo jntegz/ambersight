@@ -8,6 +8,12 @@ Thanks for helping. A few rules keep Ambersight safe and free to run:
 4. **Tests for checks.** Every new check in `src/worker/checks.ts` needs tests in `test/`.
 5. Run `npm test && npm run typecheck` before opening a pull request.
 
-## License and CLA
+## License and sign-off
 
-Contributions are accepted under the AGPL-3.0. Before your first pull request is merged you will be asked to sign a short Contributor License Agreement, so the maintainer can keep offering the project under other terms in the future (for example a hosted edition). You keep the copyright to your work.
+Contributions are accepted under the AGPL-3.0, and you keep the copyright to your work. Sign off each commit to confirm you have the right to submit it under that license, as described in the [Developer Certificate of Origin](https://developercertificate.org/):
+
+```
+git commit -s
+```
+
+This adds a `Signed-off-by: Your Name <you@example.com>` line to the commit message.
