@@ -18,8 +18,10 @@
     { "binding": "DB", "database_name": "ambersight", "migrations_dir": "migrations" }
   ],
 
-  // One Cron Trigger, hourly. The Free plan allows 5 per account; Ambersight uses 1.
-  "triggers": { "crons": ["0 * * * *"] },
+  // One Cron Trigger. The Free plan allows 5 per account; Ambersight uses 1.
+  // It fires every 15 minutes; runs inside the scan interval set in Settings (default 1 hour)
+  // stop after one D1 read, so changing the interval needs no redeploy.
+  "triggers": { "crons": ["*/15 * * * *"] },
 
   // Ambersight's own previews must never be public.
   "workers_dev": true,
@@ -38,6 +40,9 @@
     // Optional: pin the account if the token can see more than one.
     "CF_ACCOUNT_ID": ""
   }
+
+  // Webhook alerts (optional): `npx wrangler secret put WEBHOOK_URL` with a Slack, Discord,
+  // Telegram (…/sendMessage?chat_id=…), ntfy or generic JSON endpoint URL.
 
   // E-mail digest (optional). Uncomment and put your verified address here:
   // "send_email": [

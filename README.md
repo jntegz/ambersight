@@ -11,10 +11,15 @@
 Ambersight is a small dashboard that runs as **one Worker in your own Cloudflare account**. Every hour it reads your Workers' metadata and metrics with a read-only API token and tells you which Workers need attention and why:
 
 - **Free plan budget**: how much of today's 100,000 requests you have used, and when you will hit Error 1027.
-- **Runaway traffic**: a Worker suddenly running 5x its usual hourly traffic (on Workers Paid, that is billed with no hard cap).
-- **Errors and limits**: error rates above 2% or 10%, CPU and memory limit hits, p99 CPU close to the Free plan's 10 ms.
-- **Cron health**: scheduled runs that were missed or failed.
-- **Weekly digest** by e-mail, plus an instant e-mail for critical findings.
+- **Runaway usage**: requests, CPU time, subrequests, D1, KV, R2, Queues or Durable Objects suddenly at 5x their usual hourly level (on Workers Paid, that is billed with no hard cap).
+- **Errors and limits**: error rates above 2% or 10% or 3x a Worker's own baseline, CPU and memory limit hits, p99 CPU close to the Free plan's 10 ms.
+- **Cron health**: missed and failed scheduled runs, crons close to their CPU limit, Cron Trigger count against your plan.
+- **Deprecations**: Service Worker syntax, old compatibility dates, legacy usage models, Workers Sites, redundant flags.
+- **Exposure**: public preview URLs, forgotten workers.dev hostnames, optionally URLs not behind Cloudflare Access.
+- **Zombies and orphans**: Workers with no traffic or never deployed, unbound KV/D1/R2/Queues, routes and bindings pointing at deleted Workers.
+- **Change timeline**: every deploy across the fleet, with error or traffic spikes that started right after one marked.
+- **Groups and tags**, per-Worker thresholds, include/exclude rules, and a **Self-cost** panel that shows what Ambersight itself uses.
+- **Digest** by e-mail (weekly or daily, in your time zone, optionally one per group), plus instant alerts by e-mail or webhook.
 
 It never deploys, edits or deletes anything, never adds code to your Workers, and stays inside the Workers Free plan.
 
@@ -42,8 +47,13 @@ Create it at **My Profile › API Tokens › Create Token › Custom token** wit
 | Account | Workers Scripts | Read |
 | Account | Account Analytics | Read |
 | Account | Account Settings | Read (optional; lets Ambersight find your account ID) |
+| Account | Workers KV Storage, D1, Workers R2 Storage, Queues | Read (optional; zombie and storage checks) |
+| Zone | Workers Routes, Zone | Read (optional; exposure and orphaned routes) |
+| Account | Access: Apps and Policies | Read (optional; Access coverage check, off by default) |
+| Account | Billing | Read (optional; detects Free or Paid automatically) |
+| User | API Tokens | Read (optional; lets the setup wizard prove the token has no write scopes) |
 
-Do not give it any Edit permission. Ambersight only ever sends GET requests and GraphQL queries. If the token can see several accounts, set `CF_ACCOUNT_ID` in `wrangler.jsonc` `vars`.
+Do not give it any Edit permission. On first sign-in a setup wizard verifies the token, detects your plan and refuses to continue if it finds a write scope. Ambersight only ever sends GET requests and GraphQL queries. If the token can see several accounts, set `CF_ACCOUNT_ID` in `wrangler.jsonc` `vars`.
 
 ### Protect the dashboard
 
@@ -57,9 +67,17 @@ Ambersight uses Cloudflare's `send_email` binding, which is free when you send t
 2. In your fork's `wrangler.jsonc`, set `EMAIL_FROM` (an address on that domain) and `DIGEST_TO` (your verified address), and uncomment the `send_email` block with the same address.
 3. Commit. Workers Builds redeploys.
 
+### Webhook alerts (optional)
+
+`npx wrangler secret put WEBHOOK_URL` with a Slack or Discord webhook URL, a Telegram `https://api.telegram.org/bot<token>/sendMessage?chat_id=<id>` URL, an ntfy topic URL, or any HTTPS endpoint that accepts JSON. Choose per severity in **Settings** whether alerts go to e-mail, webhook, both or nowhere. Every channel has a **Test message** button.
+
+### Settings
+
+Every check, threshold, schedule and alert route is configurable in **Settings** and stored in D1. Export the whole setup as `config.json` and import it elsewhere to version it.
+
 ## Cost
 
-On Workers Free, with 30 Workers, Ambersight uses 1 of your 5 Cron Triggers, about 24 cron runs and a few hundred API calls a day (well under 1% of the 100,000 daily requests), fewer than 15 subrequests per run, and a few thousand D1 row writes a day. Its own logs are switched off.
+On Workers Free, with 30 Workers, Ambersight uses 1 of your 5 Cron Triggers. The trigger fires every 15 minutes (96 invocations a day) but only scans at your configured interval, by default hourly; the other runs stop after one D1 read. Together with a few hundred dashboard API calls that is well under 1% of the 100,000 daily requests. Each scan stays under 45 subrequests and fetches per-Worker details a few Workers at a time. Its own logs are switched off. The **Self-cost** panel in Settings shows the measured numbers.
 
 ## Develop
 
@@ -74,18 +92,20 @@ npm test && npm run typecheck
 
 | Path | What it is |
 | --- | --- |
-| `src/worker/` | The Worker: API (`index.ts`), hourly scan (`scan.ts`), checks (`checks.ts`), Cloudflare client (`cf.ts`), auth, e-mail |
-| `src/shared/` | Types shared by Worker and UI |
+| `src/worker/` | The Worker: API (`index.ts`), scan (`scan.ts`), checks (`checks.ts`, `hygiene.ts`), Cloudflare client (`cf.ts`), setup wizard, auth, alerts (`notify.ts`) |
+| `src/shared/` | Types and the config model shared by Worker and UI |
 | `web/` | Svelte 5 dashboard, built by Vite into `dist/` and served as static assets |
 | `migrations/` | D1 schema |
-| `test/` | Vitest tests for the checks and the cron parser |
+| `test/` | Vitest: unit tests, plus end-to-end scans against fake API responses with D1 emulated on `node:sqlite` |
 
 ## Roadmap
 
-- **v0.1 Core** (now): fleet overview, free-budget guard, runaway traffic, errors and limits, cron health, digest, deploy button.
-- **v0.2 Hygiene**: deprecation radar, exposure audit (workers.dev and preview URLs), zombies and orphaned resources, groups and tags.
-- **v0.3 Insight**: change timeline with deploy correlation, webhook channels, per-Worker thresholds, self-cost panel.
+- **v0.1 Core**: fleet overview, free-budget guard, runaway usage, errors and limits, cron health, digest, deploy button, setup wizard, Settings.
+- **v0.2 Hygiene**: deprecation radar, exposure audit, zombies and orphaned resources, groups and tags.
+- **v0.3 Insight**: change timeline with deploy correlation, webhook channels, per-Worker thresholds, self-cost panel, update notice.
 - **v1.0**: public launch, multiple accounts, optional GitHub package check.
+
+The checks for v0.1 to v0.3 are implemented and tested against recorded API responses. Several Cloudflare datasets (scheduled invocations, storage analytics) still need confirming against a live account; see the open questions in the PRD.
 
 ## License
 

@@ -18,4 +18,6 @@ export interface Env {
   EMAIL_FROM?: string;
   DIGEST_TO?: string;
   EMAIL?: EmailBinding;
+  /** Optional webhook for instant alerts (Worker secret): Slack, Discord, Telegram, ntfy or any JSON endpoint. */
+  WEBHOOK_URL?: string;
 }

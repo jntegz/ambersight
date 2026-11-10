@@ -1,181 +1,387 @@
-// The hourly scan. Reads Cloudflare APIs, stores history in D1, runs checks, sends alerts.
-// Designed for the Workers Free plan: about 10 subrequests and 20 D1 queries per run.
+// The scan: read inventory and metrics from Cloudflare, store them in D1, run the checks.
+// Built for the Workers Free plan: 50 subrequests and 50 D1 queries per cron run, so
+// per-Worker detail is fetched a few Workers at a time on a rotating cursor and the run
+// stops cleanly when its subrequest budget is spent.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import { groupsFor, inScope, thresholdsFor, type Config } from '../shared/config';
 import type { Finding } from '../shared/types';
-import { CfClient, type ApiScript, type ApiWorker } from './cf';
-import { median, runChecks, type CronStats, type WorkerStats } from './checks';
+import { CfClient, type ApiScript, type ApiWorker, type CronRunRow, type Deployment, type InventoryItem, type ResourceOps, type ScriptSettings } from './cf';
+import { median, runChecks, type CronStats, type HourPoint, type ResourceStats, type WorkerMeta, type WorkerStats } from './checks';
 import { countRuns } from './cron';
-import { getSettings, hourFloor, isoHour, setSettings, utcMidnight } from './db';
-import { sendAlerts } from './notify';
+import { configFrom, getSettings, hourFloor, isoHour, planFrom, recordUsage, setSettings, utcMidnight, type Settings } from './db';
 import type { Env } from './env';
+import type { InventoryFacts } from './hygiene';
+import { metered } from './meter';
+import { allowedFetch } from './net';
+import { sendAlerts } from './notify';
+import { isNewer, REPO, VERSION } from './version';
 
 const HOUR = 3_600_000;
-/** Detail calls (schedules) per run; keeps every run well under 50 subrequests. */
-const MAX_DETAIL_CALLS = 10;
+const DAY = 24 * HOUR;
+/** Subrequests per run, leaving room for alerts and the update check. */
+const BUDGET = { free: 42, paid: 900 };
+const DETAIL_MAX_AGE = 6 * HOUR;
+const MAX_ZONES = 20;
 
 export interface ScanResult {
+  skipped?: boolean;
   workers: number;
   findings: number;
   subrequests: number;
   warnings: string[];
+  detailRemaining?: number;
 }
 
-export async function runScan(env: Env, now = new Date()): Promise<ScanResult> {
-  const db = env.DB;
+export async function runScan(rawEnv: Env, now = new Date(), opts: { force?: boolean } = {}): Promise<ScanResult> {
+  const started = Date.now();
+  const { db, meter } = metered(rawEnv.DB);
+  const env = { ...rawEnv, DB: db };
   const settings = await getSettings(db);
+  const config = configFrom(settings);
+
+  // The cron fires every 15 minutes; honour the configured interval.
+  if (!opts.force && settings.last_scan_at && now.getTime() - new Date(settings.last_scan_at).getTime() < (config.scanIntervalMinutes - 2) * 60_000) {
+    return { skipped: true, workers: 0, findings: 0, subrequests: 0, warnings: [] };
+  }
+
   const warnings: string[] = [];
   const stamp = now.toISOString();
-
   const accountId = env.CF_ACCOUNT_ID || settings.account_id || (await CfClient.resolveAccountId(env.CF_API_TOKEN));
   const cf = new CfClient(env.CF_API_TOKEN, accountId);
-  const plan: 'free' | 'paid' = (settings.plan ?? env.PLAN) === 'paid' ? 'paid' : 'free';
+  const plan = planFrom(config, settings, env.PLAN);
+  const budget = BUDGET[plan];
+  const left = () => budget - cf.calls;
 
-  // 1. Inventory. The beta Workers list adds subdomain and observability settings; if the
-  //    token cannot read it, the scripts list alone is enough for v0.1 checks.
+  // 1. Inventory. The beta Workers list adds subdomain, preview, observability and deploy data.
   const [apiWorkers, scripts] = await Promise.all([
     cf.listWorkers().catch((e: Error) => {
       warnings.push(`Workers list unavailable: ${e.message}`);
-      return [] as ApiWorker[];
+      return null;
     }),
     cf.listScripts(),
   ]);
-  const inventory = mergeInventory(scripts, apiWorkers, stamp);
+  const inventory = mergeInventory(scripts, apiWorkers ?? [], stamp);
+  const { results: known } = await db
+    .prepare(`SELECT name, detail_checked_at, bindings LIKE '%durable_object_namespace%' AS has_do FROM workers`)
+    .all<{ name: string; detail_checked_at: string | null; has_do: number | null }>();
+  const knownNames = new Set(known.map((k) => k.name));
+  const currentNames = new Set(inventory.map((w) => w.name));
+  const fleetEvents = knownNames.size
+    ? [
+        ...inventory.filter((w) => !knownNames.has(w.name)).map((w) => ({ at: stamp, kind: 'added', script: w.name })),
+        ...[...knownNames].filter((n) => !currentNames.has(n)).map((n) => ({ at: stamp, kind: 'removed', script: n })),
+      ]
+    : [];
 
-  // 2. Metrics since the last stored hour (at most 48 h back on first run).
+  // 2. Metrics since the last stored hour (at most 48 h back).
   const lastHourRow = await db.prepare('SELECT MAX(hour) AS h FROM metrics_hourly').first<{ h: string | null }>();
   const since = lastHourRow?.h
     ? new Date(Math.max(new Date(lastHourRow.h).getTime() - HOUR, now.getTime() - 48 * HOUR))
     : new Date(hourFloor(now).getTime() - 48 * HOUR);
+  const cpuSum = settings.cpu_sum !== 'unsupported';
   const [hourly, exceeded] = await Promise.all([
-    cf.hourlyMetrics(since, now),
+    cf.hourlyMetrics(since, now, cpuSum).catch(async (e: Error) => {
+      if (!cpuSum) throw e;
+      settings.cpu_sum = 'unsupported';
+      warnings.push('CPU totals unavailable; CPU runaway detection is off.');
+      return cf.hourlyMetrics(since, now, false);
+    }),
     cf.exceededByHour(since, now).catch((e: Error) => {
       warnings.push(`Limit outcomes unavailable: ${e.message}`);
       return [];
     }),
   ]);
 
-  // 3. Cron schedules, a few Workers per run, refreshed every 6 hours.
+  // 3. Cron runs (experimental dataset; retried once a day if unavailable).
   const scheduled = inventory.filter((w) => w.handlers.includes('scheduled')).map((w) => w.name);
-  const { results: known } = await db.prepare('SELECT script, checked_at FROM schedules').all<{ script: string; checked_at: string }>();
-  const checkedAt = new Map(known.map((k) => [k.script, k.checked_at]));
-  const due = scheduled
-    .filter((s) => !checkedAt.has(s) || now.getTime() - new Date(checkedAt.get(s)!).getTime() > 6 * HOUR)
-    .slice(0, MAX_DETAIL_CALLS);
-  const scheduleRows: { script: string; crons: string; checked_at: string }[] = [];
-  for (const script of due) {
-    try {
-      scheduleRows.push({ script, crons: JSON.stringify(await cf.schedules(script)), checked_at: stamp });
-    } catch (e) {
-      warnings.push(`Schedules for ${script} unavailable: ${(e as Error).message}`);
-    }
-  }
-
-  // 4. Cron runs (experimental dataset; retried once a day if unavailable).
   const cronFrom = new Date(hourFloor(now).getTime() - 25 * HOUR);
   const cronTo = new Date(hourFloor(now).getTime() - HOUR);
-  let cronRuns: Awaited<ReturnType<CfClient['cronRuns']>> | null = null;
-  const cronRetryDue =
-    settings.cron_dataset !== 'unavailable' || now.getTime() - new Date(settings.cron_dataset_checked ?? 0).getTime() > 24 * HOUR;
-  if (scheduled.length && cronRetryDue) {
+  let cronRuns: CronRunRow[] | null = null;
+  const cronRetryDue = settings.cron_dataset !== 'unavailable' || now.getTime() - new Date(settings.cron_dataset_checked ?? 0).getTime() > DAY;
+  if (config.modules.cron && scheduled.length && cronRetryDue) {
+    const withCpu = settings.cron_cpu !== 'unsupported';
     try {
-      cronRuns = await cf.cronRuns(new Date(cronFrom.getTime() - HOUR), now);
+      cronRuns = await cf.cronRuns(new Date(cronFrom.getTime() - HOUR), now, withCpu).catch(async (e: Error) => {
+        if (!withCpu) throw e;
+        settings.cron_cpu = 'unsupported';
+        return cf.cronRuns(new Date(cronFrom.getTime() - HOUR), now, false);
+      });
     } catch (e) {
       warnings.push(`Cron runs unavailable: ${(e as Error).message}`);
     }
   }
 
-  // 5. Write everything in one batch.
+  // 4. Storage and Durable Object operations, for kinds the account actually has.
+  let resourceOps: ResourceOps[] = [];
+  if (config.modules.usage) {
+    const { results: kindRows } = await db.prepare(`SELECT DISTINCT kind FROM resources WHERE kind IN ('kv','d1','r2','queues')`).all<{ kind: ResourceOps['kind'] }>();
+    const kinds = kindRows.map((k) => k.kind);
+    if (known.some((k) => k.has_do) || inventory.some((w) => w.handlers.includes('alarm'))) kinds.push('do');
+    const failedBefore = new Set((settings.ops_unavailable ?? '').split(',').filter(Boolean));
+    const retryFailed = now.getTime() - new Date(settings.ops_checked ?? 0).getTime() > DAY;
+    const tryKinds = kinds.filter((k) => retryFailed || !failedBefore.has(k)).slice(0, Math.max(0, left() - 20));
+    if (tryKinds.length) {
+      const r = await cf.resourceOps(new Date(Math.max(since.getTime(), now.getTime() - 3 * HOUR)), now, tryKinds);
+      resourceOps = r.rows;
+      if (retryFailed || r.failed.length) {
+        settings.ops_unavailable = r.failed.join(',');
+        settings.ops_checked = stamp;
+      }
+    }
+  }
+
+  // 5. Full inventory refresh: custom domains, routes, storage, Access, update check.
+  const refreshDue = inventoryDue(now, settings.inventory_at ?? null, config);
+  const refreshed: InventoryItem[] = [];
+  const refreshedKinds = new Set<InventoryItem['kind']>();
+  let subdomain = settings.workers_subdomain ?? null;
+  if (refreshDue) {
+    subdomain = (await cf.workersSubdomain()) ?? subdomain;
+    const step = async (kinds: InventoryItem['kind'][], label: string, run: () => Promise<InventoryItem[]>) => {
+      try {
+        refreshed.push(...(await run()));
+        kinds.forEach((k) => refreshedKinds.add(k));
+      } catch (e) {
+        warnings.push(`${label} unavailable: ${(e as Error).message}`);
+      }
+    };
+    await step(['domain'], 'Custom domains', () => cf.customDomains());
+    await step(['route'], 'Routes', async () => {
+      const r = await cf.routes(Math.max(1, Math.min(MAX_ZONES, left() - 15)));
+      if (r.zonesSkipped) warnings.push(`Routes: ${r.zonesSkipped} zones not checked this run.`);
+      return r.items;
+    });
+    const st = await cf.storage();
+    refreshed.push(...st.items);
+    const storageLabel = { kv: 'KV', d1: 'D1', r2: 'R2', queues: 'Queues' } as const;
+    for (const k of ['kv', 'd1', 'r2', 'queues'] as const) if (!st.failed.includes(storageLabel[k])) refreshedKinds.add(k);
+    if (st.failed.length) warnings.push(`Storage lists unavailable: ${st.failed.join(', ')} (add the matching Read permissions to the token).`);
+    if (config.modules.exposure && config.modules.access) await step(['access'], 'Access applications', () => cf.accessApps());
+    if (config.updateCheck) await checkForUpdate(settings).catch((e: Error) => warnings.push(`Update check failed: ${e.message}`));
+  }
+
+  // 6. Per-Worker detail on a rotating cursor: settings (bindings), deployments, schedules.
+  const checkedAt = new Map(known.map((k) => [k.name, k.detail_checked_at]));
+  const due = inventory
+    .filter((w) => !checkedAt.get(w.name) || now.getTime() - new Date(checkedAt.get(w.name)!).getTime() > DETAIL_MAX_AGE)
+    .sort((a, b) => (checkedAt.get(a.name) ?? '').localeCompare(checkedAt.get(b.name) ?? ''));
+  const wantSettings = config.modules.deprecation || config.modules.zombies;
+  const wantDeploys = config.modules.timeline;
+  const details: { name: string; settings: ScriptSettings | null; deployments: Deployment[] | null; crons: string[] | null }[] = [];
+  let detailRemaining = 0;
+  for (const w of due) {
+    const isCron = w.handlers.includes('scheduled');
+    const cost = (wantSettings ? 1 : 0) + (wantDeploys ? 1 : 0) + (isCron ? 1 : 0);
+    if (cost > left()) {
+      detailRemaining = due.length - details.length;
+      break;
+    }
+    const d: (typeof details)[number] = { name: w.name, settings: null, deployments: null, crons: null };
+    try {
+      if (wantSettings) d.settings = await cf.scriptSettings(w.name);
+      if (wantDeploys) d.deployments = await cf.deployments(w.name);
+      if (isCron) d.crons = await cf.schedules(w.name);
+    } catch (e) {
+      warnings.push(`Details for ${w.name} unavailable: ${(e as Error).message}`);
+    }
+    details.push(d);
+  }
+  if (detailRemaining) warnings.push(`${detailRemaining} Workers will get their details on the next runs.`);
+
+  // 7. Write everything in one batch.
+  const j = JSON.stringify;
   const writes: D1PreparedStatement[] = [
     db.prepare(
-      `INSERT INTO workers (name, has_modules, compatibility_date, handlers, usage_model, created_on, modified_on,
-         deployed_on, workers_dev, previews_enabled, logs_enabled, sampling_rate, logpush, tags, last_seen)
+      `INSERT INTO workers (name, has_modules, compatibility_date, compat_flags, handlers, usage_model, created_on, modified_on,
+         deployed_on, workers_dev, previews_enabled, logs_enabled, sampling_rate, logpush, tags, last_seen, first_seen)
        SELECT json_extract(value,'$.name'), json_extract(value,'$.has_modules'), json_extract(value,'$.compatibility_date'),
-         json_extract(value,'$.handlers'), json_extract(value,'$.usage_model'), json_extract(value,'$.created_on'),
-         json_extract(value,'$.modified_on'), json_extract(value,'$.deployed_on'), json_extract(value,'$.workers_dev'),
-         json_extract(value,'$.previews_enabled'), json_extract(value,'$.logs_enabled'), json_extract(value,'$.sampling_rate'),
-         json_extract(value,'$.logpush'), json_extract(value,'$.tags'), json_extract(value,'$.last_seen')
+         json_extract(value,'$.compat_flags'), json_extract(value,'$.handlers'), json_extract(value,'$.usage_model'),
+         json_extract(value,'$.created_on'), json_extract(value,'$.modified_on'), json_extract(value,'$.deployed_on'),
+         json_extract(value,'$.workers_dev'), json_extract(value,'$.previews_enabled'), json_extract(value,'$.logs_enabled'),
+         json_extract(value,'$.sampling_rate'), json_extract(value,'$.logpush'), json_extract(value,'$.tags'),
+         json_extract(value,'$.last_seen'), json_extract(value,'$.last_seen')
        FROM json_each(?1) WHERE true
        ON CONFLICT(name) DO UPDATE SET has_modules=excluded.has_modules, compatibility_date=excluded.compatibility_date,
+         compat_flags=COALESCE(excluded.compat_flags, workers.compat_flags),
          handlers=excluded.handlers, usage_model=excluded.usage_model, created_on=excluded.created_on,
          modified_on=excluded.modified_on, deployed_on=excluded.deployed_on, workers_dev=excluded.workers_dev,
          previews_enabled=excluded.previews_enabled, logs_enabled=excluded.logs_enabled,
          sampling_rate=excluded.sampling_rate, logpush=excluded.logpush, tags=excluded.tags, last_seen=excluded.last_seen`,
-    ).bind(JSON.stringify(inventory.map((w) => ({ ...w, handlers: JSON.stringify(w.handlers), tags: JSON.stringify(w.tags) })))),
+    ).bind(j(inventory.map((w) => ({ ...w, handlers: j(w.handlers), tags: j(w.tags), compat_flags: w.compat_flags ? j(w.compat_flags) : null })))),
     db.prepare('DELETE FROM workers WHERE last_seen <> ?1').bind(stamp),
     db.prepare(
-      `INSERT INTO metrics_hourly (script, hour, requests, errors, subrequests, cpu_p99)
+      `INSERT INTO metrics_hourly (script, hour, requests, errors, subrequests, cpu_p99, cpu_time_us)
        SELECT json_extract(value,'$.script'), json_extract(value,'$.hour'), json_extract(value,'$.requests'),
-         json_extract(value,'$.errors'), json_extract(value,'$.subrequests'), json_extract(value,'$.cpuP99')
+         json_extract(value,'$.errors'), json_extract(value,'$.subrequests'), json_extract(value,'$.cpuP99'), json_extract(value,'$.cpuTimeUs')
        FROM json_each(?1) WHERE true
        ON CONFLICT(script, hour) DO UPDATE SET requests=excluded.requests, errors=excluded.errors,
-         subrequests=excluded.subrequests, cpu_p99=excluded.cpu_p99`,
-    ).bind(JSON.stringify(hourly)),
+         subrequests=excluded.subrequests, cpu_p99=excluded.cpu_p99, cpu_time_us=excluded.cpu_time_us`,
+    ).bind(j(hourly)),
     db.prepare(
       `INSERT INTO metrics_hourly (script, hour, exceeded)
        SELECT json_extract(value,'$.script'), json_extract(value,'$.hour'), json_extract(value,'$.count')
        FROM json_each(?1) WHERE true
        ON CONFLICT(script, hour) DO UPDATE SET exceeded=excluded.exceeded`,
-    ).bind(JSON.stringify(exceeded)),
+    ).bind(j(exceeded)),
+    // Detail: bindings, flags, schedules, deployments.
+    db.prepare(
+      `UPDATE workers SET
+         bindings = COALESCE(json_extract(d.value,'$.bindings'), workers.bindings),
+         compat_flags = COALESCE(json_extract(d.value,'$.flags'), workers.compat_flags),
+         detail_checked_at = ?2
+       FROM json_each(?1) AS d WHERE workers.name = json_extract(d.value,'$.name')`,
+    ).bind(
+      j(details.map((d) => ({
+        name: d.name,
+        bindings: d.settings ? j([...d.settings.bindings, ...d.settings.tail_consumers.map((t) => ({ type: 'tail_consumer', name: t, target: t }))]) : null,
+        flags: d.settings ? j(d.settings.compatibility_flags) : null,
+      }))),
+      stamp,
+    ),
     db.prepare(
       `INSERT INTO schedules (script, crons, checked_at)
-       SELECT json_extract(value,'$.script'), json_extract(value,'$.crons'), json_extract(value,'$.checked_at')
-       FROM json_each(?1) WHERE true
+       SELECT json_extract(value,'$.script'), json_extract(value,'$.crons'), ?2 FROM json_each(?1) WHERE true
        ON CONFLICT(script) DO UPDATE SET crons=excluded.crons, checked_at=excluded.checked_at`,
-    ).bind(JSON.stringify(scheduleRows)),
-    db.prepare(`DELETE FROM schedules WHERE script NOT IN (SELECT value FROM json_each(?1))`).bind(JSON.stringify(scheduled)),
-    db.prepare('DELETE FROM metrics_hourly WHERE hour < ?1').bind(isoHour(new Date(now.getTime() - 30 * 24 * HOUR))),
+    ).bind(j(details.filter((d) => d.crons).map((d) => ({ script: d.name, crons: j(d.crons) }))), stamp),
+    db.prepare(`DELETE FROM schedules WHERE script NOT IN (SELECT value FROM json_each(?1))`).bind(j(scheduled)),
+    db.prepare(
+      `INSERT INTO deployments (script, id, created_on, author, message, source)
+       SELECT json_extract(value,'$.script'), json_extract(value,'$.id'), json_extract(value,'$.created_on'),
+         json_extract(value,'$.author'), json_extract(value,'$.message'), json_extract(value,'$.source')
+       FROM json_each(?1) WHERE true
+       ON CONFLICT(script, id) DO NOTHING`,
+    ).bind(j(details.flatMap((d) => (d.deployments ?? []).map((x) => ({ ...x, script: d.name }))))),
+    db.prepare(`INSERT INTO fleet_events (at, kind, script) SELECT json_extract(value,'$.at'), json_extract(value,'$.kind'), json_extract(value,'$.script') FROM json_each(?1) WHERE true`).bind(j(fleetEvents)),
   ];
   if (cronRuns) {
     writes.push(
       db.prepare(
-        `INSERT INTO cron_runs (script, hour, runs, failures)
-         SELECT json_extract(value,'$.script'), json_extract(value,'$.hour'), json_extract(value,'$.runs'), json_extract(value,'$.failures')
+        `INSERT INTO cron_runs (script, hour, runs, failures, cpu_max_ms)
+         SELECT json_extract(value,'$.script'), json_extract(value,'$.hour'), json_extract(value,'$.runs'),
+           json_extract(value,'$.failures'), json_extract(value,'$.cpuMaxMs')
          FROM json_each(?1) WHERE true
-         ON CONFLICT(script, hour) DO UPDATE SET runs=excluded.runs, failures=excluded.failures`,
-      ).bind(JSON.stringify(cronRuns)),
+         ON CONFLICT(script, hour) DO UPDATE SET runs=excluded.runs, failures=excluded.failures, cpu_max_ms=excluded.cpu_max_ms`,
+      ).bind(j(cronRuns)),
+    );
+  }
+  if (resourceOps.length) {
+    writes.push(
+      db.prepare(
+        `INSERT INTO resource_hourly (kind, resource, hour, ops)
+         SELECT json_extract(value,'$.kind'), json_extract(value,'$.resource'), json_extract(value,'$.hour'), json_extract(value,'$.ops')
+         FROM json_each(?1) WHERE true
+         ON CONFLICT(kind, resource, hour) DO UPDATE SET ops=excluded.ops`,
+      ).bind(j(resourceOps)),
+    );
+  }
+  if (refreshDue) {
+    writes.push(
+      db.prepare(`DELETE FROM resources WHERE kind IN (SELECT value FROM json_each(?1))`).bind(j([...refreshedKinds])),
+      db.prepare(
+        `INSERT INTO resources (kind, id, name, script, extra)
+         SELECT json_extract(value,'$.kind'), json_extract(value,'$.id'), json_extract(value,'$.name'), json_extract(value,'$.script'), json_extract(value,'$.extra')
+         FROM json_each(?1) WHERE true ON CONFLICT(kind, id) DO NOTHING`,
+      ).bind(j(refreshed.filter((r) => refreshedKinds.has(r.kind)).map((r) => ({ ...r, extra: r.extra ? j(r.extra) : null })))),
+      // Retention, once per inventory refresh.
+      ...retentionDeletes(db, now, config.retentionDays),
     );
   }
   writes.push(
     setSettings(db, {
       account_id: accountId,
-      ...(scheduled.length && cronRetryDue
-        ? { cron_dataset: cronRuns ? 'available' : 'unavailable', cron_dataset_checked: stamp }
-        : {}),
+      ...(settings.cpu_sum ? { cpu_sum: settings.cpu_sum } : {}),
+      ...(settings.cron_cpu ? { cron_cpu: settings.cron_cpu } : {}),
+      ...(settings.ops_checked ? { ops_unavailable: settings.ops_unavailable ?? '', ops_checked: settings.ops_checked } : {}),
+      ...(settings.latest_version ? { latest_version: settings.latest_version, latest_url: settings.latest_url ?? '' } : {}),
+      ...(refreshDue ? { inventory_at: stamp, workers_subdomain: subdomain ?? '' } : {}),
+      ...(settings.first_metrics_at ? {} : { first_metrics_at: stamp }),
+      ...(config.modules.cron && scheduled.length && cronRetryDue ? { cron_dataset: cronRuns ? 'available' : 'unavailable', cron_dataset_checked: stamp } : {}),
     }),
   );
   await db.batch(writes);
 
-  // 6. Checks.
-  const workerStats = await loadWorkerStats(db, now);
-  const accountToday = await db
-    .prepare('SELECT COALESCE(SUM(requests),0) AS n FROM metrics_hourly WHERE hour >= ?1')
-    .bind(isoHour(utcMidnight(now)))
-    .first<{ n: number }>();
+  // 8. Checks.
   const cronDatasetOk = cronRuns != null || settings.cron_dataset === 'available';
-  const crons = cronDatasetOk ? await loadCronStats(db, cronFrom, cronTo) : null;
+  const facts = await loadFacts(db, now, config, settings, cronDatasetOk ? { from: cronFrom, to: cronTo } : null, subdomain);
   const findings = runChecks({
     now,
     plan,
-    accountRequestsToday: accountToday?.n ?? 0,
-    workers: workerStats,
-    crons,
-    thresholds: settings.thresholds ? JSON.parse(settings.thresholds) : undefined,
+    accountRequestsToday: facts.accountToday,
+    workers: facts.stats,
+    crons: facts.crons,
+    cronTotal: facts.cronTotal,
+    resources: facts.resources,
+    meta: facts.meta,
+    inventory: facts.inventory,
+    config,
+    thresholdsFor: facts.thresholdsFor,
   });
-
   await saveFindings(db, findings, stamp);
-  await db.batch([setSettings(db, { last_scan_at: stamp, last_scan_calls: String(cf.calls), last_scan_warnings: JSON.stringify(warnings) })]);
 
-  // 7. Alerts and weekly digest (only if e-mail is configured).
-  await sendAlerts(env, now).catch((e: Error) => warnings.push(`Alerts failed: ${e.message}`));
+  // 9. Alerts and digest, then the run's own cost.
+  await sendAlerts(env, now, config).catch((e: Error) => warnings.push(`Alerts failed: ${e.message}`));
+  await db.batch([
+    setSettings(db, {
+      last_scan_at: stamp,
+      last_scan_calls: String(cf.calls),
+      last_scan_ms: String(Date.now() - started),
+      last_scan_warnings: j(warnings),
+    }),
+    recordUsage(db, now, { cronRuns: 1, subrequests: cf.calls, rowsRead: meter.rowsRead, rowsWritten: meter.rowsWritten }),
+  ]);
 
-  return { workers: inventory.length, findings: findings.length, subrequests: cf.calls, warnings };
+  return { workers: inventory.length, findings: findings.length, subrequests: cf.calls, warnings, detailRemaining };
+}
+
+export function inventoryDue(now: Date, last: string | null, config: Config): boolean {
+  if (!last) return true;
+  const age = now.getTime() - new Date(last).getTime();
+  const interval = config.inventoryIntervalHours * HOUR;
+  if (age >= interval + 2 * HOUR) return true; // missed the preferred hour: catch up
+  if (age < interval - HOUR) return false;
+  return config.inventoryIntervalHours % 24 !== 0 || now.getUTCHours() === config.inventoryHourUtc;
+}
+
+function retentionDeletes(db: D1Database, now: Date, days: number): D1PreparedStatement[] {
+  const cutoff = new Date(now.getTime() - days * DAY);
+  const hour = isoHour(cutoff);
+  const iso = cutoff.toISOString();
+  return [
+    db.prepare('DELETE FROM metrics_hourly WHERE hour < ?1').bind(hour),
+    db.prepare('DELETE FROM cron_runs WHERE hour < ?1').bind(hour),
+    db.prepare('DELETE FROM resource_hourly WHERE hour < ?1').bind(hour),
+    db.prepare(`DELETE FROM findings WHERE status = 'resolved' AND last_seen < ?1`).bind(iso),
+    db.prepare('DELETE FROM deployments WHERE created_on < ?1').bind(iso),
+    db.prepare('DELETE FROM fleet_events WHERE at < ?1').bind(iso),
+    db.prepare('DELETE FROM usage_daily WHERE day < ?1').bind(iso.slice(0, 10)),
+    db.prepare('DELETE FROM sessions WHERE expires_at < ?1').bind(now.toISOString()),
+  ];
+}
+
+async function checkForUpdate(settings: Settings): Promise<void> {
+  const res = await allowedFetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
+    headers: { 'User-Agent': 'ambersight-update-check', Accept: 'application/vnd.github+json' },
+  });
+  if (res.status === 404) return; // no releases yet
+  if (!res.ok) throw new Error(`GitHub answered ${res.status}`);
+  const r = (await res.json()) as { tag_name?: string; html_url?: string };
+  if (r.tag_name) {
+    settings.latest_version = r.tag_name;
+    settings.latest_url = r.html_url ?? `https://github.com/${REPO}/releases`;
+  }
+}
+
+export function updateNotice(settings: Settings): { current: string; latest: string; url: string } | null {
+  const latest = settings.latest_version;
+  return latest && isNewer(latest, VERSION) ? { current: VERSION, latest, url: settings.latest_url || `https://github.com/${REPO}/releases` } : null;
 }
 
 interface InventoryRow {
   name: string;
   has_modules: number | null;
   compatibility_date: string | null;
+  compat_flags: string[] | null;
   handlers: string[];
   usage_model: string | null;
   created_on: string | null;
@@ -200,11 +406,12 @@ export function mergeInventory(scripts: ApiScript[], workers: ApiWorker[], stamp
       name: s.id,
       has_modules: flag(s.has_modules),
       compatibility_date: s.compatibility_date ?? null,
+      compat_flags: s.compatibility_flags ?? null,
       handlers: s.handlers ?? [],
       usage_model: s.usage_model ?? null,
       created_on: s.created_on ?? w?.created_on ?? null,
       modified_on: s.modified_on ?? w?.updated_on ?? null,
-      deployed_on: w?.deployed_on ?? null,
+      deployed_on: w ? (w.deployed_on ?? null) : null,
       workers_dev: flag(w?.subdomain?.enabled),
       previews_enabled: flag(w?.subdomain?.previews_enabled),
       logs_enabled: flag(w?.observability?.enabled),
@@ -216,65 +423,238 @@ export function mergeInventory(scripts: ApiScript[], workers: ApiWorker[], stamp
   });
 }
 
-async function loadWorkerStats(db: D1Database, now: Date): Promise<WorkerStats[]> {
-  const lastFullHour = isoHour(new Date(hourFloor(now).getTime() - HOUR));
-  const dayAgo = isoHour(new Date(now.getTime() - 24 * HOUR));
-  const weekAgo = isoHour(new Date(now.getTime() - 7 * 24 * HOUR));
-  const [names, day, hist] = await db.batch([
-    db.prepare('SELECT name FROM workers'),
-    db.prepare(
-      `SELECT script, SUM(requests) AS requests, SUM(errors) AS errors, SUM(exceeded) AS exceeded, MAX(cpu_p99) AS cpu
-       FROM metrics_hourly WHERE hour >= ?1 GROUP BY script`,
-    ).bind(dayAgo),
-    db.prepare('SELECT script, hour, requests FROM metrics_hourly WHERE hour >= ?1 AND hour <= ?2').bind(weekAgo, lastFullHour),
-  ]);
-  const dayBy = new Map((day.results as { script: string; requests: number; errors: number; exceeded: number; cpu: number | null }[]).map((r) => [r.script, r]));
-  const histBy = new Map<string, { last: number; others: number[] }>();
-  for (const r of hist.results as { script: string; hour: string; requests: number }[]) {
-    const h = histBy.get(r.script) ?? { last: 0, others: [] };
-    if (r.hour === lastFullHour) h.last = r.requests;
-    else h.others.push(r.requests);
-    histBy.set(r.script, h);
-  }
-  return (names.results as { name: string }[]).map(({ name }) => {
-    const d = dayBy.get(name);
-    const h = histBy.get(name);
-    return {
-      name,
-      requests24h: d?.requests ?? 0,
-      errors24h: d?.errors ?? 0,
-      exceeded24h: d?.exceeded ?? 0,
-      cpuP99Max24h: d?.cpu ?? null,
-      lastHourRequests: h?.last ?? 0,
-      hourlyMedian7d: median(h?.others ?? []),
-      historyHours: (h?.others.length ?? 0) + (h ? 1 : 0),
-    };
-  });
+interface WorkerRow {
+  name: string;
+  has_modules: number | null;
+  compatibility_date: string | null;
+  compat_flags: string | null;
+  handlers: string | null;
+  usage_model: string | null;
+  deployed_on: string | null;
+  workers_dev: number | null;
+  previews_enabled: number | null;
+  logs_enabled: number | null;
+  sampling_rate: number | null;
+  logpush: number | null;
+  tags: string | null;
+  bindings: string | null;
+  detail_checked_at: string | null;
 }
 
-async function loadCronStats(db: D1Database, from: Date, to: Date): Promise<CronStats[]> {
-  const [schedules, runs] = await db.batch([
-    db.prepare('SELECT script, crons FROM schedules'),
+const bool = (v: number | null) => (v == null ? null : v === 1);
+const parse = <T>(s: string | null, fallback: T): T => (s ? (JSON.parse(s) as T) : fallback);
+
+export interface Facts {
+  accountToday: number;
+  stats: WorkerStats[];
+  meta: WorkerMeta[];
+  crons: CronStats[] | null;
+  cronTotal: number | null;
+  resources: ResourceStats[];
+  inventory: InventoryFacts;
+  thresholdsFor: (name: string) => ReturnType<typeof thresholdsFor>;
+}
+
+/** Everything the checks need, from D1, in one batch. Out-of-scope Workers are left out. */
+export async function loadFacts(
+  db: D1Database, now: Date, config: Config, settings: Settings, cronWindow: { from: Date; to: Date } | null, subdomain: string | null,
+): Promise<Facts> {
+  const lastFullHour = isoHour(new Date(hourFloor(now).getTime() - HOUR));
+  const dayAgo = isoHour(new Date(now.getTime() - DAY));
+  const weekAgo = isoHour(new Date(now.getTime() - 7 * DAY));
+  const zombieFrom = isoHour(new Date(now.getTime() - Math.min(config.thresholds.zombieDays, config.retentionDays) * DAY));
+  const deployFrom = new Date(now.getTime() - 26 * HOUR - config.thresholds.deployWindowMinutes * 60_000).toISOString();
+  const cronFrom = cronWindow ? isoHour(cronWindow.from) : lastFullHour;
+  const cronTo = cronWindow ? isoHour(cronWindow.to) : lastFullHour;
+
+  const [workersR, histR, windowR, todayR, schedR, runsR, resR, opsR, depR] = await db.batch([
+    db.prepare('SELECT * FROM workers'),
     db.prepare(
-      `SELECT script, SUM(runs) AS runs, SUM(failures) AS failures FROM cron_runs
-       WHERE hour >= ?1 AND hour < ?2 GROUP BY script`,
-    ).bind(isoHour(from), isoHour(to)),
+      `SELECT script, hour, requests, errors, subrequests, cpu_time_us, exceeded, cpu_p99 FROM metrics_hourly
+       WHERE hour >= ?1 ORDER BY hour`,
+    ).bind(weekAgo),
+    db.prepare('SELECT script, SUM(requests) AS requests FROM metrics_hourly WHERE hour >= ?1 GROUP BY script').bind(zombieFrom),
+    db.prepare('SELECT COALESCE(SUM(requests),0) AS n FROM metrics_hourly WHERE hour >= ?1').bind(isoHour(utcMidnight(now))),
+    db.prepare('SELECT script, crons FROM schedules'),
+    db.prepare('SELECT script, hour, runs, failures, cpu_max_ms FROM cron_runs WHERE hour >= ?1 AND hour < ?2').bind(cronFrom, cronTo),
+    db.prepare('SELECT kind, id, name, script, extra FROM resources'),
+    db.prepare('SELECT kind, resource, hour, ops FROM resource_hourly WHERE hour >= ?1').bind(weekAgo),
+    db.prepare('SELECT script, id, created_on FROM deployments WHERE created_on >= ?1').bind(deployFrom),
   ]);
-  const runsBy = new Map((runs.results as { script: string; runs: number; failures: number }[]).map((r) => [r.script, r]));
-  const out: CronStats[] = [];
-  for (const s of schedules.results as { script: string; crons: string }[]) {
-    let expected = 0;
-    for (const expr of JSON.parse(s.crons) as string[]) {
+
+  const allRows = workersR.results as unknown as WorkerRow[];
+  const groupsOf = new Map(allRows.map((w) => [w.name, groupsFor(config, w.name, parse<string[]>(w.tags, []))]));
+  const rows = allRows.filter((w) => inScope(config, w.name, groupsOf.get(w.name)!));
+  const tf = (name: string) => thresholdsFor(config, name, groupsOf.get(name) ?? []);
+
+  // Metrics per Worker.
+  type H = { script: string; hour: string; requests: number; errors: number; subrequests: number; cpu_time_us: number; exceeded: number; cpu_p99: number | null };
+  const hist = new Map<string, H[]>();
+  for (const h of histR.results as unknown as H[]) {
+    const list = hist.get(h.script) ?? [];
+    list.push(h);
+    hist.set(h.script, list);
+  }
+  const windowBy = new Map((windowR.results as { script: string; requests: number }[]).map((r) => [r.script, r.requests]));
+  const stats: WorkerStats[] = rows.map(({ name }) => {
+    const hs = hist.get(name) ?? [];
+    const day = hs.filter((h) => h.hour >= dayAgo);
+    const prev = hs.filter((h) => h.hour < dayAgo);
+    const before = hs.filter((h) => h.hour < lastFullHour);
+    const last = hs.find((h) => h.hour === lastFullHour);
+    const sum = (list: H[], k: 'requests' | 'errors' | 'exceeded') => list.reduce((a, h) => a + (h[k] ?? 0), 0);
+    const cpu = day.map((h) => h.cpu_p99).filter((v): v is number => v != null);
+    return {
+      name,
+      requests24h: sum(day, 'requests'),
+      errors24h: sum(day, 'errors'),
+      requestsPrev: sum(prev, 'requests'),
+      errorsPrev: sum(prev, 'errors'),
+      exceeded24h: sum(day, 'exceeded'),
+      cpuP99Max24h: cpu.length ? Math.max(...cpu) : null,
+      lastHourRequests: last?.requests ?? 0,
+      hourlyMedian7d: median(before.map((h) => h.requests)),
+      lastHourCpuUs: last?.cpu_time_us ?? 0,
+      hourlyMedianCpuUs7d: median(before.map((h) => h.cpu_time_us ?? 0)),
+      lastHourSubrequests: last?.subrequests ?? 0,
+      hourlyMedianSubrequests7d: median(before.map((h) => h.subrequests ?? 0)),
+      historyHours: before.length + (last ? 1 : 0),
+      hours24: day.map((h): HourPoint => ({ hour: h.hour, requests: h.requests, errors: h.errors })),
+      requestsWindow: windowBy.get(name) ?? 0,
+    };
+  });
+
+  // Metadata and deployments.
+  const deps = new Map<string, { id: string; createdOn: string }[]>();
+  for (const d of depR.results as { script: string; id: string; created_on: string }[]) {
+    const list = deps.get(d.script) ?? [];
+    list.push({ id: d.id, createdOn: d.created_on });
+    deps.set(d.script, list);
+  }
+  const meta: WorkerMeta[] = rows.map((w) => ({
+    name: w.name,
+    groups: groupsOf.get(w.name)!,
+    handlers: parse<string[]>(w.handlers, []),
+    hasModules: bool(w.has_modules),
+    compatibilityDate: w.compatibility_date,
+    compatibilityFlags: parse<string[]>(w.compat_flags, []),
+    usageModel: w.usage_model,
+    bindings: w.detail_checked_at ? parse(w.bindings, []) : null,
+    workersDev: bool(w.workers_dev),
+    previewsEnabled: bool(w.previews_enabled),
+    logsEnabled: bool(w.logs_enabled),
+    samplingRate: w.sampling_rate,
+    logpush: bool(w.logpush),
+    deployedOn: w.deployed_on,
+    listed: w.workers_dev != null || w.previews_enabled != null,
+    deployments: deps.get(w.name) ?? [],
+  }));
+  const inScopeNames = new Set(rows.map((r) => r.name));
+
+  // Cron stats per schedule, with the run of bad slots at the end.
+  let crons: CronStats[] | null = null;
+  const schedules = schedR.results as { script: string; crons: string }[];
+  if (cronWindow) {
+    type R = { script: string; hour: string; runs: number; failures: number; cpu_max_ms: number | null };
+    const runs = new Map<string, Map<string, R>>();
+    for (const r of runsR.results as unknown as R[]) {
+      const m = runs.get(r.script) ?? new Map<string, R>();
+      m.set(r.hour, r);
+      runs.set(r.script, m);
+    }
+    crons = [];
+    for (const s of schedules) {
+      if (!inScopeNames.has(s.script)) continue;
+      const stat = cronStats(s.script, parse<string[]>(s.crons, []), runs.get(s.script) ?? new Map(), cronWindow.from, cronWindow.to);
+      if (stat) crons.push(stat);
+    }
+  }
+  const scheduledCount = rows.filter((w) => parse<string[]>(w.handlers, []).includes('scheduled')).length;
+  const cronTotal = schedules.length >= scheduledCount ? schedules.reduce((n, s) => n + parse<string[]>(s.crons, []).length, 0) : null;
+
+  // Resources.
+  type Res = { kind: string; id: string; name: string | null; script: string | null; extra: string | null };
+  const res = resR.results as unknown as Res[];
+  const labelOf = new Map(res.map((r) => [`${r.kind}|${r.id}`, r.name ?? r.id]));
+  const bindingOwner = new Map<string, string>();
+  for (const m of meta) for (const b of m.bindings ?? []) if (b.target && !bindingOwner.has(b.target)) bindingOwner.set(b.target, m.name);
+  type Op = { kind: ResourceStats['kind']; resource: string; hour: string; ops: number };
+  const opsBy = new Map<string, Op[]>();
+  for (const o of opsR.results as unknown as Op[]) {
+    const k = `${o.kind}|${o.resource}`;
+    opsBy.set(k, [...(opsBy.get(k) ?? []), o]);
+  }
+  const resources: ResourceStats[] = [...opsBy.entries()].map(([k, list]) => {
+    const [kind, resource] = k.split('|') as [ResourceStats['kind'], string];
+    const last = list.find((o) => o.hour === lastFullHour);
+    const before = list.filter((o) => o.hour < lastFullHour);
+    const label = kind === 'do' ? `Durable Objects in ${resource}` : (labelOf.get(`${kind}|${resource}`) ?? resource);
+    const script = kind === 'do' ? resource : (bindingOwner.get(resource) ?? '*');
+    return { kind, resource, label, script, lastHour: last?.ops ?? 0, median7d: median(before.map((o) => o.ops)), historyHours: before.length + (last ? 1 : 0) };
+  });
+
+  const firstMetrics = settings.first_metrics_at ? new Date(settings.first_metrics_at).getTime() : now.getTime();
+  const inventory: InventoryFacts = {
+    bindingsComplete: allRows.every((w) => w.detail_checked_at),
+    refreshed: Boolean(settings.inventory_at) || res.length > 0,
+    storage: res.filter((r) => ['kv', 'd1', 'r2', 'queues'].includes(r.kind)).map((r) => ({ kind: r.kind as 'kv', id: r.id, name: r.name })),
+    routes: res.filter((r) => r.kind === 'route').map((r) => ({ id: r.id, pattern: r.name ?? '', script: r.script })),
+    domains: res.filter((r) => r.kind === 'domain').map((r) => ({ id: r.id, hostname: r.name ?? '', script: r.script })),
+    accessDomains: config.modules.access && res.some((r) => r.kind === 'access')
+      ? res.filter((r) => r.kind === 'access').flatMap((r) => parse<{ domains?: string[] }>(r.extra, {}).domains ?? [])
+      : null,
+    workersSubdomain: subdomain || null,
+    trackingDays: Math.floor((now.getTime() - firstMetrics) / DAY),
+    retentionDays: config.retentionDays,
+  };
+
+  return {
+    accountToday: (todayR.results[0] as { n: number }).n,
+    stats,
+    meta,
+    crons,
+    cronTotal,
+    resources,
+    inventory,
+    thresholdsFor: tf,
+  };
+}
+
+/** Expected vs observed runs in [from, to), plus how many of the latest expected slots went bad in a row. */
+export function cronStats(
+  name: string, exprs: string[], runs: Map<string, { runs: number; failures: number; cpu_max_ms: number | null }>, from: Date, to: Date,
+): CronStats | null {
+  let expected = 0;
+  const slots: { hour: string; expected: number }[] = [];
+  for (let t = from.getTime(); t < to.getTime(); t += HOUR) {
+    let n = 0;
+    for (const expr of exprs) {
       try {
-        expected += countRuns(expr, from, to);
+        n += countRuns(expr, new Date(t), new Date(t + HOUR));
       } catch {
         // Unsupported expression: skip rather than raise a false alarm.
       }
     }
-    const r = runsBy.get(s.script);
-    if (expected > 0) out.push({ name: s.script, expected, observed: r?.runs ?? 0, failures: r?.failures ?? 0 });
+    if (n) slots.push({ hour: isoHour(new Date(t)), expected: n });
+    expected += n;
   }
-  return out;
+  if (!expected) return null;
+  let observed = 0;
+  let failures = 0;
+  let cpuMaxMs: number | null = null;
+  for (const r of runs.values()) {
+    observed += r.runs;
+    failures += r.failures;
+    if (r.cpu_max_ms != null) cpuMaxMs = Math.max(cpuMaxMs ?? 0, r.cpu_max_ms);
+  }
+  let consecutiveBad = 0;
+  for (let i = slots.length - 1; i >= 0; i--) {
+    const r = runs.get(slots[i].hour);
+    const bad = Math.max(0, slots[i].expected - (r?.runs ?? 0)) + (r?.failures ?? 0);
+    if (!bad) break;
+    consecutiveBad += bad;
+  }
+  return { name, expected, observed, failures, consecutiveBad, cpuMaxMs };
 }
 
 async function saveFindings(db: D1Database, findings: Finding[], stamp: string): Promise<void> {

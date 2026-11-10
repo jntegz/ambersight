@@ -1,24 +1,39 @@
-// Ambersight Worker: JSON API for the dashboard plus the hourly scan.
+// Ambersight Worker: JSON API for the dashboard plus the scheduled scan.
 // Static assets (the Svelte UI) are served by Cloudflare before this code runs.
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { Hono } from 'hono';
-import { hasSession, login, logout } from './auth';
+import { ConfigError, defaultConfig, isValidTimeZone, parseConfig } from '../shared/config';
+import { hasSession, hashPassphrase, checkPassphrase, login, logout } from './auth';
+import { configFrom, getSettings, recordUsage, setSettings } from './db';
 import type { Env } from './env';
-import { buildOverview } from './overview';
+import { metered } from './meter';
+import { sendTest } from './notify';
+import { buildOverview, buildSelfCost, buildTimeline } from './overview';
 import { runScan } from './scan';
+import { setupStatus } from './setup';
+import { VERSION } from './version';
 
 const app = new Hono<{ Bindings: Env }>();
 
-// Security headers on every API response.
+// Security headers on every API response, and the app's own request count for the Self-cost panel.
 app.use('/api/*', async (c, next) => {
+  const { db, meter } = metered(c.env.DB);
+  const raw = c.env.DB;
+  c.env = { ...c.env, DB: db };
   await next();
   c.header('Cache-Control', 'no-store');
   c.header('X-Content-Type-Options', 'nosniff');
   c.header('Referrer-Policy', 'no-referrer');
+  const write = recordUsage(raw, new Date(), { apiRequests: 1, rowsRead: meter.rowsRead, rowsWritten: meter.rowsWritten }).run().catch(() => {});
+  try {
+    c.executionCtx.waitUntil(write);
+  } catch {
+    await write; // no execution context (tests)
+  }
 });
 
-app.get('/api/health', (c) => c.json({ ok: true }));
+app.get('/api/health', (c) => c.json({ ok: true, version: VERSION }));
 
 app.get('/api/session', async (c) => c.json({ authenticated: await hasSession(c.env, c.req.header('Cookie') ?? null) }));
 
@@ -43,11 +58,10 @@ app.use('/api/*', async (c, next) => {
 });
 
 app.get('/api/overview', async (c) => c.json(await buildOverview(c.env)));
+app.get('/api/timeline', async (c) => c.json(await buildTimeline(c.env, Math.min(30, Math.max(1, Number(c.req.query('days')) || 14)))));
+app.get('/api/self-cost', async (c) => c.json(await buildSelfCost(c.env)));
 
-app.post('/api/scan', async (c) => {
-  const result = await runScan(c.env);
-  return c.json(result);
-});
+app.post('/api/scan', async (c) => c.json(await runScan(c.env, new Date(), { force: true })));
 
 app.post('/api/findings/:id/acknowledge', async (c) => {
   await c.env.DB.prepare(`UPDATE findings SET status = 'acknowledged' WHERE id = ?1 AND status = 'open'`).bind(c.req.param('id')).run();
@@ -64,6 +78,76 @@ app.post('/api/findings/:id/snooze', async (c) => {
   return c.json({ ok: true, until });
 });
 
+// ---- Setup wizard ----------------------------------------------------------
+
+app.get('/api/setup', async (c) => c.json(await setupStatus(c.env)));
+
+app.post('/api/setup/complete', async (c) => {
+  const body = await c.req.json<{ timeZone?: unknown; confirmReadOnly?: unknown }>().catch(() => ({}) as Record<string, unknown>);
+  const status = await setupStatus(c.env);
+  if (!status.tokenActive) return c.json({ error: status.tokenError ?? 'The API token is not active.' }, 400);
+  if (status.writeScopes?.length) {
+    return c.json({ error: `The token has write permissions (${status.writeScopes.join(', ')}). Create a read-only token and update CF_API_TOKEN.` }, 400);
+  }
+  if (status.writeScopes == null && body.confirmReadOnly !== true) {
+    return c.json({ error: 'Ambersight cannot read this token\'s permissions. Confirm that it has read permissions only.' }, 400);
+  }
+  const settings = await getSettings(c.env.DB);
+  const config = settings.config ? configFrom(settings) : defaultConfig();
+  if (typeof body.timeZone === 'string' && isValidTimeZone(body.timeZone)) config.timeZone = body.timeZone;
+  if (status.detectedPlan === 'paid' && config.scanIntervalMinutes === 60 && !settings.config) config.scanIntervalMinutes = 15;
+  await setSettings(c.env.DB, {
+    setup_done: '1',
+    config: JSON.stringify(config),
+    account_id: status.accountId ?? '',
+    ...(status.detectedPlan ? { detected_plan: status.detectedPlan } : {}),
+  }).run();
+  // First scan runs in the background; the overview fills in as results arrive.
+  c.executionCtx.waitUntil(runScan(c.env, new Date(), { force: true }).catch((e) => console.error(e)));
+  return c.json({ ok: true });
+});
+
+// ---- Settings --------------------------------------------------------------
+
+app.get('/api/config', async (c) => c.json(configFrom(await getSettings(c.env.DB))));
+
+app.put('/api/config', async (c) => {
+  const body = await c.req.json().catch(() => null);
+  try {
+    const config = parseConfig(body);
+    await setSettings(c.env.DB, { config: JSON.stringify(config) }).run();
+    return c.json(config);
+  } catch (e) {
+    if (e instanceof ConfigError) return c.json({ error: e.message }, 400);
+    throw e;
+  }
+});
+
+app.post('/api/notify/test', async (c) => {
+  const { channel } = await c.req.json<{ channel?: string }>().catch(() => ({ channel: '' }));
+  if (channel !== 'email' && channel !== 'webhook') return c.json({ error: 'channel must be email or webhook.' }, 400);
+  try {
+    await sendTest(c.env, channel);
+    return c.json({ ok: true });
+  } catch (e) {
+    return c.json({ error: (e as Error).message }, 400);
+  }
+});
+
+app.post('/api/passphrase', async (c) => {
+  const body = await c.req.json<{ current?: unknown; next?: unknown }>().catch(() => ({}) as Record<string, unknown>);
+  if (typeof body.current !== 'string' || typeof body.next !== 'string') return c.json({ error: 'Current and new passphrase required.' }, 400);
+  if (body.next.length < 12 || body.next.length > 512) return c.json({ error: 'The new passphrase needs at least 12 characters.' }, 400);
+  const settings = await getSettings(c.env.DB);
+  if (!(await checkPassphrase(c.env, body.current, settings.passphrase_hash))) return c.json({ error: 'The current passphrase is wrong.' }, 401);
+  await c.env.DB.batch([
+    setSettings(c.env.DB, { passphrase_hash: await hashPassphrase(body.next) }),
+    // Sign out every other session.
+    c.env.DB.prepare('DELETE FROM sessions'),
+  ]);
+  return c.json({ ok: true });
+});
+
 app.notFound((c) => c.json({ error: 'Not found.' }, 404));
 app.onError((err, c) => {
   console.error(err);
@@ -73,6 +157,6 @@ app.onError((err, c) => {
 export default {
   fetch: app.fetch,
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(runScan(env).then((r) => console.log(JSON.stringify({ scan: r }))));
+    ctx.waitUntil(runScan(env).then((r) => (r.skipped ? undefined : console.log(JSON.stringify({ scan: r })))));
   },
 } satisfies ExportedHandler<Env>;

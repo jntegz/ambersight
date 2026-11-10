@@ -28,6 +28,9 @@
   --chip: var(--orange-100);
   --chip-text: var(--orange-900);
   --row-tint: var(--orange-50);
+  --button-text: #fff;
+  --shadow-card: 0 1px 2px rgba(43, 33, 27, 0.05);
+  --shadow-lift: 0 10px 28px -12px rgba(43, 33, 27, 0.22);
 
   --font: 'Inter Variable', Inter, system-ui, sans-serif;
   --mono: ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, monospace;
@@ -37,13 +40,14 @@
   color-scheme: light dark;
 }
 
+/* Dark theme: neutral charcoal. Follows the system unless the user picks a theme. */
 @media (prefers-color-scheme: dark) {
-  :root {
-    --paper: #1c1612;
-    --surface: #251e19;
-    --line: #3a2f28;
-    --ink: #f5ede6;
-    --ink-muted: #b5a79c;
+  :root:not([data-theme="light"]) {
+    --paper: #111214;
+    --surface: #1a1b1e;
+    --line: #2c2e33;
+    --ink: #ececee;
+    --ink-muted: #9fa2a9;
     --critical: #ff6b4e;
     --healthy: #6bc08a;
     --accent: var(--orange-400);
@@ -51,11 +55,39 @@
     --warning-text: var(--orange-400);
     --button: var(--orange-400);
     --button-hover: var(--orange-200);
-    --chip: #3d2a1d;
+    --button-text: #111214;
+    --shadow-card: none;
+    --shadow-lift: 0 10px 28px -12px rgba(0, 0, 0, 0.7);
+    --chip: rgba(255, 138, 61, 0.16);
     --chip-text: var(--orange-200);
-    --row-tint: #2b211b;
+    --row-tint: #1f2024;
+    color-scheme: dark;
   }
 }
+
+:root[data-theme="dark"] {
+  --paper: #111214;
+  --surface: #1a1b1e;
+  --line: #2c2e33;
+  --ink: #ececee;
+  --ink-muted: #9fa2a9;
+  --critical: #ff6b4e;
+  --healthy: #6bc08a;
+  --accent: var(--orange-400);
+  --accent-text: var(--orange-400);
+  --warning-text: var(--orange-400);
+  --button: var(--orange-400);
+  --button-hover: var(--orange-200);
+  --button-text: #111214;
+  --shadow-card: none;
+  --shadow-lift: 0 10px 28px -12px rgba(0, 0, 0, 0.7);
+  --chip: rgba(255, 138, 61, 0.16);
+  --chip-text: var(--orange-200);
+  --row-tint: #1f2024;
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] { color-scheme: light; }
 
 * { box-sizing: border-box; }
 
@@ -65,6 +97,14 @@ html, body {
   color: var(--ink);
   font: 400 16px/24px var(--font);
   -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'cv11', 'ss01';
+}
+
+body {
+  min-height: 100vh;
+  background:
+    radial-gradient(1100px 420px at 50% -220px, color-mix(in srgb, var(--accent) 9%, transparent), transparent 70%) no-repeat,
+    var(--paper);
 }
 
 h1, h2, h3, p { margin: 0; }
@@ -84,9 +124,8 @@ button {
   cursor: pointer;
 }
 button:hover { border-color: var(--ink-muted); }
-button.primary { background: var(--button); border-color: var(--button); color: #fff; font-weight: 600; }
+button.primary { background: var(--button); border-color: var(--button); color: var(--button-text); font-weight: 600; }
 button.primary:hover { background: var(--button-hover); border-color: var(--button-hover); }
-@media (prefers-color-scheme: dark) { button.primary { color: #1c1612; } }
 button:disabled { opacity: 0.6; cursor: default; }
 
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -99,6 +138,7 @@ button:disabled { opacity: 0.6; cursor: default; }
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
 }
 
 .sr-only {
@@ -110,3 +150,61 @@ button:disabled { opacity: 0.6; cursor: default; }
   .draw path { stroke-dasharray: 120; stroke-dashoffset: 120; animation: draw 400ms ease-out forwards; }
 }
 @keyframes draw { to { stroke-dashoffset: 0; } }
+
+/* ---- Forms (Settings, Setup) ---- */
+.field { display: grid; gap: 6px; min-width: 0; }
+.field > .label { font-size: 13px; line-height: 18px; font-weight: 500; }
+.hint { font-size: 12px; line-height: 16px; color: var(--ink-muted); }
+.input, .select-input, textarea.input {
+  height: 36px; padding: 0 12px; width: 100%;
+  border: 1px solid var(--line); border-radius: var(--radius-control);
+  background: var(--paper); color: var(--ink); font-size: 14px;
+  transition: border-color 150ms, box-shadow 150ms;
+}
+textarea.input { height: auto; min-height: 72px; padding: 8px 12px; line-height: 20px; resize: vertical; font-family: var(--mono); font-size: 13px; }
+.select-input { padding-right: 32px; appearance: none; cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239fa2a9' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 12px center; }
+.input:hover, .select-input:hover { border-color: color-mix(in srgb, var(--ink-muted) 45%, var(--line)); }
+.input:focus, .select-input:focus { outline: none; border-color: color-mix(in srgb, var(--accent) 70%, var(--line)); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 12%, transparent); }
+.input[aria-invalid='true'] { border-color: var(--critical); }
+.input.short { width: 120px; }
+.error-text { font-size: 13px; line-height: 18px; color: var(--critical); }
+.success-text { font-size: 13px; line-height: 18px; color: var(--healthy); }
+button.ghost { background: transparent; border-color: transparent; color: var(--ink-muted); }
+button.ghost:hover { color: var(--ink); background: var(--surface); border-color: var(--line); }
+button.danger { color: var(--critical); }
+button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; font-size: 14px; }
+
+/* ---- Page primitives shared by Overview, Timeline and Settings ---- */
+.page { max-width: 1200px; margin: 0 auto; padding: 28px 24px; display: grid; gap: 20px; }
+.page-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 4px; }
+.page-head h1 { font-size: 26px; line-height: 32px; font-weight: 600; letter-spacing: -0.02em; }
+.page-head p { font-size: 14px; color: var(--ink-muted); margin-top: 4px; }
+.section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+.section-head h2 { display: flex; align-items: center; gap: 8px; font-size: 18px; letter-spacing: -0.01em; }
+.count { font-size: 12px; line-height: 20px; font-weight: 600; padding: 0 8px; border-radius: 999px; background: var(--line); color: var(--ink-muted); font-variant-numeric: tabular-nums; }
+.seg { display: flex; gap: 2px; padding: 3px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); }
+.seg button { border-radius: 999px; font-size: 13px; min-height: 28px; padding: 0 12px; border-color: transparent; background: transparent; color: var(--ink-muted); white-space: nowrap; }
+.seg.icons button { padding: 0; width: 32px; }
+.seg button:hover { color: var(--ink); border-color: transparent; }
+.seg button[aria-pressed='true'] { background: var(--chip); color: var(--chip-text); font-weight: 600; }
+.seg .num { opacity: 0.7; }
+.select-pill { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 4px 0 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); font-size: 13px; }
+.select-pill select { border: 0; background: transparent; color: var(--ink); font: 600 13px var(--font); padding: 4px; cursor: pointer; }
+.select-pill:focus-within { border-color: var(--accent); }
+.select-pill select:focus-visible { outline: none; }
+.empty { margin: 0; padding: 28px; display: grid; justify-items: center; gap: 10px; text-align: center; }
+.empty-icon { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 50%; color: var(--healthy); background: color-mix(in srgb, var(--healthy) 14%, transparent); }
+.tag-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 5px; font-size: 11px; line-height: 16px; background: var(--line); color: var(--ink-muted); }
+.tag-chip.accent { background: var(--chip); color: var(--chip-text); }
+@media (prefers-reduced-motion: no-preference) {
+  /* backwards, not both: a finished animation must not leave a stacking context that clips menus. */
+  .page > * { animation: rise 520ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards; }
+  .page > :nth-child(2) { animation-delay: 60ms; }
+  .page > :nth-child(3) { animation-delay: 120ms; }
+  .page > :nth-child(4) { animation-delay: 180ms; }
+  .page > :nth-child(n + 5) { animation-delay: 240ms; }
+}
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } }
+@media (max-width: 760px) { .page { padding: 16px; gap: 16px; } }

@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 export type Severity = 'critical' | 'warning' | 'info';
-export type ModuleId = 'budget' | 'errors' | 'runaway' | 'cron';
+export type ModuleId =
+  | 'budget' | 'errors' | 'runaway' | 'cron' | 'usage'
+  | 'deprecation' | 'exposure' | 'zombies' | 'timeline';
 
 export interface Finding {
   id: string;
@@ -24,9 +26,14 @@ export interface WorkerSummary {
   requests24h: number;
   errors24h: number;
   spark: number[]; // requests per day, last 7 days, oldest first
+  spark24: number[]; // requests per hour, last 24 hours, oldest first
   deployedOn: string | null;
   handlers: string[];
+  groups: string[];
+  /** Public URLs: routes, custom domains, workers.dev. */
+  entryPoints: string[];
   topFinding: Finding | null;
+  latestFindingAt: string | null;
 }
 
 export interface BudgetStatus {
@@ -35,14 +42,61 @@ export interface BudgetStatus {
   usedToday: number;
   share: number; // 0..1
   projectedLimitAt: string | null; // ISO time the limit is projected to be hit today
+  warnAt: number;
+  criticalAt: number;
 }
 
 export interface Overview {
   lastScanAt: string | null;
+  setupDone: boolean;
+  update: { current: string; latest: string; url: string } | null;
   totals: { workers: number; needAttention: number; requestsToday: number; errorsToday: number };
   budget: BudgetStatus | null;
   findings: Finding[];
   workers: WorkerSummary[];
+  groups: string[];
+}
+
+export interface TimelineEntry {
+  script: string;
+  id: string;
+  createdOn: string;
+  author: string | null;
+  message: string | null;
+  source: string | null;
+  groups: string[];
+  /** Finding codes whose problem started within the correlation window after this deploy. */
+  correlated: string[];
+}
+
+export interface SetupStatus {
+  tokenActive: boolean;
+  tokenError: string | null;
+  accountId: string | null;
+  accountName: string | null;
+  detectedPlan: 'free' | 'paid' | null;
+  /** null = the token cannot read its own permissions, so scopes could not be checked. */
+  writeScopes: string[] | null;
+  readScopes: string[] | null;
+  email: { configured: boolean; from: string | null; to: string[] };
+  webhook: { configured: boolean; kind: string | null };
+  setupDone: boolean;
+  passphraseFromSettings: boolean;
+}
+
+export interface SelfCostDay {
+  day: string;
+  cronRuns: number;
+  apiRequests: number;
+  subrequests: number;
+  rowsRead: number;
+  rowsWritten: number;
+}
+
+export interface SelfCost {
+  days: SelfCostDay[];
+  lastScan: { at: string | null; subrequests: number; durationMs: number; warnings: string[] };
+  allowances: { requestsPerDay: number; subrequestsPerRun: number; rowsWrittenPerDay: number; rowsReadPerDay: number };
 }
 
 export const SEVERITY_WEIGHT: Record<Severity, number> = { critical: 10, warning: 3, info: 1 };
