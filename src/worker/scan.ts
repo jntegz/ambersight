@@ -13,7 +13,7 @@ import { median, runChecks, type CronStats, type HourPoint, type ResourceStats, 
 import { countRuns } from './cron';
 import { configFrom, getAccountState, getSettings, hourFloor, isoHour, planFrom, recordUsage, setAccountState, setSettings, upsertAccount, utcMidnight, type Settings } from './db';
 import type { Env } from './env';
-import type { InventoryFacts } from './hygiene';
+import { boundByMap, type InventoryFacts, type StorageKind4 } from './hygiene';
 import type { ChangeFacts } from './security';
 import { metered } from './meter';
 import { fetchIncidents, type Incident } from './incidents';
@@ -151,6 +151,9 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
   // 4. Storage and Durable Object operations, for kinds the account actually has.
   let resourceOps: ResourceOps[] = [];
   const quotaRows: QuotaRow[] = [];
+  // Storage kinds whose operations this scan read in full (not skipped for budget, not failed).
+  const opsCollected = new Set<string>();
+  const opsWindowFrom = hourFloor(since);
   if (config.modules.usage && !light) {
     const { results: kindRows } = await db.prepare(`SELECT DISTINCT kind FROM resources WHERE account = ?1 AND kind IN ('kv','d1','r2','queues')`).bind(accountId).all<{ kind: ResourceOps['kind'] }>();
     const kinds = kindRows.map((k) => k.kind);
@@ -166,6 +169,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
       const simple = new Set(retryFailed ? [] : (settings.ops_simple ?? '').split(',').filter(Boolean));
       const r = await cf.resourceOps(opsFrom, now, tryKinds, simple);
       resourceOps = r.rows;
+      for (const k of tryKinds) if (!r.failed.includes(k)) opsCollected.add(k);
       if (retryFailed || r.failed.length || r.downgraded.length) {
         settings.ops_unavailable = r.failed.join(',');
         settings.ops_simple = [...new Set([...simple, ...r.downgraded])].join(',');
@@ -199,6 +203,17 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
     for (const r of resourceOps) for (const [m, v] of Object.entries(r.metrics ?? {})) add(m as QuotaMetric, r.hour, v ?? 0);
     for (const r of quotaRows.splice(0)) add(r.metric, r.hour, r.value);
     quotaRows.push(...totals.values());
+  }
+  // Since when each storage kind's operations are known without a gap. "No operations in 30 days"
+  // is only claimed over this period: a kind skipped for budget, a failed dataset, the usage checks
+  // being off or two days without a scan all start it again. Written only when it changes.
+  if (!light) {
+    const prev = parseJson<Record<string, string>>(settings.ops_since, {});
+    const outage = settings.last_scan_at ? now.getTime() - new Date(settings.last_scan_at).getTime() > 48 * HOUR : false;
+    const next: Record<string, string> = {};
+    for (const k of ['d1', 'kv', 'queues', 'r2']) if (opsCollected.has(k)) next[k] = (!outage && prev[k]) || opsWindowFrom.toISOString();
+    const json = JSON.stringify(next);
+    if (json !== (settings.ops_since ?? '{}')) settings.ops_since = json;
   }
   // Workers requests and CPU per hour feed the cost estimate (and outlive the metrics retention).
   {
@@ -605,6 +620,16 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
          FROM json_each(?2) WHERE true
          ON CONFLICT(account, kind, resource, hour) DO UPDATE SET ops=excluded.ops WHERE resource_hourly.ops IS NOT excluded.ops`,
       ).bind(A, j(resourceOps)),
+      // The last hour each storage resource had operations, for the unused-storage checks (no
+      // rereading of 30 days of hourly rows). Written only when it moves forward.
+      db.prepare(
+        `INSERT INTO resource_activity (account, kind, resource, last_active_hour)
+         SELECT ?1, json_extract(value,'$.kind'), json_extract(value,'$.resource'), MAX(json_extract(value,'$.hour')) FROM json_each(?2)
+         WHERE json_extract(value,'$.ops') > 0 AND json_extract(value,'$.kind') IN ('kv','d1','r2','queues') GROUP BY 2, 3
+         ON CONFLICT(account, kind, resource) DO UPDATE SET last_active_hour = excluded.last_active_hour
+         -- At most one write per resource every 6 hours: the checks only need the day.
+         WHERE julianday(excluded.last_active_hour) - julianday(resource_activity.last_active_hour) >= 0.25`,
+      ).bind(A, j(resourceOps)),
     );
   }
   if (quotaRows.length) {
@@ -711,6 +736,18 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
       ).bind(A, j(refreshed.filter((r) => refreshedKinds.has(r.kind)).map((r) => ({ ...r, extra: r.extra ? j(r.extra) : null })))),
       // Retention, once per inventory refresh.
       ...retentionDeletes(db, A, now, config.retentionDays),
+      // Housekeeping progress for the overview, counted once a day instead of on every page load.
+      db.prepare(
+        `INSERT INTO account_state (account, key, value)
+         SELECT ?1, 'hk_resolved_7d', CAST(COUNT(*) AS TEXT) FROM findings
+         WHERE account = ?1 AND status = 'resolved' AND severity = 'info' AND last_seen >= ?2
+         ON CONFLICT(account, key) DO UPDATE SET value = excluded.value WHERE account_state.value IS NOT excluded.value`,
+      ).bind(A, new Date(now.getTime() - 7 * DAY).toISOString()),
+      // Last-activity rows of storage that no longer exists.
+      db.prepare(
+        `DELETE FROM resource_activity WHERE account = ?1 AND NOT EXISTS
+           (SELECT 1 FROM resources r WHERE r.account = ?1 AND r.kind = resource_activity.kind AND r.id = resource_activity.resource)`,
+      ).bind(A),
       // Packages of Workers that are gone or no longer mapped.
       db.prepare('DELETE FROM worker_packages WHERE account = ?1 AND script NOT IN (SELECT value FROM json_each(?2))')
         .bind(A, j(inventory.map((w) => w.name).filter((n) => repoFor(config, A, n)))),
@@ -723,6 +760,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
       ...(settings.cron_cpu ? { cron_cpu: settings.cron_cpu } : {}),
       ...(settings.ops_checked ? { ops_unavailable: settings.ops_unavailable ?? '', ops_simple: settings.ops_simple ?? '', ops_checked: settings.ops_checked } : {}),
       ...(settings.quota_unavailable != null ? { quota_unavailable: settings.quota_unavailable } : {}),
+      ...(settings.ops_since != null ? { ops_since: settings.ops_since } : {}),
       ...(settings.token_status ? { token_expires_on: settings.token_expires_on ?? '', token_status: settings.token_status } : {}),
       ...(settings.cf_alerts_at ? { cf_alerts_at: settings.cf_alerts_at } : {}),
       ...(settings.audit_at != null ? { audit_at: settings.audit_at } : {}),
@@ -938,6 +976,7 @@ interface WorkerRow {
 
 const bool = (v: number | null) => (v == null ? null : v === 1);
 const parse = <T>(s: string | null, fallback: T): T => (s ? (JSON.parse(s) as T) : fallback);
+const parseJson = <T>(s: string | undefined, fallback: T): T => parse(s ?? null, fallback);
 
 export interface Facts {
   accountToday: number;
@@ -967,7 +1006,7 @@ export async function loadFacts(
   const cronTo = cronWindow ? isoHour(cronWindow.to) : lastFullHour;
 
   const weekAgoIso = new Date(now.getTime() - 7 * DAY).toISOString();
-  const [workersR, histR, todayR, schedR, runsR, resR, opsR, depR, quotaR, storageR, latestR, removedR, auditR, d1qR] = await db.batch([
+  const [workersR, histR, todayR, schedR, runsR, resR, opsR, depR, quotaR, storageR, latestR, removedR, auditR, d1qR, activityR] = await db.batch([
     db.prepare('SELECT * FROM workers WHERE account = ?1').bind(account),
     db.prepare(
       `SELECT script, hour, requests, errors, subrequests, cpu_time_us, exceeded, cpu_p99 FROM metrics_hourly
@@ -992,6 +1031,8 @@ export async function loadFacts(
        WHERE account = ?1 AND at >= ?2 ORDER BY at DESC LIMIT 300`,
     ).bind(account, weekAgoIso),
     db.prepare('SELECT hash, database_id, query, rows_read, rows_returned, runs FROM d1_queries WHERE account = ?1').bind(account),
+    // One row per resource: the last hour it had operations, kept by every scan.
+    db.prepare('SELECT kind, resource, last_active_hour FROM resource_activity WHERE account = ?1').bind(account),
   ]);
 
   const allRows = workersR.results as unknown as WorkerRow[];
@@ -1162,10 +1203,27 @@ export async function loadFacts(
   });
 
   const firstMetrics = settings.first_metrics_at ? new Date(settings.first_metrics_at).getTime() : now.getTime();
+  const storageRes = res.filter((r) => ['kv', 'd1', 'r2', 'queues'].includes(r.kind)).map((r) => ({ kind: r.kind as StorageKind4, id: r.id, name: r.name, extra: r.extra }));
+  // Bound by any Worker, in scope or not: a resource another team's Worker uses is not a leftover.
+  // In-scope Workers' bindings are already parsed in meta; only the others are parsed here.
+  const parsedBindings = new Map(meta.map((m) => [m.name, m.bindings]));
+  const storageOwners = boundByMap(
+    allRows.map((w) => ({ name: w.name, bindings: parsedBindings.has(w.name) ? parsedBindings.get(w.name)! : w.detail_checked_at ? parse<{ type: string; target?: string }[]>(w.bindings, []) : null })),
+    storageRes,
+  );
+  const lastOps = new Map((activityR.results as { kind: string; resource: string; last_active_hour: string }[]).map((a) => [`${a.kind}|${a.resource}`, a.last_active_hour]));
+  const sizeOf = new Map((storageR.results as { kind: string; id: string; bytes: number; objects: number | null }[]).map((z) => [`${z.kind}|${z.id}`, z]));
   const inventory: InventoryFacts = {
     bindingsComplete: allRows.every((w) => w.detail_checked_at),
     refreshed: Boolean(settings.inventory_at) || res.length > 0,
-    storage: res.filter((r) => ['kv', 'd1', 'r2', 'queues'].includes(r.kind)).map((r) => ({ kind: r.kind as 'kv', id: r.id, name: r.name, inUse: parse<{ inUse?: boolean }>(r.extra, {}).inUse === true })),
+    storage: storageRes.map((r) => ({
+      kind: r.kind, id: r.id, name: r.name, inUse: parse<{ inUse?: boolean }>(r.extra, {}).inUse === true,
+      boundBy: storageOwners.get(`${r.kind}|${r.id}`) ?? [],
+      lastActiveHour: lastOps.get(`${r.kind}|${r.id}`) ?? null,
+      bytes: sizeOf.get(`${r.kind}|${r.id}`)?.bytes ?? null,
+      objects: sizeOf.get(`${r.kind}|${r.id}`)?.objects ?? null,
+    })),
+    activitySince: parse<InventoryFacts['activitySince']>(settings.ops_since ?? null, {}),
     routes: res.filter((r) => r.kind === 'route').map((r) => ({ id: r.id, pattern: r.name ?? '', script: r.script })),
     domains: res.filter((r) => r.kind === 'domain').map((r) => ({ id: r.id, hostname: r.name ?? '', script: r.script })),
     // A successful listing with zero apps means nothing is covered, not that the check is off.

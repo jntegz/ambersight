@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { groupsFor, type Config } from '../shared/config';
+import { isHiddenEvidence } from '../shared/findings';
 import type { Severity } from '../shared/types';
 import { getSettings, isoHour, setSettings } from './db';
 import type { Env } from './env';
@@ -35,6 +36,7 @@ export function evidenceText(e?: string): string {
   if (!e) return '';
   try {
     return Object.entries(JSON.parse(e) as Record<string, unknown>)
+      .filter(([k]) => !isHiddenEvidence(k))
       .map(([k, v]) => `${k.replace(/([A-Z])/g, ' $1').toLowerCase()}: ${typeof v === 'number' ? n(v) : v}`)
       .join(' · ');
   } catch {

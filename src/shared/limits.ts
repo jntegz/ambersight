@@ -104,3 +104,14 @@ export const PRICES = {
 export function unitPrice(metric: QuotaMetric): number {
   return PRICES.items.find((p) => p.metric === metric)?.perUnit ?? 0;
 }
+
+/** "120 MB", rounded so a finding is not rewritten for every byte that changes. */
+export function fmtBytes(n: number): string {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (n >= 1000 && i < units.length - 1) {
+    n /= 1000;
+    i++;
+  }
+  return `${n >= 100 || i === 0 ? Math.round(n) : Number(n.toPrecision(2))} ${units[i]}`;
+}

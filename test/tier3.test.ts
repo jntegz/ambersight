@@ -112,7 +112,7 @@ describe('digest', () => {
   it('adds a plain-language summary from Workers AI when switched on, and skips it on failure', async () => {
     const e = newEnv({ AI: { run: async () => ({ response: 'Fix the public preview URLs on api first — then the cron.' }) } });
     const config = defaultConfig();
-    const d = [{ id: 'a', label: 'A', plan: 'free' as const, rows: [{ id: '1', script: 'api', severity: 'critical' as const, message: 'Preview URLs are public', action: 'x' }], requests: 0, errors: 0, added: [], removed: [], deploys: [], headroom: [], movers: [], cost: null, cfAlerts: 0, tags: new Map() }];
+    const d = [{ id: 'a', label: 'A', plan: 'free' as const, rows: [{ id: '1', script: 'api', severity: 'critical' as const, message: 'Preview URLs are public', action: 'x' }], requests: 0, errors: 0, added: [], removed: [], deploys: [], headroom: [], movers: [], cost: null, cfAlerts: 0, housekeeping: { open: 0, resolved: 0 }, tags: new Map() }];
     expect(await aiSummary(e, config, d)).toBeNull(); // off by default
     config.digest.aiSummary = true;
     expect(await aiSummary(e, config, d)).toBe('Fix the public preview URLs on api first , then the cron.');

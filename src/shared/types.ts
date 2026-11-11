@@ -110,6 +110,13 @@ export interface Overview {
   /** Optional bindings present on this install. */
   features: { queue: boolean; ai: boolean; turnstile: boolean; github: boolean };
   findings: Finding[];
+  /** What removing unused storage would free, and housekeeping resolved in the last 7 days. */
+  housekeeping: {
+    frees: { kind: 'd1' | 'kv' | 'r2' | 'do'; bytes: number; share: number | null }[];
+    /** Estimated monthly storage cost saved; null without the cost estimate. */
+    monthlySaving: number | null;
+    resolvedThisWeek: number;
+  };
   workers: WorkerSummary[];
   groups: string[];
 }
@@ -189,6 +196,28 @@ export const SEVERITY_WEIGHT: Record<Severity, number> = { critical: 10, warning
 
 /** How far a locked package version is behind the latest release on npm. */
 export type Gap = 'major' | 'minor' | 'patch' | 'none' | 'unknown';
+
+/** The Resources page: every KV namespace, D1 database, R2 bucket and queue, and who uses it. */
+export interface ResourcesView {
+  /** False until the first inventory refresh and every Worker's bindings are in. */
+  ready: boolean;
+  /** Days without operations after which bound storage counts as idle. */
+  windowDays: number;
+  resources: {
+    kind: 'kv' | 'd1' | 'r2' | 'queues';
+    id: string;
+    name: string;
+    boundBy: string[];
+    /** Used without a binding: a queue consumer or a dead-letter queue. */
+    inUse: boolean;
+    lastActiveHour: string | null;
+    /** quiet: no operations in windowDays. unknown: this kind's operations are not read, or not for that long yet. */
+    activity: 'recent' | 'earlier' | 'quiet' | 'unknown';
+    bytes: number | null;
+    objects: number | null;
+    status: 'in-use' | 'idle' | 'unbound' | 'outside';
+  }[];
+}
 
 /** The Packages page (optional check). */
 export interface PackagesView {

@@ -26,7 +26,7 @@ You have a dozen Workers, maybe fifty. One is quietly burning through the free p
 
 The Cloudflare dashboard shows you each Worker on its own. **Ambersight shows you the fleet** and tells you which Workers need attention, and why, in plain sentences.
 
-It runs as **one Worker in your own Cloudflare account**. Every hour it reads your Workers' settings and metrics with a read-only API token, runs 76 checks, and gives you a ranked list of what to fix. One install can watch every account the token can see. Alerts go to e-mail, Slack, Discord, Telegram or any webhook.
+It runs as **one Worker in your own Cloudflare account**. Every hour it reads your Workers' settings and metrics with a read-only API token, runs 80 checks, and gives you a ranked list of what to fix. One install can watch every account the token can see. Alerts go to e-mail, Slack, Discord, Telegram or any webhook.
 
 - **On the Free plan**, the risk is an outage. Past 100,000 requests in a day, every Worker in the account answers with Error 1027 until midnight UTC, and the same goes for 1,000 KV writes, 5 million D1 rows read and the other daily limits. Ambersight warns you at 70% and again at 90% of each one, with the time you will hit it at today's pace.
 - **On Workers Paid**, the risk is the bill. There is no hard spending cap, so a loop, a retry storm or a crawler is billed for every hour it runs. Ambersight compares each Worker's last hour with its usual hour and alerts you at 5x, for requests, CPU time, subrequests and D1, KV, R2, Queues and Durable Object operations. It also catches Durable Object or Queue work that runs while nobody uses the app, and shows the estimated bill in dollars.
@@ -35,6 +35,9 @@ It runs as **one Worker in your own Cloudflare account**. Every hour it reads yo
 > - **Explain in plain words** on every finding: what it means, why it matters, and numbered steps with where to click, for people new to Cloudflare.
 > - **Clean up leftovers**: unused KV, D1, R2, queues and idle Workers show the exact `wrangler` command to remove them (a backup first for D1). Ambersight still never deletes anything.
 > - **Export .md**: save **Needs attention** or **Housekeeping** as a Markdown checklist, with every cleanup command in one block.
+> - **Safe to remove?** Unused storage findings show when it was last used (from any source), its size and whether it is empty. Storage still in use from outside Workers gets no delete command.
+> - **Bound but idle**: KV, D1, R2 and queues a Worker binds but has not used in 30 days.
+> - **Resources page**: every KV, D1, R2 and queue with who binds it, size, last use and status, plus what deleting the leftovers would free.
 > - **Packages (opt-in)**: each direct npm dependency of a Worker as *locked → latest*, with a warning when one is a major version behind.
 >
 > **New in 0.1.1**
@@ -63,7 +66,7 @@ It runs as **one Worker in your own Cloudflare account**. Every hour it reads yo
 | **Security** | a member or API token is added, a certificate is about to expire or stuck, or a DNS record points at a deleted Pages project anyone could claim. |
 | **Deprecations** | a Worker still uses Service Worker syntax, an old compatibility date, the legacy usage model, Workers Sites or redundant flags. |
 | **Exposure** | preview URLs are public, a forgotten `workers.dev` hostname still answers, or (optional) a URL is not behind Cloudflare Access. |
-| **Zombies and orphans** | Workers with no traffic or never deployed; KV, D1, R2 and Queues bound to nothing; routes and service bindings that point at deleted Workers. Each one comes with the exact command or dashboard step to remove it. |
+| **Zombies and orphans** | Workers with no traffic or never deployed; KV, D1, R2 and Queues bound to nothing or bound but never used, with when each was last used; routes and service bindings that point at deleted Workers. Each one comes with the exact command or dashboard step to remove it. |
 | **Log costs** | a busy Worker logs every request at 100% sampling (logs are billed per GB from 1 December 2026), the Free plan's 0.5 GB a day will run out, Logpush is still on, or a D1 query reads millions of rows to return a few. |
 | **Packages** (opt-in) | a Worker's direct npm dependency is a major version behind the latest release, read from `package-lock.json` in its GitHub repository. |
 | **Ambersight itself** | its API token is about to expire, or scans keep failing. |
@@ -378,7 +381,7 @@ No. It is an independent open-source project built on Cloudflare's public APIs. 
 
 ## Documentation
 
-- [Checks](docs/checks.md): all 76 checks, with thresholds, IDs and fixes
+- [Checks](docs/checks.md): all 80 checks, with thresholds, IDs and fixes
 - [How it works](docs/how-it-works.md): what one scan does, what it stores and how it stays inside the free plan
 - [Alerts](docs/alerts.md): channels, defaults, the digest and message formats
 - [Configuration](docs/configuration.md): `wrangler.jsonc`, secrets and every `config.json` field

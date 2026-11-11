@@ -85,9 +85,21 @@ const deleteWithCare = (thing: string, extra: string[] = []): CheckHelp => ({
   what: `This ${thing} is not connected (bound) to any Worker. It often happens after you delete a Worker: Cloudflare deletes the code but keeps its data.`,
   why: 'Leftover storage is clutter, can hold old personal data, and counts against your storage limits. It costs nothing to keep a small one.',
   steps: [
-    'Make sure nothing else uses it. Some apps use storage directly through the Cloudflare API or other tools, without a Worker.',
+    'Make sure nothing else uses it. Some apps use storage directly through the Cloudflare API or other tools, without a Worker. "Last used" on the finding shows the last operations Ambersight saw, from any source: "none in 30 days" is a good sign it is safe to remove.',
     ...extra,
     'Open "How to remove it" on the finding and run the command shown in a terminal, logged in with npx wrangler login. Ambersight never deletes anything itself.',
+  ],
+});
+
+/** Storage still bound to a Worker that never uses it. */
+const boundIdle = (thing: string, extra: string[] = []): CheckHelp => ({
+  what: `This ${thing} is connected (bound) to one or more Workers, but nothing has read from it or written to it for the whole period Ambersight looked at. Usually the code that used it was removed but the binding stayed in the Wrangler config.`,
+  why: 'It is clutter, can hold old personal data and counts against your storage limits. Because it is still bound, deleting it without removing the binding first makes those Workers fail when they next try to use it.',
+  steps: [
+    'Check the Workers listed under "Bound to": search their code for the binding name. Yearly jobs and backups can look idle for a long time.',
+    'Remove the binding from each Worker\'s Wrangler config (wrangler.jsonc or wrangler.toml) and redeploy.',
+    ...extra,
+    'Then open "How to remove it" on the finding and run the command shown, logged in with npx wrangler login. Ambersight never deletes anything itself.',
   ],
 });
 
@@ -428,7 +440,7 @@ export const CHECK_HELP: Record<string, CheckHelp> = {
     steps: [
       'Make sure it is really unused (a yearly job, or a backup endpoint, may look idle).',
       'Delete it: open "How to remove it" for the command, or Workers & Pages › the Worker › Settings › Delete.',
-      'Deleting a Worker keeps its KV, D1, R2 and queues. They show up here later as unused storage, so you can remove them too.',
+      'Deleting a Worker keeps its KV, D1, R2 and queues. "Leaves behind" on the finding lists the storage only this Worker uses, and "How to remove it" has the commands to delete it too.',
     ],
   },
   'zombies:never-deployed': {
@@ -463,6 +475,10 @@ export const CHECK_HELP: Record<string, CheckHelp> = {
   'zombies:unbound-d1': deleteWithCare('D1 database', ['The commands under "How to remove it" make a backup file first.']),
   'zombies:unbound-r2': deleteWithCare('R2 bucket (file storage)', ['R2 is often used directly by other apps through its S3 API or a public URL. Check before deleting.', 'A bucket must be empty before it can be deleted.']),
   'zombies:unbound-queues': deleteWithCare('queue', ['Messages still waiting in the queue are lost when you delete it.']),
+  'zombies:bound-idle-kv': boundIdle('KV namespace (key-value storage)', ['Look inside first: Storage & Databases › KV › the namespace › KV Pairs.']),
+  'zombies:bound-idle-d1': boundIdle('D1 database', ['The commands under "How to remove it" make a backup file first.']),
+  'zombies:bound-idle-r2': boundIdle('R2 bucket (file storage)', ['A bucket must be empty before it can be deleted.']),
+  'zombies:bound-idle-queues': boundIdle('queue', ['Messages still waiting in the queue are lost when you delete it.']),
 
   // ---- Pages
   'pages:deploy-failed': {

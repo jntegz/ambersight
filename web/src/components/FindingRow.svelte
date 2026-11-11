@@ -1,7 +1,7 @@
 <!-- One finding: severity, sentence, evidence, action, acknowledge and snooze. -->
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <script lang="ts">
-  import { checkOf, cleanupFor } from '../../../src/shared/findings';
+  import { checkOf, cleanupFor, isHiddenEvidence } from '../../../src/shared/findings';
   import CheckExplain from './CheckExplain.svelte';
   import type { Finding } from '../../../src/shared/types';
   import { timeAgo, workerId } from '../lib/api';
@@ -36,7 +36,7 @@
     } catch {}
   }
   const evidence = $derived(
-    Object.entries(finding.evidence).map(([k, v]) => {
+    Object.entries(finding.evidence).filter(([k]) => !isHiddenEvidence(k)).map(([k, v]) => {
       const label = k.replace(/([A-Z])/g, ' $1').toLowerCase(); // inARow -> in a row, d1 -> d1
       return { label: label[0].toUpperCase() + label.slice(1), value: typeof v === 'number' ? v.toLocaleString('en-US') : ISO.test(v) ? when(v) : v };
     }),
@@ -75,7 +75,7 @@
     {#if cleanup}
       <details class="cleanup">
         <summary>How to remove it</summary>
-        <p class="hint">{cleanup.note}{#if cleanup.commands.length} Ambersight is read-only and never runs these; they delete for good.{/if}</p>
+        <p class="hint">{cleanup.note}{#if cleanup.commands.length}{' '}Ambersight is read-only and never runs these; they delete for good.{/if}</p>
         {#each cleanup.commands as c (c)}
           <div class="cmd"><code class="mono">{c}</code><button type="button" class="ghost small" onclick={() => copy(c)}>{copied === c ? 'Copied' : 'Copy'}</button></div>
         {/each}
@@ -98,6 +98,8 @@
   .critical::before { background: var(--critical); }
   .warning::before { background: var(--accent); }
   .sev { color: var(--ink-muted); display: inline-flex; margin-top: 1px; }
+  /* Long cleanup commands scroll inside their box instead of widening the page. */
+  .body { min-width: 0; }
   .critical .sev { color: var(--critical); }
   .warning .sev { color: var(--accent); }
   .meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 13px; line-height: 20px; }

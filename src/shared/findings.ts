@@ -4,7 +4,7 @@
 import type { Finding, Severity } from './types';
 
 /** Codes that end in a resource id or name; the check is the prefix. */
-const DYNAMIC = /^(unbound-(?:kv|d1|r2|queues)|ops-spike-(?:kv|d1|r2|queues|do)|idle-loop-(?:kv|d1|r2|queues|do)|new-resource-burst-(?:kv|d1|r2|queues|do)|storage-d1-db|orphan-route|orphan-domain|missing-service|missing-tail|deploy-failed|pages-dev-public|member-change|token-created|cert-failed|cert-pending|cert-expiring|dangling-pages|dangling-workers-dev|binding-removed|env-mismatch|d1-inefficient-query)-.+$/;
+const DYNAMIC = /^(unbound-(?:kv|d1|r2|queues)|bound-idle-(?:kv|d1|r2|queues)|ops-spike-(?:kv|d1|r2|queues|do)|idle-loop-(?:kv|d1|r2|queues|do)|new-resource-burst-(?:kv|d1|r2|queues|do)|storage-d1-db|orphan-route|orphan-domain|missing-service|missing-tail|deploy-failed|pages-dev-public|member-change|token-created|cert-failed|cert-pending|cert-expiring|dangling-pages|dangling-workers-dev|binding-removed|env-mismatch|d1-inefficient-query)-.+$/;
 
 /** "module:code" with ids stripped, e.g. "zombies:unbound-queues". Stable across scans and Workers. */
 export function checkOf(f: Pick<Finding, 'module' | 'code'>): string {
@@ -97,6 +97,10 @@ export const CHECK_TITLES: Record<string, string> = {
   'zombies:unbound-d1': 'D1 databases not bound to any Worker',
   'zombies:unbound-r2': 'R2 buckets not bound to any Worker',
   'zombies:unbound-queues': 'Queues not used by any Worker',
+  'zombies:bound-idle-kv': 'KV namespaces bound but not used',
+  'zombies:bound-idle-d1': 'D1 databases bound but not used',
+  'zombies:bound-idle-r2': 'R2 buckets bound but not used',
+  'zombies:bound-idle-queues': 'Queues bound but not used',
 };
 
 /** One fix for the whole group, where Cloudflare offers one. */
@@ -141,34 +145,60 @@ export interface Cleanup {
   note: string;
 }
 
-const SAFE = /^[A-Za-z0-9][\w.-]{0,99}$/;
+/** A plain name that is safe inside a shell command. */
+export const SAFE_NAME = /^[A-Za-z0-9][\w.-]{0,99}$/;
+const SAFE = SAFE_NAME;
+const KV_ID = /^[a-f0-9]{32}$/;
+
+const STORAGE_NOTE: Record<string, string> = {
+  kv: 'Export any keys you still need first (npx wrangler kv key list --namespace-id=…).',
+  d1: 'The first command saves a backup of the database.',
+  r2: 'A bucket must be empty before it can be deleted: empty it in the dashboard (R2 › bucket › Settings) or with an object lifecycle rule. Check it is not used from outside Workers (S3 clients, public bucket URL).',
+  queues: 'Messages still in the queue are lost.',
+};
+
+/** The delete commands for one resource: a KV namespace by id, the rest by a shell-safe name. */
+function storageCommands(kind: string, ref: string): string[] | null {
+  if (kind === 'kv') return KV_ID.test(ref) ? [`npx wrangler kv namespace delete --namespace-id=${ref}`] : null;
+  if (!SAFE.test(ref)) return null;
+  if (kind === 'd1') return [`npx wrangler d1 export ${ref} --remote --output=${ref}-backup.sql`, `npx wrangler d1 delete ${ref}`];
+  if (kind === 'r2') return [`npx wrangler r2 bucket delete ${ref}`];
+  if (kind === 'queues') return [`npx wrangler queues delete ${ref}`];
+  return null;
+}
+
+/** Evidence keys starting with "_" carry data for the cleanup commands, not for people. */
+export const isHiddenEvidence = (key: string) => key.startsWith('_');
 
 export function cleanupFor(f: Pick<Finding, 'module' | 'code' | 'script' | 'evidence'>): Cleanup | null {
   if (f.module !== 'zombies') return null;
-  const ev = (k: string) => (typeof f.evidence[k] === 'string' && SAFE.test(f.evidence[k] as string) ? (f.evidence[k] as string) : null);
   const check = checkOf(f);
-  if (check === 'zombies:unbound-kv') {
-    const id = f.code.slice('unbound-kv-'.length);
-    return /^[a-f0-9]{32}$/.test(id)
-      ? { commands: [`npx wrangler kv namespace delete --namespace-id=${id}`], note: 'Export any keys you still need first (npx wrangler kv key list --namespace-id=…).' }
-      : null;
-  }
-  if (check === 'zombies:unbound-d1') {
-    const name = ev('d1');
-    return name ? { commands: [`npx wrangler d1 export ${name} --remote --output=${name}-backup.sql`, `npx wrangler d1 delete ${name}`], note: 'The first command saves a backup of the database.' } : null;
-  }
-  if (check === 'zombies:unbound-r2') {
-    const name = ev('r2');
-    return name ? { commands: [`npx wrangler r2 bucket delete ${name}`], note: 'A bucket must be empty before it can be deleted: empty it in the dashboard (R2 › bucket › Settings) or with an object lifecycle rule. Check it is not used from outside Workers (S3 clients, public bucket URL).' } : null;
-  }
-  if (check === 'zombies:unbound-queues') {
-    const name = ev('queues');
-    return name ? { commands: [`npx wrangler queues delete ${name}`], note: 'Messages still in the queue are lost.' } : null;
+  const storage = /^zombies:(unbound|bound-idle)-(kv|d1|r2|queues)$/.exec(check);
+  if (storage) {
+    const [, which, kind] = storage;
+    if (f.evidence.stillUsed === 'yes') {
+      return { commands: [], note: 'It still had operations in the last two days, so there is no delete command yet. Check what uses it first.' };
+    }
+    const ref = kind === 'kv' ? f.code.slice(`${which}-kv-`.length) : typeof f.evidence[kind] === 'string' ? (f.evidence[kind] as string) : '';
+    const commands = storageCommands(kind, ref);
+    if (!commands) return null;
+    const unbind = which === 'bound-idle' ? 'First remove the binding from each Worker that has it, and redeploy, or those Workers fail when they next use it. ' : '';
+    return { commands, note: `${unbind}${STORAGE_NOTE[kind]}` };
   }
   if (check === 'zombies:no-traffic' || check === 'zombies:never-deployed') {
-    return SAFE.test(f.script)
-      ? { commands: [`npx wrangler delete --name ${f.script}`], note: 'Deleting a Worker leaves its KV, D1, R2 and Queues in place: they show up here as unused on a later scan, after the next inventory refresh.' }
-      : null;
+    if (!SAFE.test(f.script)) return null;
+    const leaves = typeof f.evidence.leavesBehind === 'string' ? f.evidence.leavesBehind : '';
+    const refs = typeof f.evidence._cleanup === 'string' ? f.evidence._cleanup.split(' ').filter(Boolean) : [];
+    const extra = refs.map((r) => storageCommands(r.slice(0, r.indexOf(':')), r.slice(r.indexOf(':') + 1)));
+    const commands = [`npx wrangler delete --name ${f.script}`, ...extra.flatMap((c) => c ?? [])];
+    if (!leaves) {
+      return { commands, note: 'Deleting a Worker leaves its KV, D1, R2 and Queues in place: they show up here as unused on a later scan, after the next inventory refresh.' };
+    }
+    const parts = [`Deleting the Worker leaves behind storage only it uses: ${leaves}.`];
+    if (commands.length > 1) parts.push('The commands after the first one delete that storage (a D1 database gets a backup first; an R2 bucket must be emptied first).');
+    if (typeof f.evidence.stillUsed === 'string') parts.push(`${f.evidence.stillUsed} still had operations in the last two days, so it has no delete command.`);
+    if (extra.some((c) => !c)) parts.push('Some names are not safe to put in a shell command; delete those in the dashboard.');
+    return { commands, note: parts.join(' ') };
   }
   if (check === 'zombies:orphan-route') return { commands: [], note: 'Delete it in the dashboard: your zone › Workers Routes.' };
   if (check === 'zombies:orphan-domain') {

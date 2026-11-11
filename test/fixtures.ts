@@ -66,6 +66,8 @@ export interface FakeOptions {
   lockfiles?: Record<string, string | number>;
   /** Packages check: npm package -> latest version, or an HTTP status. */
   npm?: Record<string, string | number>;
+  /** KV operations per namespace and hour (kvOperationsAdaptiveGroups). Default: the dataset is unavailable. */
+  kvOps?: { namespaceId: string; datetimeHour: string; requests: number }[];
 }
 
 export function fakeFetch(opts: FakeOptions = {}) {
@@ -105,6 +107,10 @@ export function fakeFetch(opts: FakeOptions = {}) {
           quantiles: { cpuTimeP99: 1500 },
         }));
         return gql({ viewer: { accounts: [{ workersInvocationsAdaptive: rows }] } });
+      }
+      if (q.includes('kvOperationsAdaptiveGroups') && opts.kvOps) {
+        const rows = opts.kvOps.map((o) => ({ dimensions: { namespaceId: o.namespaceId, datetimeHour: o.datetimeHour, actionType: 'read' }, sum: { requests: o.requests } }));
+        return gql({ viewer: { accounts: [{ kvOperationsAdaptiveGroups: rows }] } });
       }
       return new Response(JSON.stringify({ data: null, errors: [{ message: 'dataset not available' }] }));
     }

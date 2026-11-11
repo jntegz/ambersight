@@ -14,6 +14,7 @@ import { metered } from './meter';
 import { sendTest } from './notify';
 import { buildAccounts, buildOverview, buildSelfCost, buildTimeline, pickAccount } from './overview';
 import { buildPackages } from './packages';
+import { buildResources } from './resources';
 import { reportHtml } from './report';
 import { handleQueueMessage, scanAccount, scheduledRun } from './scheduler';
 import { setupStatus } from './setup';
@@ -88,6 +89,9 @@ app.get('/api/timeline', async (c) =>
 );
 app.get('/api/packages', async (c) =>
   c.json(await buildPackages(c.env.DB, await accountOf(c.env, c.req.query('account')), configFrom(await getSettings(c.env.DB)), Boolean(c.env.GITHUB_TOKEN))),
+);
+app.get('/api/resources', async (c) =>
+  c.json(await buildResources(c.env.DB, await accountOf(c.env, c.req.query('account')), configFrom(await getSettings(c.env.DB)))),
 );
 app.get('/api/self-cost', async (c) => c.json(await buildSelfCost(c.env, await accountOf(c.env, c.req.query('account')))));
 

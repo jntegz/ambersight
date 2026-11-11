@@ -6,6 +6,7 @@
   import CostPanel from '../components/CostPanel.svelte';
   import LimitsPanel from '../components/LimitsPanel.svelte';
   import { checkOf, groupFindings } from '../../../src/shared/findings';
+  import { fmtBytes } from '../../../src/shared/limits';
   import FindingGroup from '../components/FindingGroup.svelte';
   import FindingRow from '../components/FindingRow.svelte';
   import FleetMap from '../components/FleetMap.svelte';
@@ -112,11 +113,27 @@
   const allGroups = $derived(groupFindings(scopedFindings));
   function exportMd(kind: 'attention' | 'housekeeping') {
     const list = allGroups.filter((g) => (kind === 'housekeeping' ? g.severity === 'info' : g.severity !== 'info'));
-    const md = findingsMarkdown({ title: kind === 'housekeeping' ? 'Housekeeping' : 'Needs attention', groups: list, account: data.account, scope: group || undefined });
+    // The summary is account-wide, so it is left out of an export limited to one group.
+    const summary = kind === 'housekeeping' && !group ? hkSummary : '';
+    const md = findingsMarkdown({ title: kind === 'housekeeping' ? 'Housekeeping' : 'Needs attention', groups: list, account: data.account, scope: group || undefined, summary });
     const slug = (data.account?.label ?? 'account').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'account';
     download(`ambersight-${kind === 'housekeeping' ? 'housekeeping' : 'needs-attention'}-${slug}-${new Date().toISOString().slice(0, 10)}.md`, md);
   }
   const attentionExportable = $derived(allGroups.some((g) => g.severity !== 'info'));
+  const PRODUCT = { d1: 'D1', kv: 'KV', r2: 'R2', do: 'Durable Objects' } as const;
+  // "Removing the unused storage below frees 120 MB of D1 (2.4% of the allowance). 3 resolved in the last 7 days."
+  const hkSummary = $derived.by(() => {
+    const h = data.housekeeping;
+    if (!h) return '';
+    const parts: string[] = [];
+    if (h.frees.length) {
+      const each = h.frees.map((f) => `${fmtBytes(f.bytes)} of ${PRODUCT[f.kind]}${f.share != null && f.share >= 0.01 ? ` (${pct(f.share)} of the allowance)` : ''}`);
+      const saving = h.monthlySaving ? `, about $${h.monthlySaving.toFixed(2)} a month` : '';
+      parts.push(`Removing the unused storage below frees ${each.join(', ')}${saving}.`);
+    }
+    if (h.resolvedThisWeek) parts.push(`${num(h.resolvedThisWeek)} resolved in the last 7 days.`);
+    return parts.join(' ');
+  });
   const housekeepingExportable = $derived(allGroups.some((g) => g.severity === 'info'));
 </script>
 
@@ -259,6 +276,7 @@
           <button type="button" class="export" title="Housekeeping findings and cleanup commands as Markdown" onclick={() => exportMd('housekeeping')}><Icon name="download" size={14} /> Export .md</button>
         {/if}
         </div>
+        {#if hkSummary}<p class="muted hk-summary">{hkSummary}</p>{/if}
         {#if housekeepingOpen}{@render groupList(housekeeping)}{/if}
       </div>
     {/if}
@@ -431,6 +449,7 @@
   .hk-toggle:disabled { opacity: 1; cursor: default; }
   .hk-toggle:not(:disabled):hover { border-color: var(--ink-muted); }
   .hk-note { font-weight: 400; font-size: 13px; }
+  .hk-summary { font-size: 13px; margin: 6px 0 2px; }
   .housekeeping .caret { display: inline-flex; transform: rotate(-90deg); transition: transform 150ms; }
   .housekeeping .caret.open { transform: rotate(0deg); }
   .list :global(li:first-child) { border-radius: var(--radius-card) var(--radius-card) 0 0; }

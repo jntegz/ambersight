@@ -1,6 +1,6 @@
 # Checks
 
-Ambersight runs 76 checks. Each one below lists the ID you see in the dashboard and in `config.json`, how severe it is, exactly when it fires, and what to do about it. The numbers are the defaults. Most of them can be changed globally, per group or per Worker (see [configuration.md](configuration.md)).
+Ambersight runs 80 checks. Each one below lists the ID you see in the dashboard and in `config.json`, how severe it is, exactly when it fires, and what to do about it. The numbers are the defaults. Most of them can be changed globally, per group or per Worker (see [configuration.md](configuration.md)).
 
 Every finding in the dashboard carries the evidence behind it, a suggested fix and a link to the matching Cloudflare docs page. When the problem goes away, the finding resolves on its own at the next scan.
 
@@ -192,12 +192,24 @@ All of these are info-level housekeeping. They stay folded away in the overview 
 | `zombies:missing-tail` | Info | A tail consumer no longer exists. | Remove it from `tail_consumers`. |
 | `zombies:orphan-route` | Info | A route points at a Worker that no longer exists. | Delete the route in the zone's **Workers Routes**. |
 | `zombies:orphan-domain` | Info | A custom domain points at a Worker that no longer exists. | Remove the custom domain. |
-| `zombies:unbound-kv` | Info | A KV namespace is not bound to any Worker. | It may still be used from outside Workers, through the API. If not, export what you need and delete it. |
+| `zombies:unbound-kv` | Info | A KV namespace is not bound to any Worker. When storage operations are tracked, the finding adds when it was last used (from any source, not only Workers), its size and whether it is empty. If it had operations in the last 48 hours it says so and gives no delete command: something outside Workers may still use it. | Check **Last used**. "None in 30 days" means nothing touched it, from Workers or anywhere else; export what you need and delete it. |
 | `zombies:unbound-d1` | Info | A D1 database is not bound to any Worker. | Same. |
 | `zombies:unbound-r2` | Info | An R2 bucket is not bound to any Worker. | Same. R2 is often used through its S3 API, so check before deleting. |
 | `zombies:unbound-queues` | Info | A queue has no producer, no consumer and is not a dead-letter queue. | Same. |
+| `zombies:bound-idle-kv` | Info | A KV namespace is bound to at least one Worker but had no operations in the last 30 days (only once Ambersight has tracked that long). Storage bound only to one unused Worker is listed on that Worker's finding instead. | Remove the binding from each Worker's Wrangler config and redeploy, then delete it. |
+| `zombies:bound-idle-d1` | Info | The same for a D1 database. | Same. |
+| `zombies:bound-idle-r2` | Info | The same for an R2 bucket. | Same. |
+| `zombies:bound-idle-queues` | Info | The same for a queue (not one with a consumer). | Same. |
+
+**Is it safe to remove?** "Not bound" alone does not prove it: storage can be used through the API, an S3 client or a public URL. So Ambersight also keeps the last hour each KV namespace, D1 database, R2 bucket and queue had operations, from any source, and shows it as **Last used** with the size. This needs the usage checks on (the default) and costs no extra API calls: it comes from the operations the scan already reads. "No operations in 30 days" is only said for a kind (KV, D1, R2 or queues) whose operations Ambersight has read without a gap for those 30 days: a failed dataset, a kind skipped because the scan ran out of API budget, the usage checks being off or two days without a scan start the count again, and until then the finding makes no claim about use. The stored time is updated at most every 6 hours per resource, so it costs a handful of D1 rows a day.
+
+**Cleaning up a Worker.** `zombies:no-traffic` and `zombies:never-deployed` list under **Leaves behind** the storage that only that Worker binds, and **How to remove it** adds the commands for it after `wrangler delete`. Storage that still had operations in the last 48 hours is listed but gets no command. Bindings are read from every Worker in the account, so storage another (out-of-scope) Worker uses is never listed.
 
 **Cleaning up after a deleted Worker.** Deleting a Worker leaves its KV namespaces, D1 databases, R2 buckets and queues in place. After the next inventory refresh (once a day by default) they show up under **Housekeeping** as not bound to any Worker. Each of these findings has a **How to remove it** section with the exact command, such as `npx wrangler d1 export old-db --remote --output=old-db-backup.sql` and then `npx wrangler d1 delete old-db`. Ambersight is read-only and never runs them. Routes and custom domains left pointing at deleted Workers get the dashboard or API step instead.
+
+**What it frees.** Under the Housekeeping heading, a line shows how much storage removing the unused and idle storage would free, per product and as a share of the account allowance, with the monthly saving when the cost estimate is on, and how many housekeeping findings were resolved in the last 7 days. The weekly digest has the same count.
+
+**Resources page.** **Resources** lists every KV namespace, D1 database, R2 bucket and queue with the Workers that bind it, its size, when it was last used and a status: *In use*, *Idle*, *Not bound* or *Used outside Workers*. Check it before deleting anything.
 
 **Export.** **Export .md** next to **Needs attention** (critical and warning) and next to **Housekeeping** (info) saves the findings as a Markdown checklist. The Housekeeping export ends with every cleanup command in one `sh` block, set to the right account with `CLOUDFLARE_ACCOUNT_ID`. The export covers the selected group, whatever the severity filter or search shows.
 

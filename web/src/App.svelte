@@ -10,6 +10,7 @@
   import Accounts from './pages/Accounts.svelte';
   import Overview from './pages/Overview.svelte';
   import Packages from './pages/Packages.svelte';
+  import Resources from './pages/Resources.svelte';
   import Settings from './pages/Settings.svelte';
   import Setup from './pages/Setup.svelte';
   import Timeline from './pages/Timeline.svelte';
@@ -17,7 +18,7 @@
   import { currentTheme, setTheme, type Theme } from './lib/theme';
 
   type View = 'loading' | 'login' | 'ready' | 'error';
-  type Route = 'overview' | 'timeline' | 'packages' | 'settings' | 'accounts';
+  type Route = 'overview' | 'timeline' | 'resources' | 'packages' | 'settings' | 'accounts';
   let view = $state<View>('loading');
   let data = $state<OverviewData | null>(null);
   let config = $state<Config | null>(null);
@@ -54,7 +55,7 @@
 
   // ---- Routing: "#/timeline" and "#/settings" are pages; any other hash (like "#w-name") is an anchor on the overview.
   const routeFrom = (hash: string): Route =>
-    hash === '#/timeline' ? 'timeline' : hash === '#/packages' ? 'packages' : hash === '#/settings' ? 'settings' : hash === '#/accounts' ? 'accounts' : 'overview';
+    hash === '#/timeline' ? 'timeline' : hash === '#/resources' ? 'resources' : hash === '#/packages' ? 'packages' : hash === '#/settings' ? 'settings' : hash === '#/accounts' ? 'accounts' : 'overview';
   let route = $state<Route>(routeFrom(location.hash));
   async function onHash() {
     const next = routeFrom(location.hash);
@@ -77,6 +78,7 @@
     { route: 'accounts', href: '#/accounts', label: 'Accounts', icon: 'grid', multiOnly: true },
     { route: 'overview', href: '#/', label: 'Overview', icon: 'overview' },
     { route: 'timeline', href: '#/timeline', label: 'Timeline', icon: 'timeline' },
+    { route: 'resources', href: '#/resources', label: 'Resources', icon: 'zombies' },
     { route: 'packages', href: '#/packages', label: 'Packages', icon: 'list', packagesOnly: true },
     { route: 'settings', href: '#/settings', label: 'Settings', icon: 'settings' },
   ];
@@ -233,9 +235,9 @@
       {#if searchable}
         <div class="search" class:filled={!!query}>
           <label class="search-field">
-            <span class="sr-only">{route === 'timeline' ? 'Search deploys' : route === 'accounts' ? 'Search accounts' : route === 'packages' ? 'Search packages' : 'Search Workers'}</span>
+            <span class="sr-only">{route === 'timeline' ? 'Search deploys' : route === 'accounts' ? 'Search accounts' : route === 'packages' ? 'Search packages' : route === 'resources' ? 'Search resources' : 'Search Workers'}</span>
             <Icon name="search" size={16} />
-            <input type="search" placeholder={route === 'timeline' ? 'Search deploys' : route === 'accounts' ? 'Search accounts' : route === 'packages' ? 'Search packages' : 'Search Workers'} autocomplete="off" spellcheck="false" bind:value={query} bind:this={searchEl} />
+            <input type="search" placeholder={route === 'timeline' ? 'Search deploys' : route === 'accounts' ? 'Search accounts' : route === 'packages' ? 'Search packages' : route === 'resources' ? 'Search resources' : 'Search Workers'} autocomplete="off" spellcheck="false" bind:value={query} bind:this={searchEl} />
           </label>
           {#if query}
             <button type="button" class="clear" aria-label="Clear search" onclick={() => { query = ''; searchEl?.focus(); }}><Icon name="close" size={14} /></button>
@@ -308,6 +310,8 @@
       <Accounts {accounts} {selected} {query} onSelect={selectAccount} />
     {:else if route === 'timeline'}
       <Timeline groups={data.groups ?? []} {query} account={selected} onUnauthorized={() => signedOut()} />
+    {:else if route === 'resources'}
+      <Resources {query} account={selected} onUnauthorized={() => signedOut()} />
     {:else if route === 'packages'}
       <Packages {query} account={selected} onUnauthorized={() => signedOut()} />
     {:else if route === 'settings'}

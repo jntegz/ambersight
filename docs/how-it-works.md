@@ -58,6 +58,7 @@ Everything lives in your own D1 database:
 | `cron_runs` | Scheduled runs and failures per hour |
 | `resources` | KV namespaces, D1 databases, R2 buckets, queues, routes, custom domains and Access applications |
 | `resource_hourly` | Storage and Durable Object operations per hour |
+| `resource_activity` | The last hour each KV namespace, D1 database, R2 bucket and queue had operations, for the unused-storage checks |
 | `deployments` | Deploys per Worker, for the timeline |
 | `findings` | Every finding, its status (open, acknowledged, snoozed, resolved) and when it was last alerted |
 | `fleet_events` | Workers added to or removed from the account |

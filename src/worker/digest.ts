@@ -30,6 +30,8 @@ export interface AccountDigest {
   movers: { name: string; now: number; before: number }[];
   cost: { monthToDate: number; forecast: number } | null;
   cfAlerts: number;
+  /** Housekeeping (info) findings open now, and resolved during the period. */
+  housekeeping: { open: number; resolved: number };
   /** Worker name -> Cloudflare tags, for per-group digests. */
   tags: Map<string, string[]>;
 }
@@ -45,7 +47,7 @@ export async function digestData(env: Env, now: Date, config: Config, days: numb
   const accounts = accountsR.results.filter((a) => !only || only.includes(a.id));
   // Installs from before multi-account support may have findings under "" until the first scan.
   const ids = JSON.stringify(accounts.length ? accounts.map((a) => a.id) : ['']);
-  const [findings, totals, events, deploys, workers, quota, movers, month, storage, alerts] = await db.batch([
+  const [findings, totals, events, deploys, workers, quota, movers, month, storage, alerts, hk] = await db.batch([
     db.prepare(
       `SELECT id, account, script, severity, message, action, evidence FROM findings
        WHERE status = 'open' AND account IN (SELECT value FROM json_each(?1)) AND severity IN (SELECT value FROM json_each(?2))
@@ -72,6 +74,10 @@ export async function digestData(env: Env, now: Date, config: Config, days: numb
     ).bind(ids, monthStart),
     db.prepare(`SELECT account, kind, SUM(bytes) AS bytes FROM storage_sizes WHERE account IN (SELECT value FROM json_each(?1)) GROUP BY account, kind`).bind(ids),
     db.prepare(`SELECT account, COUNT(*) AS n FROM cf_alerts WHERE sent >= ?2 AND account IN (SELECT value FROM json_each(?1)) GROUP BY account`).bind(ids, since.toISOString()),
+    db.prepare(
+      `SELECT account, SUM(status = 'open') AS open, SUM(status = 'resolved' AND last_seen >= ?2) AS resolved FROM findings
+       WHERE severity = 'info' AND account IN (SELECT value FROM json_each(?1)) GROUP BY account`,
+    ).bind(ids, since.toISOString()),
   ]);
   const by = <T extends { account: string }>(rows: unknown[]) => {
     const m = new Map<string, T[]>();
@@ -88,6 +94,7 @@ export async function digestData(env: Env, now: Date, config: Config, days: numb
   const MT = by<{ account: string; metric: QuotaMetric; v: number; first: string }>(month.results);
   const S = by<{ account: string; kind: StorageKind; bytes: number }>(storage.results);
   const A = new Map((alerts.results as { account: string; n: number }[]).map((r) => [r.account, r.n]));
+  const HK = new Map((hk.results as { account: string; open: number | null; resolved: number | null }[]).map((r) => [r.account, { open: r.open ?? 0, resolved: r.resolved ?? 0 }]));
   const list = accounts.length ? accounts : [{ id: '', name: null, detected_plan: null }];
   return list.map((a) => {
     const plan = planFrom(config, a.detected_plan, env.PLAN, a.id);
@@ -125,6 +132,7 @@ export async function digestData(env: Env, now: Date, config: Config, days: numb
       movers: moved,
       cost,
       cfAlerts: A.get(a.id) ?? 0,
+      housekeeping: HK.get(a.id) ?? { open: 0, resolved: 0 },
       tags,
     };
   });
@@ -186,6 +194,11 @@ export function renderDigest(
     if (d.movers.length) {
       html.push(H('Biggest changes in traffic'), P(d.movers.map((m) => `${esc(m.name)}: ${n(m.now)} requests, ${ratio(m.now, m.before)}`).join('<br>')));
       text.push('Biggest changes in traffic:', ...d.movers.map((m) => `  ${m.name}: ${n(m.now)} requests, ${ratio(m.now, m.before)}`));
+    }
+    if (d.housekeeping.open || d.housekeeping.resolved) {
+      const hk = `${n(d.housekeeping.open)} open, ${n(d.housekeeping.resolved)} resolved in this period`;
+      html.push(H('Housekeeping'), P(`${hk}. Unused storage, idle Workers and other tidy-ups, with cleanup commands in the dashboard.`));
+      text.push(`Housekeeping: ${hk}`);
     }
     if (d.added.length || d.removed.length) {
       html.push(H('Fleet changes'), P([...d.added.map((s) => `+ ${esc(s)}`), ...d.removed.map((s) => `− ${esc(s)}`)].join('<br>')));

@@ -7,7 +7,7 @@ import { SEVERITY_WEIGHT, type AccountSummary, type Finding, type Overview, type
 import { FREE_DAILY, STORAGE_LIMITS, type QuotaMetric, type StorageKind } from '../shared/limits';
 import type { CostEstimate, PagesSummary, QuotaStatus, StorageStatus } from '../shared/types';
 import { FREE_DAILY_REQUESTS, projectLimitTime } from './checks';
-import { estimate } from './cost';
+import { estimate, monthlyCost } from './cost';
 import { configFrom, getAccountState, getSettings, isoHour, planFrom, utcMidnight, type AccountRow } from './db';
 import type { Env } from './env';
 import { updateNotice } from './scan';
@@ -236,9 +236,38 @@ export async function buildOverview(env: Env, requested?: string | null, now = n
     pages,
     features: { queue: Boolean(env.SCAN_QUEUE), ai: Boolean(env.AI), turnstile: Boolean(env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET), github: Boolean(env.GITHUB_TOKEN) },
     findings: open,
+    housekeeping: housekeepingSummary(open, sizes, totals, caps, cost !== null, Number(settings.hk_resolved_7d ?? 0) || 0),
     workers: summaries,
     groups: [...new Set(visible.flatMap((w) => w.groups))].sort(),
   };
+}
+
+/**
+ * What deleting the unused storage in Housekeeping (not bound, or bound but idle) would free, per
+ * kind and against the account allowance, and the monthly storage cost it saves when the cost
+ * estimate is on. Storage that still has operations is left out.
+ */
+export function housekeepingSummary(
+  open: Finding[], sizes: { kind: StorageKind; id: string; bytes: number }[], totals: Map<StorageKind, number>,
+  caps: Record<StorageKind, { account: number | null }>, withCost: boolean, resolvedThisWeek: number,
+): Overview['housekeeping'] {
+  const sizeOf = new Map(sizes.map((z) => [`${z.kind}|${z.id}`, z.bytes]));
+  const freed = new Map<StorageKind, number>();
+  for (const f of open) {
+    const m = /^(?:unbound|bound-idle)-(kv|d1|r2)-(.+)$/.exec(f.code);
+    if (f.module !== 'zombies' || !m || f.evidence.stillUsed === 'yes') continue;
+    const bytes = sizeOf.get(`${m[1]}|${m[2]}`);
+    if (bytes) freed.set(m[1] as StorageKind, (freed.get(m[1] as StorageKind) ?? 0) + bytes);
+  }
+  const frees = [...freed].map(([kind, bytes]) => ({ kind, bytes, share: caps[kind].account ? bytes / caps[kind].account! : null }))
+    .sort((a, b) => b.bytes - a.bytes);
+  let monthlySaving: number | null = null;
+  if (withCost && frees.length) {
+    const now = Object.fromEntries(totals);
+    const after = Object.fromEntries([...totals].map(([k, v]) => [k, Math.max(0, v - (freed.get(k) ?? 0))]));
+    monthlySaving = Math.max(0, monthlyCost({}, now).total - monthlyCost({}, after).total);
+  }
+  return { frees, monthlySaving, resolvedThisWeek };
 }
 
 /** Requests and CPU per Worker from the daily rows, scaled to 7 days for the cost estimate. */
