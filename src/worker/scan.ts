@@ -4,7 +4,7 @@
 // stops cleanly when its subrequest budget is spent.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { groupsFor, inScope, thresholdsFor, type Config } from '../shared/config';
+import { groupsFor, inScope, repoFor, thresholdsFor, type Config } from '../shared/config';
 import { checkOf } from '../shared/findings';
 import type { Finding } from '../shared/types';
 import type { QuotaMetric, StorageKind } from '../shared/limits';
@@ -20,6 +20,7 @@ import { fetchIncidents, type Incident } from './incidents';
 import { allowedFetch } from './net';
 import { sendAlerts } from './notify';
 import { isNewer, REPO, VERSION } from './version';
+import { fetchLockfile, LockfileError, npmLatest, packageFindings, type LockedDep, type PackageRow } from './packages';
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -28,6 +29,8 @@ const BUDGET = { free: 42, paid: 900 };
 const DETAIL_MAX_AGE = 6 * HOUR;
 /** Per-zone tasks (routes, certificates, DNS) are refreshed this often, a few zones per scan. */
 const ZONE_TASK_MAX_AGE = DAY - HOUR;
+/** Lockfiles and npm latest versions are read once a day. */
+const PACKAGES_MAX_AGE = DAY - HOUR;
 
 export interface ScanResult {
   skipped?: boolean;
@@ -70,7 +73,10 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
   let detectedPlan = accountRow?.detected_plan ?? null;
   const plan = planFrom(config, detectedPlan, env.PLAN, accountId);
   const budget = BUDGET[plan];
-  const left = () => budget - cf.calls;
+  // GitHub and npm calls for the Packages check count against the same per-run subrequest limit.
+  let pkgCalls = 0;
+  const calls = () => cf.calls + pkgCalls;
+  const left = () => budget - calls();
 
   // 1. Inventory. The beta Workers list adds subdomain, preview, observability and deploy data.
   const [apiWorkers, scripts] = await Promise.all([
@@ -83,12 +89,12 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
   const inventory = mergeInventory(scripts, apiWorkers ?? [], stamp);
   const { results: known } = await db
     .prepare(
-      `SELECT name, detail_checked_at, bindings, bindings LIKE '%durable_object_namespace%' AS has_do,
+      `SELECT name, detail_checked_at, packages_checked_at, bindings, bindings LIKE '%durable_object_namespace%' AS has_do,
          bindings LIKE '%"type":"workflow"%' AS has_workflow, bindings LIKE '%"type":"ai"%' AS has_ai
        FROM workers WHERE account = ?1`,
     )
     .bind(accountId)
-    .all<{ name: string; detail_checked_at: string | null; bindings: string | null; has_do: number | null; has_workflow: number | null; has_ai: number | null }>();
+    .all<{ name: string; detail_checked_at: string | null; packages_checked_at: string | null; bindings: string | null; has_do: number | null; has_workflow: number | null; has_ai: number | null }>();
   const knownNames = new Set(known.map((k) => k.name));
   const currentNames = new Set(inventory.map((w) => w.name));
   const fleetEvents: { at: string; kind: string; script: string; detail?: string }[] = knownNames.size
@@ -406,6 +412,61 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
   }
   if (detailRemaining) warnings.push(`${detailRemaining} Workers will get their details on the next runs.`);
 
+  // 6b. Packages (optional, off by default): each mapped Worker's package-lock.json from GitHub once
+  // a day, then the latest version of each package from npm, with whatever budget is left.
+  const lockfiles: { script: string; deps: LockedDep[] | null; error: string | null }[] = [];
+  const latest: { name: string; latest: string | null }[] = [];
+  if (!light && config.modules.packages) {
+    if (!env.GITHUB_TOKEN) {
+      warnings.push('The Packages check is on, but GITHUB_TOKEN is not set (wrangler secret put GITHUB_TOKEN).');
+    } else {
+      const pkgAt = new Map(known.map((k) => [k.name, k.packages_checked_at]));
+      const pkgDue = inventory
+        .filter((w) => repoFor(config, accountId, w.name))
+        .filter((w) => !pkgAt.get(w.name) || now.getTime() - new Date(pkgAt.get(w.name)!).getTime() > PACKAGES_MAX_AGE)
+        .sort((a, b) => (pkgAt.get(a.name) ?? '').localeCompare(pkgAt.get(b.name) ?? ''));
+      let pkgRemaining = 0;
+      for (const w of pkgDue) {
+        // Keep a couple of calls for npm, so new packages get their latest version soon.
+        if (left() < 3) {
+          pkgRemaining = pkgDue.length - lockfiles.length;
+          break;
+        }
+        pkgCalls++;
+        try {
+          lockfiles.push({ script: w.name, deps: await fetchLockfile(env.GITHUB_TOKEN, repoFor(config, accountId, w.name)!), error: null });
+        } catch (e) {
+          // Only a known problem (no access, no file, unsupported format) is stored and becomes a finding.
+          // Anything else (GitHub down) is retried on the next scan.
+          if (e instanceof LockfileError) lockfiles.push({ script: w.name, deps: null, error: e.message });
+          else warnings.push(`Packages for ${w.name} unavailable: ${(e as Error).message}`);
+        }
+      }
+      if (pkgRemaining) warnings.push(`${pkgRemaining} Workers will get their packages read on the next scans.`);
+      const fresh = [...new Set(lockfiles.flatMap((l) => (l.deps ?? []).map((d) => d.name)))];
+      if (left() > 0) {
+        const { results: stale } = await db
+          .prepare(
+            `SELECT p.name FROM (SELECT name FROM worker_packages WHERE account = ?1 UNION SELECT value FROM json_each(?2)) AS p
+             LEFT JOIN npm_latest n ON n.name = p.name WHERE n.checked_at IS NULL OR n.checked_at < ?3
+             ORDER BY n.checked_at IS NOT NULL, n.checked_at LIMIT ?4`,
+          )
+          .bind(accountId, JSON.stringify(fresh), new Date(now.getTime() - PACKAGES_MAX_AGE).toISOString(), left())
+          .all<{ name: string }>();
+        for (const { name } of stale) {
+          if (left() < 1) break;
+          pkgCalls++;
+          try {
+            latest.push({ name, latest: await npmLatest(name) });
+          } catch (e) {
+            warnings.push(`npm registry unavailable: ${(e as Error).message}`);
+            break;
+          }
+        }
+      }
+    }
+  }
+
   // 7. Write everything in one batch. ?1 is always the account.
   const j = JSON.stringify;
   const A = accountId;
@@ -494,6 +555,36 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
        SELECT ?1, json_extract(value,'$.at'), json_extract(value,'$.kind'), json_extract(value,'$.script'), json_extract(value,'$.detail') FROM json_each(?2) WHERE true`,
     ).bind(A, j(fleetEvents)),
   ];
+  if (lockfiles.length) {
+    const read = lockfiles.filter((l) => l.deps);
+    const rows = read.flatMap((l) => l.deps!.map((d) => ({ script: l.script, name: d.name, locked: d.locked, dev: d.dev ? 1 : 0 })));
+    writes.push(
+      // Dependencies removed from a lockfile that was read again.
+      db.prepare(
+        `DELETE FROM worker_packages WHERE account = ?1 AND script IN (SELECT value FROM json_each(?2))
+           AND NOT EXISTS (SELECT 1 FROM json_each(?3) AS n WHERE json_extract(n.value,'$.script') = worker_packages.script AND json_extract(n.value,'$.name') = worker_packages.name)`,
+      ).bind(A, j(read.map((l) => l.script)), j(rows)),
+      db.prepare(
+        `INSERT INTO worker_packages (account, script, name, locked, dev)
+         SELECT ?1, json_extract(value,'$.script'), json_extract(value,'$.name'), json_extract(value,'$.locked'), json_extract(value,'$.dev') FROM json_each(?2) WHERE true
+         ON CONFLICT(account, script, name) DO UPDATE SET locked = excluded.locked, dev = excluded.dev
+         WHERE worker_packages.locked IS NOT excluded.locked OR worker_packages.dev IS NOT excluded.dev`,
+      ).bind(A, j(rows)),
+      db.prepare(
+        `UPDATE workers SET packages_checked_at = ?3, packages_error = json_extract(d.value,'$.error')
+         FROM json_each(?2) AS d WHERE workers.account = ?1 AND workers.name = json_extract(d.value,'$.script')`,
+      ).bind(A, j(lockfiles.map((l) => ({ script: l.script, error: l.error }))), stamp),
+    );
+  }
+  if (latest.length) {
+    writes.push(
+      db.prepare(
+        `INSERT INTO npm_latest (name, latest, checked_at)
+         SELECT json_extract(value,'$.name'), json_extract(value,'$.latest'), ?2 FROM json_each(?1) WHERE true
+         ON CONFLICT(name) DO UPDATE SET latest = excluded.latest, checked_at = excluded.checked_at`,
+      ).bind(j(latest), stamp),
+    );
+  }
   if (cronRuns) {
     writes.push(
       db.prepare(
@@ -620,6 +711,9 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
       ).bind(A, j(refreshed.filter((r) => refreshedKinds.has(r.kind)).map((r) => ({ ...r, extra: r.extra ? j(r.extra) : null })))),
       // Retention, once per inventory refresh.
       ...retentionDeletes(db, A, now, config.retentionDays),
+      // Packages of Workers that are gone or no longer mapped.
+      db.prepare('DELETE FROM worker_packages WHERE account = ?1 AND script NOT IN (SELECT value FROM json_each(?2))')
+        .bind(A, j(inventory.map((w) => w.name).filter((n) => repoFor(config, A, n)))),
       upsertAccount(db, { id: A, detectedPlan }, now),
     );
   }
@@ -675,6 +769,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
     tokenExpiresOn: facts.tokenExpiresOn,
     changes: facts.changes,
   });
+  if (config.modules.packages) findings.push(...(await loadPackageFindings(db, accountId, config)));
   // Checks the user switched off are dropped here, so their open findings resolve like fixed ones.
   const muted = new Set(config.mutedChecks);
   // While cron checks are paused (too many runs to count, or no data at all), keep existing cron
@@ -688,15 +783,27 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
   await db.batch([
     setAccountState(db, A, {
       last_scan_at: stamp,
-      last_scan_calls: String(cf.calls),
+      last_scan_calls: String(calls()),
       last_scan_ms: String(Date.now() - started),
       last_scan_warnings: j(warnings),
       scan_failures: '0',
     }),
-    recordUsage(db, now, { cronRuns: 1, subrequests: cf.calls, rowsRead: meter.rowsRead, rowsWritten: meter.rowsWritten }),
+    recordUsage(db, now, { cronRuns: 1, subrequests: calls(), rowsRead: meter.rowsRead, rowsWritten: meter.rowsWritten }),
   ]);
 
-  return { workers: inventory.length, findings: findings.length, subrequests: cf.calls, d1Queries: meter.queries, warnings, detailRemaining, zonesRemaining: zonesLeft };
+  return { workers: inventory.length, findings: findings.length, subrequests: calls(), d1Queries: meter.queries, warnings, detailRemaining, zonesRemaining: zonesLeft };
+}
+
+async function loadPackageFindings(db: D1Database, account: string, config: Config): Promise<Finding[]> {
+  const [rowsR, errR] = await db.batch([
+    db.prepare(
+      `SELECT p.script, p.name, p.locked, p.dev, n.latest FROM worker_packages p LEFT JOIN npm_latest n ON n.name = p.name WHERE p.account = ?1`,
+    ).bind(account),
+    db.prepare('SELECT name, packages_error FROM workers WHERE account = ?1 AND packages_error IS NOT NULL').bind(account),
+  ]);
+  const rows = (rowsR.results as { script: string; name: string; locked: string; dev: number; latest: string | null }[]).map((r) => ({ ...r, dev: r.dev === 1 }));
+  const errors = new Map((errR.results as { name: string; packages_error: string }[]).map((r) => [r.name, r.packages_error]));
+  return packageFindings(config, account, rows as PackageRow[], errors);
 }
 
 export function inventoryDue(now: Date, last: string | null, config: Config): boolean {

@@ -19,7 +19,7 @@
     workers: string[];
     groups: string[];
     /** Optional bindings present on this install (from the overview). */
-    features?: { queue: boolean; ai: boolean; turnstile: boolean } | null;
+    features?: { queue: boolean; ai: boolean; turnstile: boolean; github: boolean } | null;
     /** The account selected in the header, for the Self-cost panel. */
     account?: string | null;
     accountCount?: number;
@@ -182,7 +182,20 @@
     { key: 'security', title: 'Security', text: 'Audit log (new members, new tokens), certificates and DNS records left pointing at deleted Workers or Pages. Needs SSL and DNS Read.', icon: 'shield' },
     { key: 'drift', title: 'Config drift', text: 'Bindings that disappeared after a deploy, staging and production that differ, Workers near the 64-variable limit.', icon: 'list' },
     { key: 'incidents', title: 'Cloudflare incidents', text: 'Adds active incidents from cloudflarestatus.com to alerts and the timeline. Contacts that public site; sends nothing about your account.', icon: 'info' },
+    { key: 'packages', title: 'Packages', text: 'Direct npm dependencies of the Workers you map below: locked version → latest on npm. Reads package-lock.json from GitHub with a separate GITHUB_TOKEN; the only check that reads source code.', icon: 'list' },
   ];
+  let addPackageWorker = $state('');
+  // Mappings are per account ("<account id>:<Worker>"), so two accounts can each have a Worker of
+  // the same name. A key with only the Worker name (older configs) applies in every account.
+  const repoKey = (w: string) => (account ? `${account}:${w}` : w);
+  const repoKeys = $derived(draft ? Object.keys(draft.packageRepos).filter((k) => !k.includes(':') || (account && k.startsWith(`${account}:`))).sort() : []);
+  const workerOf = (k: string) => k.slice(k.indexOf(':') + 1);
+  const unmapped = $derived(draft ? workers.filter((w) => !draft!.packageRepos[repoKey(w)] && !draft!.packageRepos[w]) : []);
+  function mapWorker() {
+    if (!draft || !addPackageWorker) return;
+    draft.packageRepos[repoKey(addPackageWorker)] = { repo: '' };
+    addPackageWorker = '';
+  }
   const listText = (l: string[]) => l.join(', ');
   const splitList = (s: string) => s.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
 
@@ -380,8 +393,39 @@
             <div class="module" class:off={!draft.modules[m.key]}>
               <span class="m-icon"><Icon name={m.icon} size={18} /></span>
               <div><p class="label">{m.title}</p><p class="hint">{m.text}</p></div>
-              <Switch label={m.title} bind:checked={draft.modules[m.key]} />
+              <Switch label={m.title} disabled={m.key === 'packages' && !features?.github && !draft.modules.packages} bind:checked={draft.modules[m.key]} />
             </div>
+            {#if m.key === 'packages' && !features?.github}
+              <div class="module sub off"><span></span><div><p class="hint">Needs a GitHub token: <span class="mono">npx wrangler secret put GITHUB_TOKEN</span>. Create a fine-grained token with <strong>Contents: Read</strong> on the repositories only, nothing else.</p></div><span></span></div>
+            {/if}
+            {#if m.key === 'packages' && draft.modules.packages}
+              <div class="module sub pkg-map">
+                <span></span>
+                <div>
+                  <p class="label">Workers and their repositories</p>
+                  <p class="hint">GitHub repository as <span class="mono">owner/name</span>, the folder that holds <span class="mono">package-lock.json</span> (empty = the root), and the branch (empty = the default one).</p>
+                  {#each repoKeys as name (name)}
+                    <div class="inline pkg-row">
+                      <span class="mono pkg-name">{workerOf(name)}{#if !name.includes(':') && accountCount > 1} <span class="hint">(every account)</span>{/if}</span>
+                      <input class="input" aria-label="Repository for {workerOf(name)}" placeholder="owner/name" bind:value={draft.packageRepos[name].repo} />
+                      <input class="input" aria-label="Folder for {workerOf(name)}" placeholder="Folder (optional)" value={draft.packageRepos[name].dir ?? ''} oninput={(e) => (draft!.packageRepos[name].dir = e.currentTarget.value.trim() || undefined)} />
+                      <input class="input" aria-label="Branch for {workerOf(name)}" placeholder="Branch (optional)" value={draft.packageRepos[name].ref ?? ''} oninput={(e) => (draft!.packageRepos[name].ref = e.currentTarget.value.trim() || undefined)} />
+                      <button type="button" class="ghost small" onclick={() => delete draft!.packageRepos[name]}>Remove</button>
+                    </div>
+                  {/each}
+                  {#if unmapped.length}
+                    <div class="inline pkg-row">
+                      <select class="input" aria-label="Worker to map" bind:value={addPackageWorker}>
+                        <option value="">Add a Worker…</option>
+                        {#each unmapped as w (w)}<option value={w}>{w}</option>{/each}
+                      </select>
+                      <button type="button" class="ghost small" disabled={!addPackageWorker} onclick={mapWorker}>Add</button>
+                    </div>
+                  {/if}
+                </div>
+                <span></span>
+              </div>
+            {/if}
             {#if m.key === 'exposure'}
               <div class="module sub" class:off={!draft.modules.access || !draft.modules.exposure}>
                 <span></span>
@@ -720,4 +764,8 @@
     .r-head { display: none; }
     .tz .input, .range input { width: 100%; }
   }
+  .pkg-map { align-items: start; }
+  .pkg-row { flex-wrap: wrap; margin-top: 8px; }
+  .pkg-row .input { min-width: 0; flex: 1 1 140px; }
+  .pkg-name { flex: 0 0 auto; min-width: 120px; }
 </style>

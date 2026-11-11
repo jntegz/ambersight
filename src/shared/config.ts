@@ -54,6 +54,18 @@ export interface ModuleSwitches {
   drift: boolean;
   /** Incidents from the public Cloudflare status page on alerts and the timeline. Off by default. */
   incidents: boolean;
+  /** npm dependencies of mapped Workers, read from GitHub (needs GITHUB_TOKEN). Off by default. */
+  packages: boolean;
+}
+
+/** Where a Worker's package-lock.json lives on GitHub. */
+export interface PackageRepo {
+  /** "owner/name". */
+  repo: string;
+  /** Folder inside the repository, e.g. "workers/api". Empty = the repository root. */
+  dir?: string;
+  /** Branch, tag or commit. Empty = the default branch. */
+  ref?: string;
 }
 
 export interface SeverityRoute {
@@ -101,6 +113,11 @@ export interface Config {
   updateCheck: boolean;
   /** Per-account settings, keyed by Cloudflare account ID. */
   accounts: Record<string, AccountSettings>;
+  /**
+   * Packages check: GitHub repository with the Worker's package-lock.json, keyed "<account id>:<Worker>".
+   * A key with only the Worker name applies in every account (older configs).
+   */
+  packageRepos: Record<string, PackageRepo>;
 }
 
 export interface AccountSettings {
@@ -139,7 +156,7 @@ export function defaultConfig(): Config {
     scanIntervalMinutes: 60,
     inventoryIntervalHours: 24,
     inventoryHourUtc: 3,
-    modules: { usage: true, cron: true, errors: true, deprecation: true, exposure: true, zombies: true, timeline: true, access: false, cost: true, cfAlerts: true, pages: true, security: true, drift: true, incidents: false },
+    modules: { usage: true, cron: true, errors: true, deprecation: true, exposure: true, zombies: true, timeline: true, access: false, cost: true, cfAlerts: true, pages: true, security: true, drift: true, incidents: false, packages: false },
     mutedChecks: [],
     thresholds: { ...DEFAULT_THRESHOLDS },
     overrides: {},
@@ -156,6 +173,7 @@ export function defaultConfig(): Config {
     retentionDays: 30,
     updateCheck: true,
     accounts: {},
+    packageRepos: {},
   };
 }
 
@@ -184,6 +202,14 @@ const ACCOUNT_ID = /^[\w-]{1,64}$/;
 const LABEL = /^[^\r\n\u2028\u2029<>]{1,60}$/;
 const EMAIL = /^[^\s@,<>"]+@[^\s@,<>"]+\.[^\s@,<>"]+$/;
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
+// GitHub owner/name, folder and ref. They end up in a GitHub API URL: no "..", no leading or
+// doubled slashes, no characters that need more than URL encoding.
+const GH_REPO = /^[A-Za-z0-9-]{1,39}\/[\w.-]{1,100}$/;
+const GH_DIR = /^[\w.@-]+(\/[\w.@-]+){0,9}$/;
+const GH_REF = /^[\w.@-]+(\/[\w.@-]+){0,9}$/;
+/** "<account id>:<Worker name>", or just the Worker name for every account. */
+const REPO_KEY = /^(?:[\w-]{1,64}:)?[\w-]{1,100}$/;
+const dots = (s: string) => s.split('/').some((p) => p === '.' || p === '..');
 
 function num(v: unknown, [min, max]: [number, number], path: string): number {
   if (typeof v !== 'number' || !Number.isFinite(v) || v < min || v > max) throw new ConfigError(`${path} must be a number from ${min} to ${max}.`);
@@ -302,6 +328,24 @@ export function parseConfig(input: unknown): Config {
     accounts[id] = out;
   }
 
+  const packageRepos: Config['packageRepos'] = {};
+  if (!isObj(v.packageRepos)) throw new ConfigError('packageRepos must be an object.');
+  if (Object.keys(v.packageRepos).length > 500) throw new ConfigError('packageRepos can map at most 500 Workers.');
+  for (const [name, r] of Object.entries(v.packageRepos)) {
+    if (!REPO_KEY.test(name)) throw new ConfigError(`packageRepos key "${name}" must be a Worker name, or <account id>:<Worker name>.`);
+    if (!isObj(r) || typeof r.repo !== 'string' || !GH_REPO.test(r.repo) || dots(r.repo)) throw new ConfigError(`packageRepos.${name}.repo must be a GitHub repository as owner/name.`);
+    const out: PackageRepo = { repo: r.repo };
+    if (r.dir != null && r.dir !== '') {
+      if (typeof r.dir !== 'string' || !GH_DIR.test(r.dir) || dots(r.dir)) throw new ConfigError(`packageRepos.${name}.dir must be a folder such as workers/api.`);
+      out.dir = r.dir;
+    }
+    if (r.ref != null && r.ref !== '') {
+      if (typeof r.ref !== 'string' || !GH_REF.test(r.ref) || dots(r.ref)) throw new ConfigError(`packageRepos.${name}.ref must be a branch, tag or commit.`);
+      out.ref = r.ref;
+    }
+    packageRepos[name] = out;
+  }
+
   if (typeof v.timeZone !== 'string' || !isValidTimeZone(v.timeZone)) throw new ConfigError('timeZone must be an IANA time zone such as Europe/Prague.');
   if (typeof v.updateCheck !== 'boolean') throw new ConfigError('updateCheck must be true or false.');
 
@@ -335,7 +379,13 @@ export function parseConfig(input: unknown): Config {
     retentionDays: Math.round(num(v.retentionDays, [7, 90], 'retentionDays')),
     updateCheck: v.updateCheck,
     accounts,
+    packageRepos,
   };
+}
+
+/** The repository mapped to one Worker in one account: its own key first, then a name-only key. */
+export function repoFor(config: Config, account: string, name: string): PackageRepo | undefined {
+  return config.packageRepos[`${account}:${name}`] ?? config.packageRepos[name];
 }
 
 /** `*` wildcard match, case-sensitive like Worker names. */

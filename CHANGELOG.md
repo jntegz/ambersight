@@ -2,6 +2,13 @@
 
 All notable changes to Ambersight. Each version here has a matching [GitHub release](https://github.com/jntegz/ambersight/releases), which is what the update notice in the dashboard reads.
 
+## Unreleased
+
+- **Explain in plain words** on every finding: what it means, why it matters, and numbered steps with where to click, written for people new to Cloudflare. Also in the `.md` export. A test fails if a check has no explanation.
+- **Clean up leftovers.** Unused KV, D1, R2 and queues, and Workers with no traffic or never deployed, now show **How to remove it** with the exact `wrangler` command (a backup first for D1). Routes and custom domains left behind get the dashboard or API step. Ambersight still never deletes anything.
+- **Export .md** next to **Needs attention** and **Housekeeping**: the findings as a Markdown checklist, and for Housekeeping every cleanup command in one block.
+- **Packages (opt-in, off by default).** Map a Worker to its GitHub repository in **Settings › Checks** and the new **Packages** page shows each direct npm dependency as *locked → latest*. Two checks: `packages:outdated` (Warning when a major version behind) and `packages:lockfile-unreadable`. Needs a separate fine-grained `GITHUB_TOKEN` with *Contents: Read*; the Cloudflare token stays read-only. Reads `package-lock.json` v2/v3 once a day, inside the scan's subrequest budget (migration 0009).
+
 ## 0.1.1 (2026-11-10)
 
 Everything here is built on free Cloudflare features and keeps the read-only token. See [docs/research/free-cloudflare-features.md](docs/research/free-cloudflare-features.md) for why each one was chosen.

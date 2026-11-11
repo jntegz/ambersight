@@ -1,6 +1,6 @@
 # Checks
 
-Ambersight runs 74 checks. Each one below lists the ID you see in the dashboard and in `config.json`, how severe it is, exactly when it fires, and what to do about it. The numbers are the defaults. Most of them can be changed globally, per group or per Worker (see [configuration.md](configuration.md)).
+Ambersight runs 76 checks. Each one below lists the ID you see in the dashboard and in `config.json`, how severe it is, exactly when it fires, and what to do about it. The numbers are the defaults. Most of them can be changed globally, per group or per Worker (see [configuration.md](configuration.md)).
 
 Every finding in the dashboard carries the evidence behind it, a suggested fix and a link to the matching Cloudflare docs page. When the problem goes away, the finding resolves on its own at the next scan.
 
@@ -21,6 +21,7 @@ Every finding in the dashboard carries the evidence behind it, a suggested fix a
 - [Pages](#pages)
 - [Security](#security)
 - [Config drift](#config-drift)
+- [Packages](#packages) (off by default)
 - [Ambersight's own health](#ambersights-own-health)
 - [Switching checks off](#switching-checks-off)
 - [Which permission each group needs](#which-permission-each-group-needs)
@@ -196,6 +197,10 @@ All of these are info-level housekeeping. They stay folded away in the overview 
 | `zombies:unbound-r2` | Info | An R2 bucket is not bound to any Worker. | Same. R2 is often used through its S3 API, so check before deleting. |
 | `zombies:unbound-queues` | Info | A queue has no producer, no consumer and is not a dead-letter queue. | Same. |
 
+**Cleaning up after a deleted Worker.** Deleting a Worker leaves its KV namespaces, D1 databases, R2 buckets and queues in place. After the next inventory refresh (once a day by default) they show up under **Housekeeping** as not bound to any Worker. Each of these findings has a **How to remove it** section with the exact command, such as `npx wrangler d1 export old-db --remote --output=old-db-backup.sql` and then `npx wrangler d1 delete old-db`. Ambersight is read-only and never runs them. Routes and custom domains left pointing at deleted Workers get the dashboard or API step instead.
+
+**Export.** **Export .md** next to **Needs attention** (critical and warning) and next to **Housekeeping** (info) saves the findings as a Markdown checklist. The Housekeeping export ends with every cleanup command in one `sh` block, set to the right account with `CLOUDFLARE_ACCOUNT_ID`. The export covers the selected group, whatever the severity filter or search shows.
+
 The unbound checks wait until Ambersight has read every Worker's bindings at least once. On a large fleet that takes a few scans (see [how-it-works.md](how-it-works.md#large-fleets)), so they may appear a little after the others.
 
 Threshold setting: `zombieDays` (30).
@@ -230,6 +235,17 @@ The audit log is read every 6 hours (it needs *Account Settings Read*, which the
 | `drift:env-mismatch` | Info | A Worker named like `api-staging`, `api-dev`, `api-preview` or `staging-api` has binding names that `api` does not, or the other way round. | Compare the two configs. Secrets are compared by name only; their values are never read. |
 | `drift:vars-near-limit` | Info at 58, warning at 64 | A Worker has close to the 64 environment variables and secrets allowed. | Group related settings into one JSON variable, or move configuration to KV. |
 
+## Packages
+
+**Off by default.** For each Worker you map to a GitHub repository in **Settings › Checks › Packages**, Ambersight reads `package-lock.json` once a day, takes the direct `dependencies` and `devDependencies` with their locked versions, and compares them with the latest release on the public npm registry. The **Packages** page lists them as *locked → latest*.
+
+| Check | Severity | Fires when | What to do |
+| --- | --- | --- | --- |
+| `packages:outdated` | Warning if a direct dependency is a major version behind, otherwise Info | One or more direct dependencies are behind the latest npm release. | Run `npm outdated` in the repository and update. Read the changelog of each major version first. |
+| `packages:lockfile-unreadable` | Warning | The lockfile could not be read: no `package-lock.json` at that path, no access, the repository moved, a lockfile older than npm 7 (`lockfileVersion` 1), or a file over 8 MB. | Check the repository, folder and branch in Settings, and that `GITHUB_TOKEN` can read the repository. |
+
+Why this needs a separate token: Cloudflare stores your Worker as bundled code, without `package.json` or the lockfile, so the Cloudflare API cannot tell which versions you use. Workers Builds knows the repository, but its API needs an *Edit* permission, which Ambersight never takes. Only `package-lock.json` v2 and v3 are read (npm 7 and later); pnpm and yarn lockfiles are not supported yet. Lockfile reads and npm lookups count against the scan's subrequest budget, so on the Free plan a large fleet is covered over several scans.
+
 ## Ambersight's own health
 
 These cannot be switched off: a monitor that has gone blind should say so.
@@ -246,7 +262,7 @@ After 3 failed scans in a row, Ambersight also sends one alert a day on the chan
 
 There are three levels:
 
-- **A whole group.** **Settings › Checks** has a switch for usage, errors, cron, deprecations, exposure, zombies, the deploy timeline, cost, Cloudflare notifications, Pages, security, config drift and Cloudflare incidents.
+- **A whole group.** **Settings › Checks** has a switch for usage, errors, cron, deprecations, exposure, zombies, the deploy timeline, cost, Cloudflare notifications, Pages, security, config drift, Cloudflare incidents and packages.
 - **One check.** From any finding group in the overview, switch that check off. It shows up under **Settings › Checks › Switched off from the overview**, where you can turn it back on. In `config.json` this is the `mutedChecks` list, using the IDs above.
 - **One finding.** Acknowledge it, or snooze it for 7, 30 or 90 days. **Acknowledge all** and **Snooze all** work on a whole group.
 
@@ -266,5 +282,6 @@ When you switch a check off, its open findings resolve, the same as if you had f
 | Dangling DNS | DNS Read |
 | Audit log | Account Settings Read |
 | Cloudflare notifications on the timeline | Notifications Read. It has no key for the pre-filled token link, so add it by hand. |
+| Packages | No Cloudflare permission. A separate `GITHUB_TOKEN` secret: GitHub fine-grained token, *Contents: Read* on the mapped repositories. |
 
 If a permission is missing, the scan skips what it cannot read, carries on with the rest, and lists what it skipped. See [troubleshooting.md](troubleshooting.md).

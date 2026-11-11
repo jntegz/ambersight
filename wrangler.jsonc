@@ -42,6 +42,8 @@
     // Optional: Cloudflare Turnstile on the sign-in page. Put the site key here and the secret in
     // the TURNSTILE_SECRET secret (npx wrangler secret put TURNSTILE_SECRET). Free.
     "TURNSTILE_SITE_KEY": ""
+    // Optional: the Packages check reads package-lock.json from GitHub with a fine-grained token
+    // (Contents: Read only): npx wrangler secret put GITHUB_TOKEN. Then turn it on in Settings.
   }
 
   // ---- Optional bindings. Each is free and off until you uncomment it. -------------------------

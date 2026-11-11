@@ -15,6 +15,8 @@
   import WorkerCard from '../components/WorkerCard.svelte';
   import WorkerTable from '../components/WorkerTable.svelte';
   import { compact, num, pct, timeAgo, workerId } from '../lib/api';
+  import { download } from '../lib/download';
+  import { findingsMarkdown } from '../lib/exportMd';
   import { loadPrefs, savePrefs } from '../lib/prefs';
 
   let { data, query, scanInterval, mutedChecks = [], onAcknowledge, onSnooze, onBulk, onMute }: {
@@ -105,6 +107,17 @@
     scanInterval == null ? null : scanInterval % 1440 === 0 ? `${scanInterval / 1440 === 1 ? 'day' : `${scanInterval / 1440} days`}` : scanInterval % 60 === 0 ? (scanInterval === 60 ? 'hour' : `${scanInterval / 60} hours`) : `${scanInterval} min`,
   );
   const top = $derived(scopedFindings[0]);
+
+  // Export: every finding in the current group scope, whatever the severity filter or search shows.
+  const allGroups = $derived(groupFindings(scopedFindings));
+  function exportMd(kind: 'attention' | 'housekeeping') {
+    const list = allGroups.filter((g) => (kind === 'housekeeping' ? g.severity === 'info' : g.severity !== 'info'));
+    const md = findingsMarkdown({ title: kind === 'housekeeping' ? 'Housekeeping' : 'Needs attention', groups: list, account: data.account, scope: group || undefined });
+    const slug = (data.account?.label ?? 'account').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'account';
+    download(`ambersight-${kind === 'housekeeping' ? 'housekeeping' : 'needs-attention'}-${slug}-${new Date().toISOString().slice(0, 10)}.md`, md);
+  }
+  const attentionExportable = $derived(allGroups.some((g) => g.severity !== 'info'));
+  const housekeepingExportable = $derived(allGroups.some((g) => g.severity === 'info'));
 </script>
 
 {#if data.groups.length}
@@ -209,11 +222,16 @@
 <section aria-labelledby="attention-title">
   <div class="section-head">
     <h2 id="attention-title">Needs attention <span class="count">{scopedFindings.length}</span></h2>
+    <div class="head-actions">
+    {#if attentionExportable}
+      <button type="button" class="export" title="Critical and warning findings as a Markdown checklist" onclick={() => exportMd('attention')}><Icon name="download" size={14} /> Export .md</button>
+    {/if}
     <div class="seg" role="group" aria-label="Filter by severity">
       <button type="button" aria-pressed={severity === 'all'} onclick={() => (severity = 'all')}>All</button>
       <button type="button" aria-pressed={severity === 'critical'} onclick={() => (severity = 'critical')}>Critical <span class="num">{counts.critical}</span></button>
       <button type="button" aria-pressed={severity === 'warning'} onclick={() => (severity = 'warning')}>Warning <span class="num">{counts.warning}</span></button>
       <button type="button" aria-pressed={severity === 'info'} onclick={() => (severity = 'info')}>Info <span class="num">{counts.info}</span></button>
+    </div>
     </div>
   </div>
   {#snippet groupList(list: typeof groups)}
@@ -231,11 +249,16 @@
     {#if urgent.length}{@render groupList(urgent)}{/if}
     {#if housekeeping.length}
       <div class="housekeeping" class:spaced={urgent.length > 0}>
+        <div class="hk-head">
         <button type="button" class="hk-toggle" aria-expanded={housekeepingOpen} onclick={() => (showHousekeeping = !showHousekeeping)} disabled={severity === 'info' || Boolean(q)}>
           <span class="caret" class:open={housekeepingOpen}><Icon name="chevron" size={12} /></span>
           Housekeeping <span class="count">{num(housekeepingCount)}</span>
           <span class="muted hk-note">Info only: tidy-ups and things to confirm. Nothing here is urgent.</span>
         </button>
+        {#if housekeepingExportable}
+          <button type="button" class="export" title="Housekeeping findings and cleanup commands as Markdown" onclick={() => exportMd('housekeeping')}><Icon name="download" size={14} /> Export .md</button>
+        {/if}
+        </div>
         {#if housekeepingOpen}{@render groupList(housekeeping)}{/if}
       </div>
     {/if}
@@ -434,4 +457,8 @@
     .status h1 { font-size: 20px; line-height: 26px; }
     .kpi-value { font-size: 30px; line-height: 36px; }
   }
+  .head-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .export { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 10px; font-size: 13px; }
+  .hk-head { display: flex; align-items: stretch; gap: 8px; }
+  .hk-head .hk-toggle { flex: 1; min-width: 0; }
 </style>

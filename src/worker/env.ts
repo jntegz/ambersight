@@ -27,6 +27,8 @@ export interface Env {
   /** Optional Turnstile on the sign-in page: the site key (var) and secret (Worker secret). */
   TURNSTILE_SITE_KEY?: string;
   TURNSTILE_SECRET?: string;
+  /** Optional GitHub token for the Packages check (Worker secret): fine-grained, Contents: Read only. */
+  GITHUB_TOKEN?: string;
 }
 
 /** One unit of work on the scan queue. `step` counts continuations of the same account's scan. */

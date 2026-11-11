@@ -1,6 +1,8 @@
 <!-- One finding: severity, sentence, evidence, action, acknowledge and snooze. -->
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <script lang="ts">
+  import { checkOf, cleanupFor } from '../../../src/shared/findings';
+  import CheckExplain from './CheckExplain.svelte';
   import type { Finding } from '../../../src/shared/types';
   import { timeAgo, workerId } from '../lib/api';
   import Icon, { type IconName } from './Icon.svelte';
@@ -18,12 +20,21 @@
   const MODULE_ICON: Record<Finding['module'], IconName> = {
     budget: 'budget', errors: 'errors', runaway: 'runaway', cron: 'cron', usage: 'usage',
     deprecation: 'deprecation', exposure: 'exposure', zombies: 'zombies', timeline: 'timeline',
-    health: 'key', pages: 'grid', security: 'shield', drift: 'list', deploys: 'timeline',
+    health: 'key', pages: 'grid', security: 'shield', drift: 'list', deploys: 'timeline', packages: 'list',
   };
   // Timestamps in evidence (e.g. deployedAt) read better as "Nov 9, 19:58 UTC".
   const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
   const when = (iso: string) =>
     `${new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })} UTC`;
+  const cleanup = $derived(cleanupFor(finding));
+  let copied = $state('');
+  async function copy(cmd: string) {
+    try {
+      await navigator.clipboard.writeText(cmd);
+      copied = cmd;
+      setTimeout(() => (copied = ''), 1500);
+    } catch {}
+  }
   const evidence = $derived(
     Object.entries(finding.evidence).map(([k, v]) => {
       const label = k.replace(/([A-Z])/g, ' $1').toLowerCase(); // inARow -> in a row, d1 -> d1
@@ -54,11 +65,21 @@
         {finding.action}
         {#if finding.docsUrl}<a href={finding.docsUrl} target="_blank" rel="noopener noreferrer">Docs <Icon name="external" size={12} /></a>{/if}
       </p>
+      <CheckExplain check={checkOf(finding)} />
     {/if}
     {#if evidence.length}
       <dl class="evidence">
         {#each evidence as e (e.label)}<div><dt>{e.label}</dt><dd class="num">{e.value}</dd></div>{/each}
       </dl>
+    {/if}
+    {#if cleanup}
+      <details class="cleanup">
+        <summary>How to remove it</summary>
+        <p class="hint">{cleanup.note}{#if cleanup.commands.length} Ambersight is read-only and never runs these; they delete for good.{/if}</p>
+        {#each cleanup.commands as c (c)}
+          <div class="cmd"><code class="mono">{c}</code><button type="button" class="ghost small" onclick={() => copy(c)}>{copied === c ? 'Copied' : 'Copy'}</button></div>
+        {/each}
+      </details>
     {/if}
   </div>
   <div class="buttons">
@@ -104,4 +125,11 @@
     .row { grid-template-columns: 20px 1fr; padding: 14px 16px; }
     .buttons { grid-column: 2; justify-content: flex-start; }
   }
+  .cleanup { margin-top: 10px; font-size: 13px; }
+  .cleanup summary { cursor: pointer; color: var(--ink-muted); font-weight: 500; width: fit-content; }
+  .cleanup summary:hover { color: var(--ink); }
+  .cleanup .hint { margin: 6px 0; }
+  .cmd { display: flex; align-items: center; gap: 8px; margin-top: 6px; min-width: 0; }
+  .cmd button { min-height: 28px; padding: 0 8px; font-size: 12px; }
+  .cmd code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; padding: 6px 10px; border-radius: 6px; background: var(--line); font-size: 12px; user-select: all; }
 </style>

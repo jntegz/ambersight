@@ -4,6 +4,7 @@
   import { CHECK_GROUP_FIX, type FindingGroup } from '../../../src/shared/findings';
   import type { Finding } from '../../../src/shared/types';
   import { num, workerId } from '../lib/api';
+  import CheckExplain from './CheckExplain.svelte';
   import FindingRow from './FindingRow.svelte';
   import Icon, { type IconName } from './Icon.svelte';
   import SnoozeMenu from './SnoozeMenu.svelte';
@@ -21,7 +22,7 @@
   const MODULE_ICON: Record<Finding['module'], IconName> = {
     budget: 'budget', errors: 'errors', runaway: 'runaway', cron: 'cron', usage: 'usage',
     deprecation: 'deprecation', exposure: 'exposure', zombies: 'zombies', timeline: 'timeline',
-    health: 'key', pages: 'grid', security: 'shield', drift: 'list', deploys: 'timeline',
+    health: 'key', pages: 'grid', security: 'shield', drift: 'list', deploys: 'timeline', packages: 'list',
   };
   const CHIPS = 6;
 
@@ -57,6 +58,7 @@
       {fix}
       {#if first.docsUrl}<a href={first.docsUrl} target="_blank" rel="noopener noreferrer">Docs <Icon name="external" size={12} /></a>{/if}
     </p>
+    <CheckExplain check={group.check} />
     <button type="button" class="toggle" aria-expanded={open} onclick={() => (open = !open)}>
       <span class="caret" class:open><Icon name="chevron" size={12} /></span>
       {open ? 'Hide details' : `Show all ${num(group.findings.length)}`}

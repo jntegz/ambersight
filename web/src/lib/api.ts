@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import type { Config } from '../../../src/shared/config';
-import type { AccountSummary, Overview, SelfCost, SetupStatus, TimelineEntry } from '../../../src/shared/types';
+import type { AccountSummary, Overview, PackagesView, SelfCost, SetupStatus, TimelineEntry } from '../../../src/shared/types';
 
 export interface ScanResult {
   skipped?: boolean;
@@ -42,6 +42,7 @@ export const api = {
   saveAccounts: (ids: string[]) => call<AccountSummary[]>('/api/accounts', { method: 'PUT', body: JSON.stringify({ ids }) }),
   scan: (account?: string) => call<ScanResult>('/api/scan', { method: 'POST', body: JSON.stringify(account ? { account } : {}) }),
   timeline: (days: number, account?: string) => call<TimelineEntry[]>(`/api/timeline?days=${days}${account ? `&account=${encodeURIComponent(account)}` : ''}`),
+  packages: (account?: string) => call<PackagesView>(`/api/packages${q(account)}`),
   selfCost: (account?: string) => call<SelfCost>(`/api/self-cost${q(account)}`),
   setup: (account?: string) => call<SetupStatus>(account ? `/api/setup?account=${encodeURIComponent(account)}` : '/api/setup'),
   completeSetup: (body: { timeZone: string; confirmReadOnly?: true; accountId?: string; accountIds?: string[] }) =>

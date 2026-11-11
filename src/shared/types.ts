@@ -5,7 +5,7 @@ export type Severity = 'critical' | 'warning' | 'info';
 export type ModuleId =
   | 'budget' | 'errors' | 'runaway' | 'cron' | 'usage'
   | 'deprecation' | 'exposure' | 'zombies' | 'timeline' | 'health'
-  | 'pages' | 'security' | 'drift' | 'deploys';
+  | 'pages' | 'security' | 'drift' | 'deploys' | 'packages';
 
 export interface Finding {
   id: string;
@@ -108,7 +108,7 @@ export interface Overview {
   /** Pages projects, when the Pages module is on and the token can read them. */
   pages: PagesSummary[];
   /** Optional bindings present on this install. */
-  features: { queue: boolean; ai: boolean; turnstile: boolean };
+  features: { queue: boolean; ai: boolean; turnstile: boolean; github: boolean };
   findings: Finding[];
   workers: WorkerSummary[];
   groups: string[];
@@ -186,3 +186,20 @@ export interface SelfCost {
 }
 
 export const SEVERITY_WEIGHT: Record<Severity, number> = { critical: 10, warning: 3, info: 1 };
+
+/** How far a locked package version is behind the latest release on npm. */
+export type Gap = 'major' | 'minor' | 'patch' | 'none' | 'unknown';
+
+/** The Packages page (optional check). */
+export interface PackagesView {
+  enabled: boolean;
+  github: boolean;
+  workers: {
+    name: string;
+    repo: string;
+    dir: string | null;
+    checkedAt: string | null;
+    error: string | null;
+    packages: { name: string; locked: string; latest: string | null; gap: Gap; dev: boolean }[];
+  }[];
+}

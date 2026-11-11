@@ -62,14 +62,32 @@ export interface FakeOptions {
   tokenPolicies?: { name: string }[] | null;
   /** Extra accounts the token can see, each with its own fleet. acc1 always uses `fleet`. */
   fleets?: Record<string, { workers: unknown[]; scripts: unknown[] } | 'fail'>;
+  /** Packages check: GitHub contents path ("owner/repo/path") -> lockfile text, or an HTTP status. */
+  lockfiles?: Record<string, string | number>;
+  /** Packages check: npm package -> latest version, or an HTTP status. */
+  npm?: Record<string, string | number>;
 }
 
 export function fakeFetch(opts: FakeOptions = {}) {
   const calls: string[] = [];
+  /** "host Authorization" per request that carried an Authorization header. */
+  const auth: string[] = [];
   const fn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
     const path = url.pathname.replace('/client/v4', '');
     calls.push(`${init?.method ?? 'GET'} ${url.hostname}${path}`);
+    const authz = new Headers(init?.headers).get('Authorization');
+    if (authz) auth.push(`${url.hostname} ${authz}`);
+    const contents = url.hostname === 'api.github.com' ? path.match(/^\/repos\/([^/]+)\/([^/]+)\/contents\/(.+)$/) : null;
+    if (contents) {
+      const v = opts.lockfiles?.[decodeURIComponent(`${contents[1]}/${contents[2]}/${contents[3]}`)] ?? 404;
+      return typeof v === 'number' ? new Response('{}', { status: v }) : new Response(v);
+    }
+    if (url.hostname === 'registry.npmjs.org') {
+      const name = decodeURIComponent(path.slice(1).replace(/\/latest$/, ''));
+      const v = opts.npm?.[name] ?? 404;
+      return typeof v === 'number' ? new Response('{}', { status: v }) : new Response(JSON.stringify({ name, version: v }));
+    }
     if (url.hostname === 'api.github.com') return new Response(JSON.stringify({ tag_name: NEXT_RELEASE, html_url: `https://github.com/x/releases/${NEXT_RELEASE}` }));
     if (url.hostname === 'hooks.slack.com') return new Response('ok');
     if (path === '/graphql') {
@@ -127,5 +145,5 @@ export function fakeFetch(opts: FakeOptions = {}) {
     }
     return new Response(JSON.stringify({ success: false, errors: [{ message: `no fixture for ${path}` }] }), { status: 404 });
   };
-  return { fn: fn as typeof fetch, calls };
+  return { fn: fn as typeof fetch, calls, auth };
 }

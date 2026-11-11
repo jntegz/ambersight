@@ -13,6 +13,7 @@ Ambersight has two layers of configuration:
 | `ADMIN_PASSPHRASE` | Yes | The dashboard passphrase, at least 12 characters. Sign-in stays off until it is set. If you change the passphrase in **Settings › Security**, the new one is stored as a hash in D1 and takes priority over this secret. |
 | `WEBHOOK_URL` | No | A Slack, Discord, Telegram, ntfy or generic JSON endpoint. See [alerts.md](alerts.md#webhooks). |
 | `TURNSTILE_SECRET` | No | The secret key of a Cloudflare Turnstile widget. With `TURNSTILE_SITE_KEY`, the sign-in page asks for a Turnstile check before the passphrase. |
+| `GITHUB_TOKEN` | No | For the [Packages check](checks.md#packages) only. A GitHub **fine-grained** token with *Contents: Read* (and the *Metadata: Read* GitHub adds) on the repositories you map, nothing else. Ambersight sends it only to `api.github.com`, never follows a redirect with it, and never shows it. |
 
 Set them with `npx wrangler secret put <NAME>`, or in the Cloudflare dashboard under **ambersight › Settings › Variables and Secrets**.
 
@@ -91,7 +92,9 @@ One install can watch every account its token can see. Choose them in the setup 
 | `modules.pages` | `true` | Pages projects: failed deploys and public `pages.dev` addresses. Needs *Pages Read*. |
 | `modules.security` | `true` | Audit log (members, tokens), certificates and dangling DNS. Needs *SSL and Certificates Read* and *DNS Read*. |
 | `modules.drift` | `true` | Bindings that disappeared, staging and production that differ, the 64-variable limit |
-| `modules.incidents` | `false` | Active incidents from the public status page `www.cloudflarestatus.com`, on alerts and the timeline. The only module that contacts a host outside Cloudflare's API; the request carries nothing about your account. |
+| `modules.incidents` | `false` | Active incidents from the public status page `www.cloudflarestatus.com`, on alerts and the timeline. The request carries nothing about your account. |
+| `modules.packages` | `false` | The [Packages check](checks.md#packages): direct npm dependencies of mapped Workers, locked version against the latest on npm. Needs the `GITHUB_TOKEN` secret. Contacts `api.github.com` and `registry.npmjs.org`, and is the only check that reads source code (`package-lock.json` only). |
+| `packageRepos` | `{}` | `"<account id>:<Worker name>"` → `{ "repo": "owner/name", "dir": "workers/api", "ref": "main" }`. `dir` and `ref` are optional (root folder, default branch). A key with only the Worker name applies in every account. Settings adds the account id for you. |
 | `mutedChecks` | `[]` | Individual checks switched off, by ID, for example `"zombies:unbound-kv"`. The IDs are in [checks.md](checks.md). |
 
 ### Thresholds

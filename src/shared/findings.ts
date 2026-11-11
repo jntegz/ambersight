@@ -128,3 +128,52 @@ export function groupFindings(findings: Finding[]): FindingGroup[] {
   }
   return [...groups.values()].sort((a, b) => RANK[a.severity] - RANK[b.severity] || b.findings.length - a.findings.length || a.title.localeCompare(b.title));
 }
+
+/**
+ * How to remove a leftover by hand: wrangler commands for unused storage and Workers, a dashboard
+ * path where wrangler has none. Ambersight is read-only and never runs these. Names go into a
+ * shell command, so anything that is not a plain name gets no command at all.
+ */
+export interface Cleanup {
+  /** Shell commands, in order. Destructive. */
+  commands: string[];
+  /** What to check or do first, or where to click when there is no command. */
+  note: string;
+}
+
+const SAFE = /^[A-Za-z0-9][\w.-]{0,99}$/;
+
+export function cleanupFor(f: Pick<Finding, 'module' | 'code' | 'script' | 'evidence'>): Cleanup | null {
+  if (f.module !== 'zombies') return null;
+  const ev = (k: string) => (typeof f.evidence[k] === 'string' && SAFE.test(f.evidence[k] as string) ? (f.evidence[k] as string) : null);
+  const check = checkOf(f);
+  if (check === 'zombies:unbound-kv') {
+    const id = f.code.slice('unbound-kv-'.length);
+    return /^[a-f0-9]{32}$/.test(id)
+      ? { commands: [`npx wrangler kv namespace delete --namespace-id=${id}`], note: 'Export any keys you still need first (npx wrangler kv key list --namespace-id=…).' }
+      : null;
+  }
+  if (check === 'zombies:unbound-d1') {
+    const name = ev('d1');
+    return name ? { commands: [`npx wrangler d1 export ${name} --remote --output=${name}-backup.sql`, `npx wrangler d1 delete ${name}`], note: 'The first command saves a backup of the database.' } : null;
+  }
+  if (check === 'zombies:unbound-r2') {
+    const name = ev('r2');
+    return name ? { commands: [`npx wrangler r2 bucket delete ${name}`], note: 'A bucket must be empty before it can be deleted: empty it in the dashboard (R2 › bucket › Settings) or with an object lifecycle rule. Check it is not used from outside Workers (S3 clients, public bucket URL).' } : null;
+  }
+  if (check === 'zombies:unbound-queues') {
+    const name = ev('queues');
+    return name ? { commands: [`npx wrangler queues delete ${name}`], note: 'Messages still in the queue are lost.' } : null;
+  }
+  if (check === 'zombies:no-traffic' || check === 'zombies:never-deployed') {
+    return SAFE.test(f.script)
+      ? { commands: [`npx wrangler delete --name ${f.script}`], note: 'Deleting a Worker leaves its KV, D1, R2 and Queues in place: they show up here as unused on a later scan, after the next inventory refresh.' }
+      : null;
+  }
+  if (check === 'zombies:orphan-route') return { commands: [], note: 'Delete it in the dashboard: your zone › Workers Routes.' };
+  if (check === 'zombies:orphan-domain') {
+    const id = f.code.slice('orphan-domain-'.length);
+    return { commands: [], note: `Remove it with the API (a token with Workers Scripts Edit, not Ambersight's): DELETE /accounts/{account_id}/workers/domains/${SAFE.test(id) ? id : '{domain_id}'}.` };
+  }
+  return null;
+}
