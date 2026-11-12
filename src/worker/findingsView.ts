@@ -1,7 +1,7 @@
 // The findings inbox and a finding's history, read from D1 only.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import type { FindingEvent, FindingListItem, Severity } from '../shared/types';
+import type { FindingEvent, FindingListItem, Severity, SinceView } from '../shared/types';
 import { toFinding, type FindingRow } from './overview';
 
 const SEVERITY_ORDER: Record<Severity, number> = { critical: 0, warning: 1, info: 2 };
@@ -36,4 +36,27 @@ export async function buildFindingHistory(db: D1Database, id: string): Promise<F
     .bind(id)
     .all<{ at: string; kind: FindingEvent['kind']; severity: Severity | null }>();
   return results.map((r) => ({ at: r.at, kind: r.kind, severity: r.severity }));
+}
+
+/** What changed since a time: findings opened, reopened, got worse or were resolved, newest first. */
+export async function buildChangesSince(db: D1Database, account: string, since: string): Promise<SinceView> {
+  const [counts, recent] = await db.batch([
+    db.prepare(
+      `SELECT kind, COUNT(*) AS n FROM finding_events WHERE account = ?1 AND at > ?2 AND kind IN ('opened', 'reopened', 'escalated', 'resolved') GROUP BY kind`,
+    ).bind(account, since),
+    db.prepare(
+      `SELECT e.at, e.kind, e.severity, e.script, f.message, f.id FROM finding_events e LEFT JOIN findings f ON f.id = e.finding_id
+       WHERE e.account = ?1 AND e.at > ?2 AND e.kind IN ('opened', 'reopened', 'escalated', 'resolved')
+       ORDER BY CASE e.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, e.at DESC LIMIT 8`,
+    ).bind(account, since),
+  ]);
+  const n = new Map((counts.results as { kind: string; n: number }[]).map((r) => [r.kind, r.n]));
+  return {
+    since,
+    opened: (n.get('opened') ?? 0) + (n.get('reopened') ?? 0),
+    escalated: n.get('escalated') ?? 0,
+    resolved: n.get('resolved') ?? 0,
+    items: (recent.results as { at: string; kind: SinceView['items'][number]['kind']; severity: Severity | null; script: string | null; message: string | null; id: string | null }[])
+      .map((r) => ({ at: r.at, kind: r.kind, severity: r.severity, script: r.script, message: r.message })),
+  };
 }

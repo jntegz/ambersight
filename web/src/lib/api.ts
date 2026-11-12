@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import type { Config } from '../../../src/shared/config';
-import type { AccountSummary, AnalyticsView, FindingEvent, FindingListItem, Overview, PackagesView, Range, ResourcesView, SelfCost, SetupStatus, TimelineEntry, WorkerDetail } from '../../../src/shared/types';
+import type { AccountSummary, AnalyticsView, FindingEvent, FindingListItem, Overview, PackagesView, Range, ResourcesView, SelfCost, SetupStatus, SinceView, TimelineEntry, WorkerDetail } from '../../../src/shared/types';
 
 export interface ScanResult {
   skipped?: boolean;
@@ -30,7 +30,18 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
 
 const q = (account?: string) => (account ? `?account=${encodeURIComponent(account)}` : '');
 
+export interface TokenInfo {
+  id: string;
+  name: string;
+  hint: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
 export const api = {
+  tokens: () => call<TokenInfo[]>('/api/tokens'),
+  createToken: (name: string) => call<{ token: string; info: TokenInfo }>('/api/tokens', { method: 'POST', body: JSON.stringify({ name }) }),
+  revokeToken: (id: string) => call<{ ok: true }>(`/api/tokens/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   session: () => call<{ authenticated: boolean; turnstileSiteKey?: string | null }>('/api/session'),
   login: (passphrase: string, turnstile?: string) =>
     call<{ ok: true }>('/api/login', { method: 'POST', body: JSON.stringify({ passphrase, ...(turnstile ? { turnstile } : {}) }) }),
@@ -61,6 +72,8 @@ export const api = {
   restore: (id: string) => call<{ ok: true }>(`/api/findings/${encodeURIComponent(id)}/restore`, { method: 'POST' }),
   findings: (status: 'open' | 'acknowledged' | 'snoozed' | 'resolved', account?: string) =>
     call<FindingListItem[]>(`/api/findings?status=${status}${account ? `&account=${encodeURIComponent(account)}` : ''}`),
+  changes: (since: string, account?: string) =>
+    call<SinceView>(`/api/changes?since=${encodeURIComponent(since)}${account ? `&account=${encodeURIComponent(account)}` : ''}`),
   history: (id: string) => call<FindingEvent[]>(`/api/findings/${encodeURIComponent(id)}/history`),
   analytics: (range: Range, account?: string) => call<AnalyticsView>(`/api/analytics?range=${range}${account ? `&account=${encodeURIComponent(account)}` : ''}`),
   worker: (name: string, range: Range, account?: string) =>

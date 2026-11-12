@@ -127,6 +127,8 @@ export interface AccountSettings {
   plan?: PlanSetting;
   /** Extra digest for this account (a client), sent only to addresses also listed in DIGEST_TO. */
   digestTo?: string[];
+  /** Workers Paid: monthly budget in USD for the estimated bill; a finding at 80%, at 100% and when the forecast passes it. */
+  budgetUsd?: number;
 }
 
 /** A small instruct model on the Workers AI free allocation. */
@@ -325,6 +327,12 @@ export function parseConfig(input: unknown): Config {
       out.plan = a.plan as PlanSetting;
     }
     if (a.digestTo != null) out.digestTo = strList(a.digestTo, `accounts.${id}.digestTo`, EMAIL);
+    if (a.budgetUsd != null) {
+      if (typeof a.budgetUsd !== 'number' || !Number.isFinite(a.budgetUsd) || a.budgetUsd < 5 || a.budgetUsd > 10_000_000) {
+        throw new ConfigError(`accounts.${id}.budgetUsd must be a number of dollars from 5 to 10,000,000.`);
+      }
+      out.budgetUsd = Math.round(a.budgetUsd * 100) / 100;
+    }
     accounts[id] = out;
   }
 

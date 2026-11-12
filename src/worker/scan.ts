@@ -16,6 +16,7 @@ import type { Env } from './env';
 import { boundByMap, type InventoryFacts, type StorageKind4 } from './hygiene';
 import type { ChangeFacts } from './security';
 import { metered } from './meter';
+import { budgetFinding } from './cost';
 import { bumpRevision, historyRetention, rollupDays, rollupStatements, scanRunStatement } from './history';
 import { fetchIncidents, type Incident } from './incidents';
 import { allowedFetch } from './net';
@@ -876,6 +877,12 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
     changes: facts.changes,
   });
   if (config.modules.packages) findings.push(...(await loadPackageFindings(db, accountId, config)));
+  // Monthly budget (Workers Paid, when set): one read of this month's daily totals.
+  const monthlyBudget = config.accounts[accountId]?.budgetUsd;
+  if (monthlyBudget && plan === 'paid' && config.modules.cost) {
+    const f = await monthBudget(db, accountId, now, facts.storage, monthlyBudget);
+    if (f) findings.push(f);
+  }
   // Checks the user switched off are dropped here, so their open findings resolve like fixed ones.
   const muted = new Set(config.mutedChecks);
   // While cron checks are paused (too many runs to count, or no data at all), keep existing cron
@@ -903,6 +910,18 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
   ]);
 
   return { workers: inventory.length, findings: findings.length, subrequests: calls(), d1Queries: meter.queries, warnings, detailRemaining, zonesRemaining: zonesLeft };
+}
+
+async function monthBudget(db: D1Database, account: string, now: Date, storage: { kind: string; bytes: number }[], budget: number): Promise<Finding | null> {
+  const month = isoHour(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)));
+  const { results } = await db
+    .prepare('SELECT metric, SUM(value) AS v, MIN(hour) AS first FROM quota_hourly WHERE account = ?1 AND hour >= ?2 GROUP BY metric')
+    .bind(account, month)
+    .all<{ metric: QuotaMetric; v: number; first: string }>();
+  const first = results.reduce<string | null>((m, r) => (!m || r.first < m ? r.first : m), null);
+  const totals: Partial<Record<StorageKind, number>> = {};
+  for (const s of storage) totals[s.kind as StorageKind] = (totals[s.kind as StorageKind] ?? 0) + s.bytes;
+  return budgetFinding(now, Object.fromEntries(results.map((r) => [r.metric, r.v])), totals, first, budget);
 }
 
 async function loadPackageFindings(db: D1Database, account: string, config: Config): Promise<Finding[]> {

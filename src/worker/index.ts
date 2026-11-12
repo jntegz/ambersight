@@ -13,8 +13,9 @@ import type { Env, ScanMessage } from './env';
 import { metered } from './meter';
 import { buildAnalytics, buildWorkerDetail, parseRange } from './analytics';
 import { bumpRevision } from './history';
-import { buildFindingHistory, buildFindingsList } from './findingsView';
+import { buildChangesSince, buildFindingHistory, buildFindingsList } from './findingsView';
 import { hashText } from './scan';
+import { checkToken, createToken, listTokens, revokeToken, tokenMayRead } from './tokens';
 import { sendTest } from './notify';
 import { buildAccounts, buildOverview, buildSelfCost, buildTimeline, pickAccount } from './overview';
 import { buildPackages } from './packages';
@@ -95,10 +96,15 @@ app.post('/api/logout', async (c) => {
   return c.json({ ok: true });
 });
 
-// Everything below requires a session.
+// Everything below requires a session, or a read-only API token for the GET routes it may read.
 app.use('/api/*', async (c, next) => {
-  if (!(await hasSession(c.env, c.req.header('Cookie') ?? null))) return c.json({ error: 'Not signed in.' }, 401);
-  await next();
+  if (await hasSession(c.env, c.req.header('Cookie') ?? null)) return next();
+  const bearer = c.req.header('Authorization');
+  if (bearer) {
+    if (tokenMayRead(c.req.method, c.req.path) && (await checkToken(c.env.DB, bearer))) return next();
+    return c.json({ error: 'This token is not valid, or cannot read this route. API tokens are read-only.' }, 401);
+  }
+  return c.json({ error: 'Not signed in.' }, 401);
 });
 
 /** The account a request names with ?account=, or the first watched one. */
@@ -263,6 +269,16 @@ app.get('/api/findings', async (c) => {
   return c.json(await buildFindingsList(c.env.DB, account, status as 'open'));
 });
 
+/** Findings opened, worse or resolved since a time (the overview's "Since your last visit"). */
+app.get('/api/changes', async (c) => {
+  const account = await accountOf(c.env, c.req.query('account'));
+  const since = c.req.query('since') ?? '';
+  const t = Date.parse(since);
+  if (!Number.isFinite(t)) return c.json({ error: 'since must be an ISO time.' }, 400);
+  // At most 30 days back; older visits read as "a while ago".
+  return c.json(await buildChangesSince(c.env.DB, account, new Date(Math.max(t, Date.now() - 30 * 86_400_000)).toISOString()));
+});
+
 /** One finding's history: every open, resolve, acknowledge, snooze and alert. */
 app.get('/api/findings/:id/history', async (c) => c.json(await buildFindingHistory(c.env.DB, c.req.param('id'))));
 
@@ -341,6 +357,16 @@ app.post('/api/notify/test', async (c) => {
     return c.json({ error: (e as Error).message }, 400);
   }
 });
+
+// ---- Read-only API tokens (managed with a session only: the token routes are not readable by tokens).
+
+app.get('/api/tokens', async (c) => c.json(await listTokens(c.env.DB)));
+app.post('/api/tokens', async (c) => {
+  const body = await c.req.json<{ name?: unknown }>().catch(() => ({}) as { name?: unknown });
+  const r = await createToken(c.env.DB, typeof body.name === 'string' ? body.name : '');
+  return 'error' in r ? c.json({ error: r.error }, 400) : c.json(r);
+});
+app.delete('/api/tokens/:id', async (c) => ((await revokeToken(c.env.DB, c.req.param('id'))) ? c.json({ ok: true }) : c.json({ error: 'No such token.' }, 404)));
 
 app.post('/api/passphrase', async (c) => {
   const body = await c.req.json<{ current?: unknown; next?: unknown }>().catch(() => ({}) as Record<string, unknown>);

@@ -9,6 +9,7 @@
   import MapEditor from '../components/settings/MapEditor.svelte';
   import NotifyChannels from '../components/settings/NotifyChannels.svelte';
   import OverridesEditor from '../components/settings/OverridesEditor.svelte';
+  import ApiTokens from '../components/settings/ApiTokens.svelte';
   import PassphraseForm from '../components/settings/PassphraseForm.svelte';
   import SelfCost from '../components/settings/SelfCost.svelte';
   import Switch from '../components/Switch.svelte';
@@ -360,6 +361,13 @@
                   <input class="input acct-digest" aria-label="Digest recipients for {accountName(id)}" placeholder="Client digest to (optional, comma-separated)"
                     value={(draft.accounts[id].digestTo ?? []).join(', ')}
                     onchange={(e) => { const l = splitList(e.currentTarget.value); draft!.accounts[id].digestTo = l.length ? l : undefined; }} />
+                  <label class="budget">
+                    <span class="hint">Monthly budget (Workers Paid), USD</span>
+                    <input class="input short" type="number" min="5" step="1" inputmode="decimal" placeholder="None"
+                      aria-label="Monthly budget in US dollars for {accountName(id)}"
+                      value={draft.accounts[id].budgetUsd ?? ''}
+                      onchange={(e) => { const v = Number(e.currentTarget.value); draft!.accounts[id].budgetUsd = e.currentTarget.value && v >= 5 ? v : undefined; }} />
+                  </label>
                 </div>
                 <div class="inline">
                   <input class="input" aria-label="Label for {accountName(id)}" placeholder="Label (optional)" maxlength="60"
@@ -612,6 +620,8 @@
           <p class="hint">The passphrase currently comes from the <span class="mono">ADMIN_PASSPHRASE</span> secret. Changing it here stores a new one that takes over.</p>
         {/if}
         <PassphraseForm onSubmit={changePassphrase} note="Signs out every session, including this one." />
+        <h3 class="sub-h">Read-only API tokens</h3>
+        <ApiTokens />
       </section>
 
       <!-- Self-cost -->
@@ -768,4 +778,6 @@
   .pkg-row { flex-wrap: wrap; margin-top: 8px; }
   .pkg-row .input { min-width: 0; flex: 1 1 140px; }
   .pkg-name { flex: 0 0 auto; min-width: 120px; }
+  .budget { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+  .sub-h { font-size: 15px; margin-top: 20px; }
 </style>

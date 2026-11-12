@@ -7,6 +7,7 @@
   import Icon, { type IconName } from './components/Icon.svelte';
   import Login from './components/Login.svelte';
   import Logo from './components/Logo.svelte';
+  import SinceLastVisit from './components/SinceLastVisit.svelte';
   import CommandPalette, { type Command } from './components/CommandPalette.svelte';
   import Accounts from './pages/Accounts.svelte';
   import Analytics from './pages/Analytics.svelte';
@@ -175,6 +176,8 @@
   }
 
   function signedOut(message = '') {
+    // Nothing of the fleet stays in this browser's offline copy after signing out.
+    try { navigator.serviceWorker?.controller?.postMessage('clear'); } catch {}
     data = null;
     config = null;
     loginMessage = message;
@@ -239,11 +242,18 @@
     }
   }
 
+  let offline = $state(typeof navigator !== 'undefined' && navigator.onLine === false);
   let turnstileSiteKey = $state<string | null>(null);
   onMount(async () => {
-    const s = await api.session().catch(() => ({ authenticated: false, turnstileSiteKey: null }));
-    turnstileSiteKey = s.turnstileSiteKey ?? null;
-    if (s.authenticated) await load();
+    const s = await api.session().catch(() => null);
+    // No network: open the last copy the service worker kept, if there is one.
+    if (!s && !navigator.onLine) {
+      offline = true;
+      await load();
+      return;
+    }
+    turnstileSiteKey = s?.turnstileSiteKey ?? null;
+    if (s?.authenticated) await load();
     else view = 'login';
   });
 
@@ -257,7 +267,7 @@
   const stale = $derived(!!data?.lastScanAt && Date.now() - new Date(data.lastScanAt).getTime() > 3 * interval * 60_000);
 </script>
 
-<svelte:window onkeydown={onKey} onhashchange={onHash} />
+<svelte:window onkeydown={onKey} onhashchange={onHash} ononline={() => { offline = false; if (view === 'ready') load(); }} onoffline={() => (offline = true)} />
 
 {#if view === 'login'}
   <Login onSignedIn={load} message={loginMessage} {turnstileSiteKey} />
@@ -325,6 +335,14 @@
     </div>
   </header>
 
+  {#if offline}
+    <div class="banner">
+      <div class="banner-inner warn" role="status">
+        <Icon name="warning" size={18} />
+        <p class="banner-text">You are offline. This is the data from the last time these pages loaded; it updates when you are back online.</p>
+      </div>
+    </div>
+  {/if}
   {#if data.update && dismissed !== data.update.latest}
     <div class="banner">
       <div class="banner-inner update" role="status">
@@ -393,6 +411,7 @@
         onUnauthorized={() => signedOut()}
       />
     {:else}
+      {#key selected}<SinceLastVisit account={selected} />{/key}
       <Overview {data} {query} scanInterval={config ? interval : null} mutedChecks={config?.mutedChecks ?? []} onAcknowledge={acknowledge} onSnooze={snooze} onBulk={bulk} onMute={mute} />
     {/if}
 

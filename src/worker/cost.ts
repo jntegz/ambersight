@@ -5,7 +5,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { PRICES, unitPrice, type QuotaMetric, type StorageKind } from '../shared/limits';
-import type { CostEstimate } from '../shared/types';
+import type { CostEstimate, Finding } from '../shared/types';
 
 const GB = 1e9;
 
@@ -57,3 +57,30 @@ export function estimate(
 }
 
 const round = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * Workers Paid budget: a warning when the month-end forecast passes the budget or the month so far
+ * reaches 80% of it, critical once the month so far passes it. Cloudflare's own budget alerts are
+ * account-wide, a day late and informational; this one comes with the scan, within the hour.
+ */
+export function budgetFinding(
+  now: Date, monthToDate: Partial<Record<QuotaMetric, number>>, storage: Partial<Record<StorageKind, number>>, trackedSince: string | null, budgetUsd: number,
+): Finding | null {
+  const e = estimate(now, monthToDate, storage, [], trackedSince);
+  const share = e.monthToDate / budgetUsd;
+  if (share < 0.8 && e.forecast < budgetUsd) return null;
+  const severity = share >= 1 ? 'critical' : 'warning';
+  const usd = (n: number) => `$${n.toFixed(2)}`;
+  const message = share >= 1
+    ? `The estimated bill this month is ${usd(e.monthToDate)}, past the budget of ${usd(budgetUsd)}.`
+    : share >= 0.8
+      ? `The estimated bill this month is ${usd(e.monthToDate)}, ${Math.round(share * 100)}% of the budget of ${usd(budgetUsd)}.`
+      : `At this pace the bill reaches about ${usd(e.forecast)} this month, above the budget of ${usd(budgetUsd)}.`;
+  return {
+    id: 'budget:*:monthly-budget', module: 'budget', script: '*', code: 'monthly-budget', severity, message,
+    // Rounded to whole dollars so the finding is not rewritten on every scan.
+    evidence: { monthToDate: `$${Math.round(e.monthToDate)}`, forecast: `$${Math.round(e.forecast)}`, budget: `$${Math.round(budgetUsd)}` },
+    action: 'Open Analytics › Cost to see which Workers and products drive the spend, and look for runaway findings. Workers Paid has no hard spending cap.',
+    docsUrl: PRICES.docs,
+  };
+}

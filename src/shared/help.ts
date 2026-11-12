@@ -115,6 +115,16 @@ export const CHECK_HELP: Record<string, CheckHelp> = {
       'If it is real visitors, upgrade to Workers Paid (Workers & Pages › Plans): it includes 10 million requests a month.',
     ],
   },
+  'budget:monthly-budget': {
+    what: 'You set a monthly budget for this account in Settings › Accounts, and the estimated Workers Paid bill is close to it, past it, or on track to pass it by the end of the month.',
+    why: 'Workers Paid has no spending cap: a loop, a retry storm or a crawler keeps running and is billed for every request. Cloudflare\'s own budget alerts arrive a day late; this one comes within the hour.',
+    steps: [
+      'Open Analytics › Cost to see the bill per month, the usage per day and the Workers that cost most.',
+      'Look in Needs attention for runaway or idle-loop findings: they name the Worker or the storage behind a sudden rise.',
+      'If the spend is expected (more visitors), raise the budget in Settings › Accounts.',
+      'To stop a runaway Worker yourself, deploy a fix, roll back in Workers & Pages › your Worker › Deployments, or set a CPU limit in its Settings. Ambersight never changes your Workers.',
+    ],
+  },
   'budget:free-daily-d1-rows-read': daily('database reads', '5 million rows read from D1 databases', 'look for the "D1 queries reading far more rows than they return" finding, which names the query.', [
     'A query that reads far more rows than it returns usually needs an index. Add one: CREATE INDEX idx_name ON table(column), for the columns in its WHERE clause.',
   ]),

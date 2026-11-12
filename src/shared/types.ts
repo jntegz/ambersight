@@ -75,6 +75,8 @@ export interface CostEstimate {
   /** Ambersight started tracking this account after the month began, so the start is extrapolated. */
   partialMonth: boolean;
   pricesAsOf: string;
+  /** The monthly budget set for this account, if any. */
+  budget?: number | null;
 }
 
 export interface PagesSummary {
@@ -352,4 +354,14 @@ export interface WorkerDetail {
   changes: { at: string; kind: string; detail: string | null }[];
   /** List price of this Worker's requests and CPU time in the range, before included usage. Paid only. */
   cost: { amount: number; perMillion: number | null } | null;
+}
+
+/** "Since your last visit" on the overview. */
+export interface SinceView {
+  since: string;
+  opened: number;
+  escalated: number;
+  resolved: number;
+  /** The most serious changes, at most 8. */
+  items: { at: string; kind: 'opened' | 'reopened' | 'escalated' | 'resolved'; severity: Severity | null; script: string | null; message: string | null }[];
 }

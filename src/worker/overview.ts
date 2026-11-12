@@ -122,6 +122,7 @@ export async function buildOverview(env: Env, requested?: string | null, now = n
       perWorkerWeek(daily.results as { script: string; requests: number; cpu: number | null }[], (now.getTime() - new Date(weekStart).getTime()) / DAY),
       firstHour,
     );
+    cost.budget = config.accounts[A]?.budgetUsd ?? null;
   }
 
   type W = { name: string; deployed_on: string | null; modified_on: string | null; handlers: string | null; tags: string | null; workers_dev: number | null };

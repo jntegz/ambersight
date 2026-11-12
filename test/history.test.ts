@@ -408,3 +408,75 @@ describe('median CPU and wall time', () => {
     expect(f.calls.filter((c) => c.endsWith('/graphql')).length).toBeLessThanOrEqual(3);
   });
 });
+
+describe('monthly budget', () => {
+  it('warns when the forecast passes the budget and turns critical past it', async () => {
+    const { budgetFinding } = await import('../src/worker/cost');
+    const now = new Date('2026-11-15T00:00:00Z');
+    // 100 million requests in half a month: $27 + $5 so far, about $59 by month end.
+    const usage = { 'workers.requests': 100e6 };
+    expect(budgetFinding(now, usage, {}, '2026-11-01T00:00:00Z', 100)).toBeNull();
+    expect(budgetFinding(now, usage, {}, '2026-11-01T00:00:00Z', 50)).toMatchObject({ severity: 'warning', code: 'monthly-budget' });
+    expect(budgetFinding(now, usage, {}, '2026-11-01T00:00:00Z', 30)).toMatchObject({ severity: 'critical' });
+  });
+
+  it('accepts a budget per account and refuses nonsense', async () => {
+    const { defaultConfig, parseConfig } = await import('../src/shared/config');
+    const c = defaultConfig();
+    c.accounts['0123456789abcdef0123456789abcdef'] = { budgetUsd: 250 };
+    expect(parseConfig(c).accounts['0123456789abcdef0123456789abcdef'].budgetUsd).toBe(250);
+    c.accounts['0123456789abcdef0123456789abcdef'] = { budgetUsd: -1 };
+    expect(() => parseConfig(c)).toThrow(/budgetUsd/);
+  });
+});
+
+describe('read-only API tokens', () => {
+  const del = (e: Env, cookie: string, path: string) =>
+    worker.fetch(new Request(`https://ambersight.example${path}`, { method: 'DELETE', headers: { Cookie: cookie, Origin: 'https://ambersight.example' } }), e, ctx);
+  const bearer = (e: Env, token: string, path: string, method = 'GET') =>
+    worker.fetch(new Request(`https://ambersight.example${path}`, {
+      method, headers: { Authorization: `Bearer ${token}`, Origin: 'https://ambersight.example', 'Content-Type': 'application/json' }, ...(method === 'POST' ? { body: '{}' } : {}),
+    }), e, ctx);
+
+  it('reads the dashboard data, nothing else, and stops working when revoked', async () => {
+    stub();
+    const e = env();
+    await scan(e, NOW);
+    const cookie = await signedIn(e);
+    const r = (await (await post(e, cookie, '/api/tokens', { name: 'Grafana' })).json()) as { token: string; info: { id: string; hint: string } };
+    expect(r.token).toMatch(/^amb_[A-Za-z0-9_-]{43}$/);
+    // Only a digest is stored.
+    expect(JSON.stringify((await e.DB.prepare('SELECT * FROM api_tokens').all()).results)).not.toContain(r.token);
+
+    expect((await bearer(e, r.token, '/api/overview')).status).toBe(200);
+    expect((await bearer(e, r.token, '/api/analytics?range=7d')).status).toBe(200);
+    expect((await bearer(e, r.token, '/api/workers/api')).status).toBe(200);
+    // Settings, the token list and every change are out of reach.
+    expect((await bearer(e, r.token, '/api/config')).status).toBe(401);
+    expect((await bearer(e, r.token, '/api/tokens')).status).toBe(401);
+    expect((await bearer(e, r.token, '/api/scan', 'POST')).status).toBe(401);
+    expect((await bearer(e, r.token, '/api/findings/x/acknowledge', 'POST')).status).toBe(401);
+    expect((await bearer(e, 'amb_' + 'x'.repeat(43), '/api/overview')).status).toBe(401);
+    expect(await e.DB.prepare('SELECT last_used_at FROM api_tokens').first('last_used_at')).toBeTruthy();
+
+    const list = (await (await get(e, cookie, '/api/tokens')).json()) as { name: string; hint: string }[];
+    expect(list).toEqual([expect.objectContaining({ name: 'Grafana', hint: r.info.hint })]);
+    expect((await del(e, cookie, `/api/tokens/${r.info.id}`)).status).toBe(200);
+    expect((await bearer(e, r.token, '/api/overview')).status).toBe(401);
+  });
+});
+
+describe('since your last visit', () => {
+  it('counts findings opened and resolved after a time', async () => {
+    stub();
+    const e = env();
+    await scan(e, NOW);
+    const cookie = await signedIn(e);
+    const before = new Date(NOW.getTime() - H).toISOString();
+    const v = (await (await get(e, cookie, `/api/changes?since=${encodeURIComponent(before)}`)).json()) as { opened: number; resolved: number; items: { kind: string }[] };
+    const open = (await e.DB.prepare(`SELECT COUNT(*) AS n FROM findings WHERE status = 'open'`).first('n')) as number;
+    expect(v.opened).toBe(open);
+    expect(v.items.length).toBe(Math.min(8, open));
+    expect((await get(e, cookie, '/api/changes?since=yesterday')).status).toBe(400);
+  });
+});

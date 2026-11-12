@@ -25,6 +25,18 @@
     <div><p class="muted label">Month end at this pace</p><p class="value num strong">{usd(cost.forecast)}</p></div>
   </div>
 
+  {#if cost.budget}
+    {@const used = cost.monthToDate / cost.budget}
+    {@const ahead = cost.forecast / cost.budget}
+    <div class="budget" class:over={used >= 1} class:warn={used < 1 && (used >= 0.8 || ahead >= 1)}>
+      <div class="track" role="meter" aria-label="Share of the monthly budget used" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(used * 100)}>
+        <span class="fill" style="width: {Math.min(100, used * 100)}%"></span>
+        <span class="pace" style="left: {Math.min(100, ahead * 100)}%" title="Month end at this pace"></span>
+      </div>
+      <p class="muted">{Math.round(used * 100)}% of the {usd(cost.budget)} budget{ahead >= 1 ? `; on track for ${Math.round(ahead * 100)}% by month end` : ''}.</p>
+    </div>
+  {/if}
+
   {#if items.length}
     <ul class="items" aria-label="Forecast by product">
       {#each items as i (i.label)}
@@ -53,6 +65,12 @@
 
 <style>
   .cost { padding: 20px 24px; display: grid; gap: 14px; align-content: start; }
+  .budget { display: grid; gap: 6px; font-size: 13px; }
+  .track { position: relative; height: 8px; border-radius: 999px; background: var(--line); }
+  .fill { position: absolute; inset: 0 auto 0 0; border-radius: 999px; background: var(--healthy); }
+  .warn .fill { background: var(--accent); }
+  .over .fill { background: var(--critical); }
+  .pace { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--ink-muted); }
   .head { display: flex; gap: 12px; align-items: flex-start; }
   .icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; flex: none; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
   h2 { font-size: 16px; line-height: 22px; font-weight: 600; }

@@ -16,6 +16,7 @@ export const CHECK_PATTERN = /^[a-z]+:[a-z0-9-]+$/;
 /** Group headings. A check not listed here uses its first finding's message. */
 export const CHECK_TITLES: Record<string, string> = {
   'budget:free-daily-requests': 'Free plan request budget',
+  'budget:monthly-budget': 'Monthly budget',
   'budget:free-daily-d1-rows-read': 'Free D1 rows read running out',
   'budget:free-daily-d1-rows-written': 'Free D1 rows written running out',
   'budget:free-daily-kv-reads': 'Free KV reads running out',

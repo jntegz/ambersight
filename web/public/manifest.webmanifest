@@ -1,0 +1,11 @@
+{
+  "name": "Ambersight",
+  "short_name": "Ambersight",
+  "description": "Your Cloudflare Workers fleet on one page. Read-only.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#FFFCF8",
+  "theme_color": "#FFFCF8",
+  "icons": [{ "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
