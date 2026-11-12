@@ -2,7 +2,9 @@
 
 All notable changes to Ambersight. Each version here has a matching [GitHub release](https://github.com/jntegz/ambersight/releases), which is what the update notice in the dashboard reads.
 
-## Unreleased
+## 1.1.2 (2026-11-12)
+
+The biggest release yet: 13 months of history, a page per Worker, an Analytics page, budgets and a read-only API, built from the data each scan already reads. An hourly scan makes fewer Cloudflare API calls than before. Upgrading runs migrations 0011 to 0013; `npm run deploy` applies them.
 
 - **Fewer false runaway alerts.** The "5x usual" checks compare an hour with the same hour of day over the last week when that is higher than the plain median, so a nightly batch or a daily peak no longer raises an alert. No check becomes more sensitive.
 - **What changed just before.** A traffic, CPU or storage spike, or an error rise, that no deploy explains now names the binding that disappeared or the audit log change in the 6 hours before it.

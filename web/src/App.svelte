@@ -199,6 +199,7 @@
 
   // ---- Command palette (Ctrl+K / Cmd+K) and "g then a letter" shortcuts.
   let palette = $state(false);
+  const goKey = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? '⌘K' : 'Ctrl K';
   let pendingG = 0;
   const GO: Record<string, string> = { o: '#/', a: '#/analytics', f: '#/findings', t: '#/timeline', r: '#/resources', s: '#/settings' };
   const commands = $derived.by((): Command[] => [
@@ -308,11 +309,12 @@
           {#if query}
             <button type="button" class="clear" aria-label="Clear search" onclick={() => { query = ''; searchEl?.focus(); }}><Icon name="close" size={14} /></button>
           {:else}
-            <kbd aria-hidden="true">/</kbd>
+            <button type="button" class="go" onclick={() => (palette = true)} title="Go to a Worker or page" aria-label="Go to a Worker or page ({goKey})">{goKey}</button>
           {/if}
         </div>
+      {:else}
+        <button type="button" class="icon-btn" onclick={() => (palette = true)} aria-label="Go to ({goKey})" title="Go to a Worker or page ({goKey})"><Icon name="command" size={16} /></button>
       {/if}
-      <button type="button" class="icon-btn" onclick={() => (palette = true)} aria-label="Go to (Ctrl+K)" title="Go to a Worker or page (Ctrl+K)"><Icon name="command" size={16} /></button>
 
       <div class="scan" class:busy={scanning}>
         <span class="scanned" title={data.lastScanAt ? `Last scan ${new Date(data.lastScanAt).toUTCString()}` : 'No scan yet'}>
@@ -455,12 +457,13 @@
   .search input::placeholder { color: var(--ink-muted); opacity: 1; }
   .search input::-webkit-search-cancel-button { display: none; }
   .search :global(svg) { flex: none; }
-  kbd {
-    display: grid; place-items: center; width: 22px; height: 22px; margin-left: 4px;
-    font: 500 12px/1 var(--font); color: var(--ink-muted);
+  .search:focus-within .go { opacity: 0; }
+  .go {
+    display: grid; place-items: center; min-width: 22px; height: 22px; min-height: 22px; margin-left: 4px; padding: 0 6px;
+    font: 500 11px/1 var(--font); color: var(--ink-muted); white-space: nowrap;
     border: 1px solid var(--line); border-radius: 6px; background: var(--paper);
   }
-  .search:focus-within kbd { opacity: 0; }
+  .go:hover { color: var(--ink); border-color: var(--ink-muted); }
   .clear {
     display: grid; place-items: center; width: 22px; min-height: 22px; height: 22px; margin-left: 4px; padding: 0;
     border: 0; border-radius: 50%; background: var(--line); color: var(--ink);
@@ -556,7 +559,11 @@
     .scanned { display: none; }
     .multi .acct-switch select { max-width: 150px; }
   }
-  @media (max-width: 900px) {
+  /* With the account switcher and eight pages, the last-scan time gives way first (it is in the footer too). */
+  @media (max-width: 1500px) {
+    .multi .scanned { display: none; }
+  }
+  @media (max-width: 1180px) {
     .multi { flex-wrap: wrap; }
     .multi .search { order: 3; width: 100%; margin: 0; }
     .multi .search-field { flex: 1; }
@@ -589,7 +596,7 @@
     .search { order: 3; width: 100%; margin: 0; }
     .search-field { flex: 1; }
     .search input, .search:focus-within input, .search.filled input { width: 100%; }
-    kbd { display: none; }
+    .go { display: none; }
     .banner { padding: 0 16px; }
   }
 </style>

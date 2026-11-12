@@ -17,7 +17,7 @@
 </p>
 
 <picture>
-  <img src="docs/screenshots/overview.png" alt="The Ambersight overview for one of several accounts: 9 of 12 Workers need attention, requests and errors today, storage limits and the estimated bill for the month">
+  <img src="docs/screenshots/overview.png" alt="The Ambersight overview for one of several accounts: 6 of 12 Workers need attention, requests and errors today, storage limits and the estimated bill against a monthly budget">
 </picture>
 
 ---
@@ -26,12 +26,19 @@ You have a dozen Workers, maybe fifty. One is quietly burning through the free p
 
 The Cloudflare dashboard shows you each Worker on its own. **Ambersight shows you the fleet** and tells you which Workers need attention, and why, in plain sentences.
 
-It runs as **one Worker in your own Cloudflare account**. Every hour it reads your Workers' settings and metrics with a read-only API token, runs 80 checks, and gives you a ranked list of what to fix. One install can watch every account the token can see. Alerts go to e-mail, Slack, Discord, Telegram or any webhook.
+It runs as **one Worker in your own Cloudflare account**. Every hour it reads your Workers' settings and metrics with a read-only API token, runs 81 checks, and gives you a ranked list of what to fix. One install can watch every account the token can see. Alerts go to e-mail, Slack, Discord, Telegram or any webhook.
 
 - **On the Free plan**, the risk is an outage. Past 100,000 requests in a day, every Worker in the account answers with Error 1027 until midnight UTC, and the same goes for 1,000 KV writes, 5 million D1 rows read and the other daily limits. Ambersight warns you at 70% and again at 90% of each one, with the time you will hit it at today's pace.
 - **On Workers Paid**, the risk is the bill. There is no hard spending cap, so a loop, a retry storm or a crawler is billed for every hour it runs. Ambersight compares each Worker's last hour with its usual hour and alerts you at 5x, for requests, CPU time, subrequests and D1, KV, R2, Queues and Durable Object operations. It also catches Durable Object or Queue work that runs while nobody uses the app, and shows the estimated bill in dollars.
 
-> **New since 0.1.1**
+> **New in 1.1.2**
+> - **A page for every Worker**: requests, errors, CPU and wall time, limit hits and cron runs over 24 hours to 12 months, with every deploy marked and its before and after.
+> - **Analytics**: trends against the period before, the bill per month, daily limits and storage growth with the date each cap is reached, time to resolve and which checks are only noise. Compare up to four Workers.
+> - **13 months of history**, kept as daily rollups. Every finding keeps its history: opened, alerted, acknowledged, resolved. A **Findings** inbox lists them by status, and acknowledge or snooze can be undone.
+> - **Smarter alerts**: a nightly batch or a daily peak is judged against its own hour, and a spike no deploy explains names the change made just before it.
+> - **Monthly budget** on Workers Paid, alerted within the hour, not a day later.
+> - **Read-only API tokens** for Grafana or scripts ([docs/api.md](docs/api.md)), CSV export on every chart and table, Ctrl+K to jump to any Worker, and an installable app that opens offline.
+> - **Fewer API calls**: an hourly scan makes at most 3 GraphQL requests instead of up to 8, and pages are served from one cached row.
 > - **Explain in plain words** on every finding: what it means, why it matters, and numbered steps with where to click, for people new to Cloudflare.
 > - **Clean up leftovers**: unused KV, D1, R2, queues and idle Workers show the exact `wrangler` command to remove them (a backup first for D1). Ambersight still never deletes anything.
 > - **Export .md**: save **Needs attention** or **Housekeeping** as a Markdown checklist, with every cleanup command in one block.
@@ -93,19 +100,27 @@ Also included: several accounts in one install with an "All accounts" view, grou
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/screenshots/accounts.png" alt="All accounts: three Cloudflare accounts side by side, each with its critical, warning and info counts, Workers, requests today, error rate and free request budget"><br><sub><b>All accounts.</b> One install watches every account the token can see. Open one to see its fleet.</sub></td>
-    <td width="50%"><img src="docs/screenshots/limits.png" alt="Free plan limits: D1 rows read at 4.2M of 5M and a D1 database at 431 MB of 500 MB in orange, KV reads, KV writes and D1 rows written in green"><br><sub><b>Free plan limits.</b> Every daily limit and storage cap, not just requests. Orange from 70%.</sub></td>
+    <td width="50%"><img src="docs/screenshots/worker.png" alt="The page of one Worker, auth-gateway: requests, error rate, CPU per request and wall time over 7 days, with the deploy 14 hours ago marked where the error rate jumped to 6%"><br><sub><b>Every Worker on its own page.</b> Traffic, errors, CPU and wall time over 24 hours to 12 months, with deploys marked.</sub></td>
+    <td width="50%"><img src="docs/screenshots/analytics.png" alt="Analytics over 30 days: requests, errors, error rate, CPU per request and limit hits with their change against the 30 days before, and the account's requests per day"><br><sub><b>Analytics.</b> Trends against the period before, the Workers growing fastest, every Worker in one sortable table.</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/screenshots/cost.png" alt="Estimated bill: $5.42 so far this month, $5.59 at month end at this pace, split by product, with the costliest Workers listed"><br><sub><b>Estimated bill.</b> On Workers Paid: month to date, the month-end forecast and the costliest Workers.</sub></td>
-    <td width="50%"><img src="docs/screenshots/timeline.png" alt="Deploy timeline: deploys, a failed Pages deploy and audit log entries, with a deploy of auth-gateway flagged because the error rate rose right after it"><br><sub><b>Deploy timeline.</b> Deploys, Pages builds and audit log changes. The deploy followed by a new problem is flagged.</sub></td>
+    <td width="50%"><img src="docs/screenshots/cost.png" alt="Analytics, Cost: the estimated bill per month, usage at list price per day, and Workers by cost per month and per million requests"><br><sub><b>Cost.</b> On Workers Paid: the bill per month, spend per day and the Workers behind it.</sub></td>
+    <td width="50%"><img src="docs/screenshots/limits.png" alt="Analytics, Limits and storage for a Free plan account: each daily limit per day against its free limit, with its peak and usual busiest hour, and a D1 database reaching its 500 MB cap around a date"><br><sub><b>Limits and storage.</b> How close each daily limit runs, and the date each database reaches its cap.</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/screenshots/settings.png" alt="Settings › Accounts: the accounts to watch, and a label, client digest address and plan for each one"><br><sub><b>Settings.</b> Accounts, checks, thresholds, schedules and alert routes, stored in D1. Export and import as JSON.</sub></td>
+    <td width="50%"><img src="docs/screenshots/reliability.png" alt="Analytics, Reliability: findings opened and resolved per day, median time to resolve by severity, deploys per day, and alert quality per check with one check flagged as mostly silenced"><br><sub><b>Reliability.</b> Time to resolve, and which checks are only noise to you.</sub></td>
+    <td width="50%"><img src="docs/screenshots/timeline.png" alt="Deploy timeline: deploys, a Pages deploy and audit log entries, with a deploy of auth-gateway flagged because the error rate rose right after it"><br><sub><b>Deploy timeline.</b> Deploys, Pages builds and audit log changes. The deploy followed by a new problem is flagged.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/findings.png" alt="The Findings inbox: open findings with acknowledge, snooze and history, and tabs for acknowledged, snoozed and resolved findings"><br><sub><b>Findings.</b> Open, acknowledged, snoozed and resolved, each with its history.</sub></td>
+    <td width="50%"><img src="docs/screenshots/accounts.png" alt="All accounts: three Cloudflare accounts side by side, each with its critical, warning and info counts, Workers, requests today, error rate and free request budget"><br><sub><b>All accounts.</b> One install watches every account the token can see.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/settings.png" alt="Settings: scan frequency, time zone and history, and per account a label, client digest, plan and monthly budget"><br><sub><b>Settings.</b> Accounts, budgets, checks, thresholds and alert routes, stored in D1. Export and import as JSON.</sub></td>
     <td width="50%"><img src="docs/screenshots/overview-dark.png" alt="The overview in dark mode"><br><sub><b>Dark mode.</b> Follows your system, or pick one.</sub></td>
   </tr>
   <tr>
-    <td colspan="2" align="center"><img src="docs/screenshots/mobile.png" width="240" alt="The overview on a phone: a client account at 74% of its free requests, on track to reach 78% by midnight"><br><sub><b>On your phone.</b> Check the fleet from anywhere.</sub></td>
+    <td colspan="2" align="center"><img src="docs/screenshots/mobile.png" width="240" alt="The overview on a phone: a client account with a D1 database at 86% of its limit and half of its free requests used"><br><sub><b>On your phone.</b> Install it as an app; it opens offline with the last data.</sub></td>
   </tr>
 </table>
 
@@ -114,7 +129,7 @@ Also included: several accounts in one install with an "All accounts" view, grou
 ## Why you can trust it with your account
 
 - **Read-only, by design.** It only sends `GET` requests and GraphQL queries to the Cloudflare API. The setup wizard checks your token and refuses to continue if it finds a single write permission.
-- **Your account, your data.** It runs in your Cloudflare account and stores everything in your own D1 database. Nothing is sent to us. There is no telemetry and no analytics.
+- **Your account, your data.** It runs in your Cloudflare account and stores everything in your own D1 database. Nothing is sent to us. There is no telemetry and no tracking.
 - **No code in your Workers.** No SDK, no tail consumer, no redeploy. It reads what Cloudflare already records.
 - **Free to run.** With 30 Workers it uses well under 1% of the free plan's daily requests and 1 of your 5 Cron Triggers. Its own logs are off.
 - **Open source.** AGPL-3.0. Read every line before you deploy it.
@@ -383,7 +398,7 @@ No. It is an independent open-source project built on Cloudflare's public APIs. 
 
 ## Documentation
 
-- [Checks](docs/checks.md): all 80 checks, with thresholds, IDs and fixes
+- [Checks](docs/checks.md): all 81 checks, with thresholds, IDs and fixes
 - [How it works](docs/how-it-works.md): what one scan does, what it stores and how it stays inside the free plan
 - [Alerts](docs/alerts.md): channels, defaults, the digest and message formats
 - [Configuration](docs/configuration.md): `wrangler.jsonc`, secrets and every `config.json` field

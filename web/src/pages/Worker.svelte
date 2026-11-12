@@ -306,7 +306,7 @@
   .back:hover { color: var(--ink); }
   h1.mono { font-size: 24px; word-break: break-all; }
   .note { font-size: 13px; color: var(--ink-muted); padding: 8px 12px; border: 1px dashed var(--line); border-radius: 8px; }
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); }
   .stats > :global(*) { border-right: 1px solid var(--line); }
   .grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
   .panel { padding: 16px; display: grid; gap: 8px; align-content: start; min-width: 0; }

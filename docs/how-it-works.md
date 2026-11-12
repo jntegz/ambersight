@@ -17,22 +17,28 @@ Each cron run scans one account: the one that is most overdue. A scan that fails
 ## What one scan does
 
 1. **Lists your Workers**, with their handlers, `workers.dev` and preview settings, and observability settings. A Worker that appeared or disappeared since the last scan is recorded for the digest.
-2. **Reads hourly metrics** from the GraphQL Analytics API: requests, errors, CPU time, subrequests and invocations that hit a limit. It fetches from the last stored hour (to complete it) onwards, at most 48 hours back.
+2. **Reads hourly metrics** from the GraphQL Analytics API: requests, errors, CPU time (total, median and p99), wall time (median and p99), subrequests and invocations that hit a limit, by limit. The totals and the limit outcomes come in one request. It fetches from the last stored hour (to complete it) onwards, at most 48 hours back.
 3. **Reads cron runs** for Workers with a `scheduled()` handler, for the last 25 hours. If the dataset is not available on your account, Ambersight tries again once a day.
-4. **Reads storage operations** for D1, KV, R2, Queues and Durable Objects, but only for the kinds your account actually has. The same queries carry the free-limit numbers: D1 rows read and written, and KV operations by type. Workflow steps and Workers AI neurons are read only when a Worker binds them.
+4. **Reads storage operations** for D1, KV, R2, Queues and Durable Objects, but only for the kinds your account actually has, all kinds in one request. The same query carries the free-limit numbers: D1 rows read and written, and KV operations by type, which are also kept per database and namespace. Workflow steps and Workers AI neurons are read only when a Worker binds them.
 5. **Refreshes the inventory** once a day, at 03:00 UTC by default: custom domains, the zone list, Pages projects, the lists of KV namespaces, D1 databases, R2 buckets and queues, Access applications if that check is on, storage sizes, the most expensive D1 queries, the plan, the API token's expiry date, and the update check.
 6. **Reads Cloudflare's own notifications and the audit log** every 6 hours, each since its last read.
 7. **Works through the zones**: routes, certificates and DNS records, per zone, the most overdue first, with a share of the scan's budget. Each zone is read at least once a day.
 8. **Fetches per-Worker detail**: bindings and compatibility settings, deployments and cron schedules. Each Worker's detail is refreshed every 6 hours, a few Workers per scan. A binding that disappeared since the last read is noted for the drift check.
-9. **Writes everything to D1** in one batch.
+9. **Writes everything to D1** in one batch, and folds each complete UTC day into the daily tables (a few days per scan at most, two hours after midnight so late data has arrived).
 10. **Runs the checks** on the stored history. The checks are pure functions, data in and findings out, so they cost almost no CPU. See [checks.md](checks.md).
-11. **Sends alerts and the digest** if any are due, then records what the scan itself cost.
+11. **Sends alerts and the digest** if any are due, then records what the scan itself cost, and a row in the scan log.
+
+When an account rejects a combined GraphQL request, Ambersight reads its datasets one by one again and retries the combination a day later. The same goes for the median and wall-time fields.
+
+## What a page view costs
+
+Nothing on the Cloudflare side: every page reads Ambersight's own D1 database. The overview, Analytics, Worker pages, Timeline and Resources are built once after each change (a scan, an acknowledge or snooze, a settings save) and then served from one cached row with an ETag. A browser that already has the current version gets `304 Not Modified`. Charts longer than 7 days read the daily tables, so a 12-month chart of 200 Workers reads a few thousand rows, not millions.
 
 ## Staying inside the free plan
 
 A Worker on the Free plan gets 50 subrequests and 10 ms of CPU per invocation, and the account gets 5 Cron Triggers. Ambersight is built around those limits:
 
-- A scan spends at most **42 subrequests** on the Cloudflare API on Free (900 on Paid), which leaves room for alerts and the update check. A typical hourly scan uses fewer than 10; the daily inventory run uses more.
+- A scan spends at most **42 subrequests** on the Cloudflare API on Free (900 on Paid), which leaves room for alerts and the update check. A typical hourly scan makes at most 3 GraphQL requests plus the Workers lists; the daily inventory run uses more.
 - D1 counts a `db.batch()` as one query against its 50-per-invocation limit, and every write goes into one batch. A scan makes about 10 D1 calls.
 - D1 also bills every row a query scans and every row (and index entry) a write touches: 5 million reads and 100,000 writes a day on Free. Writes skip rows that did not change, the no-traffic check reads each Worker's last active hour instead of 30 days of metrics, and there are no indexes that no query uses. With 200 Workers and 30 days of history, an hourly scan reads about 34,000 rows and writes about 650: roughly 0.8 million reads and 16,000 writes a day.
 - The per-Worker detail in step 8 and the zones in step 7 are fetched on **rotating cursors**: whatever was read longest ago goes first, and the scan stops when its budget runs out.
@@ -53,7 +59,8 @@ Everything lives in your own D1 database:
 | Table | What is in it |
 | --- | --- |
 | `workers` | Each Worker's settings, bindings, tags, when its detail was last read, and the last hour it had a request |
-| `metrics_hourly` | Requests, errors, CPU and subrequests per Worker per hour |
+| `metrics_hourly` | Requests, errors, CPU, wall time, subrequests and limit hits per Worker per hour |
+| `metrics_daily`, `resource_daily`, `quota_daily`, `cron_daily` | The same, one row per UTC day, kept 400 days for Analytics and the Worker pages |
 | `schedules` | Each Worker's cron expressions |
 | `cron_runs` | Scheduled runs and failures per hour |
 | `resources` | KV namespaces, D1 databases, R2 buckets, queues, routes, custom domains and Access applications |
@@ -66,6 +73,11 @@ Everything lives in your own D1 database:
 | `accounts`, `account_state` | The accounts this install watches, and each one's scan state |
 | `quota_hourly` | Account-wide usage per hour for the free limits and the cost estimate (kept at least 35 days) |
 | `storage_sizes` | Latest size of each D1 database, KV namespace and R2 bucket, and the Durable Object total |
+| `storage_daily` | The same sizes per day, kept 400 days, for growth and the date a cap is reached |
+| `finding_events` | Every change of every finding: opened, alerted, acknowledged, snoozed, restored, resolved; kept 400 days |
+| `scan_runs` | One row per scan: duration, API calls, D1 rows, warnings, findings opened and resolved; kept 90 days |
+| `view_cache` | Dashboard views built after the last change, served until the next |
+| `api_tokens` | Read-only API tokens, stored only as SHA-256 digests |
 | `zones` | Each zone and when its routes, certificates and DNS records were last read |
 | `cf_alerts` | Notifications Cloudflare sent to the account |
 | `audit_events` | The account audit log, without "view" entries |

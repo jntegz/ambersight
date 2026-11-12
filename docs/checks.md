@@ -1,12 +1,13 @@
 # Checks
 
-Ambersight runs 80 checks. Each one below lists the ID you see in the dashboard and in `config.json`, how severe it is, exactly when it fires, and what to do about it. The numbers are the defaults. Most of them can be changed globally, per group or per Worker (see [configuration.md](configuration.md)).
+Ambersight runs 81 checks. Each one below lists the ID you see in the dashboard and in `config.json`, how severe it is, exactly when it fires, and what to do about it. The numbers are the defaults. Most of them can be changed globally, per group or per Worker (see [configuration.md](configuration.md)).
 
 Every finding in the dashboard carries the evidence behind it, a suggested fix and a link to the matching Cloudflare docs page. When the problem goes away, the finding resolves on its own at the next scan.
 
 **Severity** decides where a finding goes. By default, critical findings are e-mailed right away, and everything else waits for the digest. See [alerts.md](alerts.md).
 
 - [Free plan budget](#free-plan-budget)
+- [Monthly budget (Workers Paid)](#monthly-budget-workers-paid)
 - [Free plan daily limits](#free-plan-daily-limits)
 - [Storage caps](#storage-caps)
 - [Runaway usage](#runaway-usage)
@@ -37,6 +38,14 @@ On the Workers Free plan, an account gets 100,000 requests per UTC day across al
 | `budget:free-daily-requests` | Warning at 70%, critical at 90% | The account has used 70% of today's requests. The finding projects the time you hit the limit at today's pace, or says you should stay under it. | Find the Worker driving the traffic in the overview. If the traffic is real, move to Workers Paid. |
 
 Threshold settings: `budgetWarn` (0.7), `budgetCritical` (0.9).
+
+## Monthly budget (Workers Paid)
+
+Workers Paid has no hard spending cap. Set a monthly budget per account in **Settings › Accounts** and Ambersight compares the estimated bill with it after every scan. Cloudflare's own budget alerts arrive a day late.
+
+| Check | Severity | Fires when | What to do |
+| --- | --- | --- | --- |
+| `budget:monthly-budget` | Warning at 80% of the budget, or when the month-end forecast passes it (after 3 days of usage); critical past it | Workers Paid, with a monthly budget set for the account in **Settings › Accounts**. The estimate uses list prices and comes within the hour; Cloudflare's own budget alerts arrive a day late. | Open **Analytics › Cost** to see which Workers and products drive the spend, and look for runaway findings. |
 
 ## Free plan daily limits
 
@@ -71,7 +80,7 @@ Read once a day with the inventory: the size of each D1 database, KV namespace a
 
 ## Runaway usage
 
-These compare a Worker's **last full hour** with its **median hour over the past 7 days**. A Worker needs 72 hours of history before they apply, so a new install stays quiet for its first three days. Each one also has a floor, so a Worker that goes from 3 requests to 30 does not raise an alarm.
+These compare a Worker's **last full hour** with its **median hour over the past 7 days**, or with the median of the **same hour of day** over those days when that is higher, so a nightly batch or a daily peak is judged against its own hour. A spike that no deploy explains names the binding removal or audit log change in the 6 hours before it. A Worker needs 72 hours of history before they apply, so a new install stays quiet for its first three days. Each one also has a floor, so a Worker that goes from 3 requests to 30 does not raise an alarm.
 
 Workers Paid has no hard spending cap. A loop, a retry storm or a crawler is billed for every hour it runs, which makes these the checks that save money.
 
