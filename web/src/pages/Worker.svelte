@@ -28,16 +28,22 @@
   let error = $state('');
   let loading = $state(false);
 
+  // Only the latest request may set the page: a slow answer for an older range is dropped.
+  let seq = 0;
   async function load() {
+    const mine = ++seq;
     loading = true;
     error = '';
     try {
-      data = await api.worker(name, range, account ?? undefined);
+      const d = await api.worker(name, range, account ?? undefined);
+      if (mine !== seq) return;
+      data = d;
     } catch (e) {
+      if (mine !== seq) return;
       if (e instanceof ApiError && e.status === 401) onUnauthorized();
       else error = (e as Error).message;
     } finally {
-      loading = false;
+      if (mine === seq) loading = false;
     }
   }
   $effect(() => {

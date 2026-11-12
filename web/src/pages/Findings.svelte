@@ -26,11 +26,16 @@
   let list = $state<FindingListItem[] | null>(null);
   let error = $state('');
 
+  let seq = 0;
   async function load() {
+    const mine = ++seq;
     error = '';
     try {
-      list = await api.findings(status, account ?? undefined);
+      const l = await api.findings(status, account ?? undefined);
+      if (mine !== seq) return;
+      list = l;
     } catch (e) {
+      if (mine !== seq) return;
       if (e instanceof ApiError && e.status === 401) onUnauthorized();
       else error = (e as Error).message;
     }

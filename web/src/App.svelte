@@ -20,7 +20,7 @@
   import Setup from './pages/Setup.svelte';
   import Timeline from './pages/Timeline.svelte';
   import { api, ApiError, num, timeAgo, workerHref } from './lib/api';
-  import { parseHash, type Route } from './lib/route';
+  import { parseHash, safeDecode, type Route } from './lib/route';
   import { currentTheme, setTheme, type Theme } from './lib/theme';
 
   type View = 'loading' | 'login' | 'ready' | 'error';
@@ -66,7 +66,7 @@
   let routeParams = $state<URLSearchParams>(initial.params);
   async function onHash() {
     if (location.hash.startsWith('#w-')) {
-      location.replace(workerHref(decodeURIComponent(location.hash.slice(3))));
+      location.replace(workerHref(safeDecode(location.hash.slice(3))));
       return;
     }
     const loc = parseHash(location.hash);
@@ -81,7 +81,7 @@
     if (anchor) {
       // The target may only exist once the overview has rendered.
       await tick();
-      const el = document.getElementById(decodeURIComponent(location.hash.slice(1)));
+      const el = document.getElementById(safeDecode(location.hash.slice(1)));
       el?.scrollIntoView({ block: 'start' });
       // Re-trigger :target highlighting after a page switch.
       if (el) { el.style.animation = 'none'; void el.offsetWidth; el.style.animation = ''; }

@@ -27,11 +27,17 @@
   }
   let error = $state('');
 
+  // Only the latest request may set the page: a slow answer for an older range is dropped.
+  let seq = 0;
   async function load() {
+    const mine = ++seq;
     error = '';
     try {
-      data = await api.analytics(range, account ?? undefined);
+      const d = await api.analytics(range, account ?? undefined);
+      if (mine !== seq) return;
+      data = d;
     } catch (e) {
+      if (mine !== seq) return;
       if (e instanceof ApiError && e.status === 401) onUnauthorized();
       else error = (e as Error).message;
     }

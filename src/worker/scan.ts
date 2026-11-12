@@ -117,13 +117,17 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
   const cpuSum = settings.cpu_sum !== 'unsupported';
   // Several GraphQL datasets go into one request with aliases. An account that rejects that is
   // read the old way (one request per dataset) and asked again a day later.
-  const mergeOk = settings.gql_merge !== 'no' || now.getTime() - new Date(settings.gql_merge_checked ?? 0).getTime() > DAY;
-  const mergeResult = (merged: boolean | null) => {
+  // One flag per combined request (invocations, storage operations, storage sizes): one that
+  // fails does not switch off the others.
+  type MergeKey = 'gql_merge' | 'gql_merge_ops' | 'gql_merge_sizes';
+  const mergeAllowed = (key: MergeKey) => settings[key] !== 'no' || now.getTime() - new Date(settings[`${key}_checked`] ?? 0).getTime() > DAY;
+  const mergeOk = mergeAllowed('gql_merge');
+  const mergeResult = (merged: boolean | null, key: MergeKey = 'gql_merge') => {
     if (merged === null) return;
     const v = merged ? 'yes' : 'no';
-    if (settings.gql_merge !== v || !merged) {
-      settings.gql_merge = v;
-      settings.gql_merge_checked = stamp;
+    if (settings[key] !== v || !merged) {
+      settings[key] = v;
+      settings[`${key}_checked`] = stamp;
     }
   };
   const separately = () => Promise.all([
@@ -206,10 +210,10 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
     if (tryKinds.length) {
       // Kinds whose richer query (D1 rows, KV by action) the account rejected; retried with the others daily.
       const simple = new Set(retryFailed ? [] : (settings.ops_simple ?? '').split(',').filter(Boolean));
-      const r = await cf.resourceOps(opsFrom, now, tryKinds, simple, mergeOk);
+      const r = await cf.resourceOps(opsFrom, now, tryKinds, simple, mergeAllowed('gql_merge_ops'));
       // A dataset the account lacks fails the combined request too; it is left out from now on,
       // so the combination is not to blame.
-      mergeResult(r.merged === false && (r.failed.length || r.downgraded.length) ? null : r.merged);
+      mergeResult(r.merged === false && (r.failed.length || r.downgraded.length) ? null : r.merged, 'gql_merge_ops');
       resourceOps = r.rows;
       for (const k of tryKinds) if (!r.failed.includes(k)) opsCollected.add(k);
       if (retryFailed || r.failed.length || r.downgraded.length) {
@@ -350,8 +354,8 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
     const kinds = new Set<StorageKind>([...kindRows.map((k) => k.kind), ...refreshed.filter((r) => ['kv', 'd1', 'r2'].includes(r.kind)).map((r) => r.kind as StorageKind)]);
     if (known.some((k) => k.has_do)) kinds.add('do');
     if (kinds.size) {
-      const r = await cf.storageSizes([...kinds], now, mergeOk);
-      mergeResult(r.merged === false && r.failed.length ? null : r.merged);
+      const r = await cf.storageSizes([...kinds], now, mergeAllowed('gql_merge_sizes'));
+      mergeResult(r.merged === false && r.failed.length ? null : r.merged, 'gql_merge_sizes');
       storageSizes = r.sizes;
       if (r.failed.length) warnings.push(`Storage sizes unavailable: ${r.failed.join(', ')}.`);
     }
@@ -574,8 +578,10 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
          wall_p99=COALESCE(excluded.wall_p99, metrics_hourly.wall_p99)
        WHERE metrics_hourly.requests IS NOT excluded.requests OR metrics_hourly.errors IS NOT excluded.errors
          OR metrics_hourly.subrequests IS NOT excluded.subrequests OR metrics_hourly.cpu_p99 IS NOT excluded.cpu_p99
-         OR metrics_hourly.cpu_time_us IS NOT excluded.cpu_time_us OR metrics_hourly.cpu_p50 IS NOT excluded.cpu_p50
-         OR metrics_hourly.wall_p50 IS NOT excluded.wall_p50 OR metrics_hourly.wall_p99 IS NOT excluded.wall_p99`,
+         -- Medians are kept when a scan reads without them, so only a new value counts as a change.
+         OR (excluded.cpu_p50 IS NOT NULL AND metrics_hourly.cpu_p50 IS NOT excluded.cpu_p50)
+         OR (excluded.wall_p50 IS NOT NULL AND metrics_hourly.wall_p50 IS NOT excluded.wall_p50)
+         OR (excluded.wall_p99 IS NOT NULL AND metrics_hourly.wall_p99 IS NOT excluded.wall_p99)`,
     ).bind(A, j(hourly)),
     db.prepare(
       `INSERT INTO metrics_hourly (account, script, hour, exceeded, exceeded_cpu, exceeded_memory)
@@ -823,7 +829,8 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
   writes.push(
     setAccountState(db, A, {
       ...(rolled.length ? { rollup_day: rolled.at(-1)! } : {}),
-      ...(settings.gql_merge ? { gql_merge: settings.gql_merge, gql_merge_checked: settings.gql_merge_checked ?? stamp } : {}),
+      ...Object.fromEntries((['gql_merge', 'gql_merge_ops', 'gql_merge_sizes'] as const).flatMap((k) =>
+        settings[k] ? [[k, settings[k]], [`${k}_checked`, settings[`${k}_checked`] ?? stamp]] : [])),
       ...(settings.cpu_sum ? { cpu_sum: settings.cpu_sum } : {}),
       ...(settings.extra_quantiles ? { extra_quantiles: settings.extra_quantiles, extra_quantiles_checked: settings.extra_quantiles_checked ?? stamp } : {}),
       ...(settings.cron_cpu ? { cron_cpu: settings.cron_cpu } : {}),

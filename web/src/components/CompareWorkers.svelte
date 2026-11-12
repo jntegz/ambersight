@@ -10,10 +10,16 @@
   const TONES: Tone[] = ['accent', 'ink', 'healthy', 'critical'];
   let details = $state<WorkerDetail[]>([]);
   let error = $state('');
+  let seq = 0;
   $effect(() => {
     const list = [...names];
+    const mine = ++seq;
     error = '';
-    Promise.all(list.map((n) => api.worker(n, range, account ?? undefined))).then((d) => (details = d), (e: Error) => (error = e.message));
+    details = [];
+    Promise.all(list.map((n) => api.worker(n, range, account ?? undefined))).then(
+      (d) => { if (mine === seq) details = d; },
+      (e: Error) => { if (mine === seq) error = e.message; },
+    );
   });
   const labels = $derived(details[0]?.series.map((p) => p.t) ?? []);
   const gran = $derived(details[0]?.granularity ?? 'day');

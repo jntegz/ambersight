@@ -31,8 +31,14 @@
   }
   async function revoke(t: TokenInfo) {
     if (!confirm(`Revoke "${t.name}"? Anything using it stops working.`)) return;
-    await api.revokeToken(t.id).catch((e: Error) => (error = e.message));
-    tokens = tokens.filter((x) => x.id !== t.id);
+    error = '';
+    try {
+      await api.revokeToken(t.id);
+      tokens = tokens.filter((x) => x.id !== t.id);
+    } catch (e) {
+      // Keep it in the list: it still works until a revoke succeeds.
+      error = `Not revoked: ${(e as Error).message}`;
+    }
   }
   async function copy() {
     try {

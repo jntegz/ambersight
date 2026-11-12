@@ -480,3 +480,67 @@ describe('since your last visit', () => {
     expect((await get(e, cookie, '/api/changes?since=yesterday')).status).toBe(400);
   });
 });
+
+describe('review fixes', () => {
+  it('does not trust a budget forecast from the first hours of a month', async () => {
+    const { budgetFinding } = await import('../src/worker/cost');
+    // 1 hour into the month, $1 of requests would project to about $720.
+    const early = budgetFinding(new Date('2026-11-01T01:00:00Z'), { 'workers.requests': 13.4e6 }, {}, '2026-10-01T00:00:00Z', 100);
+    expect(early).toBeNull();
+    // Already past the budget counts from the first hour.
+    expect(budgetFinding(new Date('2026-11-01T01:00:00Z'), { 'workers.requests': 500e6 }, {}, '2026-10-01T00:00:00Z', 100)).toMatchObject({ severity: 'critical' });
+  });
+
+  it('words the budget finding in whole dollars, so small changes do not rewrite it', async () => {
+    const { budgetFinding } = await import('../src/worker/cost');
+    const now = new Date('2026-11-20T00:00:00Z');
+    const a = budgetFinding(now, { 'workers.requests': 128e6 }, {}, null, 40)!;
+    const b = budgetFinding(now, { 'workers.requests': 128.01e6 }, {}, null, 40)!;
+    expect(a.message).toBe(b.message);
+    expect(a.evidence).toEqual(b.evidence);
+  });
+
+  it("includes today in the 7-day sparkline of each Worker", async () => {
+    stub({ hourly: HOURLY });
+    const e = env();
+    await scan(e, NOW);
+    const { buildAnalytics } = await import('../src/worker/analytics');
+    const a = await buildAnalytics(e, 'acc1', '7d', NOW);
+    expect(a.workers[0].spark).toHaveLength(7);
+    expect(a.workers[0].spark.at(-1)).toBe(50); // today, 2026-11-09
+    expect(a.workers[0].spark.at(-2)).toBe(2400); // yesterday
+  });
+
+  it('does not rewrite hourly rows whose medians a later scan did not read', async () => {
+    stub({ hourly: HOURLY });
+    const e = env();
+    await scan(e, NOW);
+    // Count every update of metrics_hourly from here on.
+    await (e.DB as unknown as { exec: (sql: string) => Promise<void> }).exec(
+      `CREATE TABLE upd (n INTEGER); CREATE TRIGGER count_upd AFTER UPDATE ON metrics_hourly BEGIN INSERT INTO upd VALUES (1); END;`,
+    );
+    // The next scan reads the same hours, without the median fields.
+    await setAccountState(e.DB, 'acc1', { extra_quantiles: 'unsupported', extra_quantiles_checked: NOW.toISOString() }).run();
+    await scan(e, new Date(NOW.getTime() + H));
+    expect(await e.DB.prepare('SELECT COUNT(*) AS n FROM upd').first('n')).toBe(0);
+    expect(await e.DB.prepare(`SELECT cpu_p50 FROM metrics_hourly WHERE script = 'api' AND hour = '2026-11-09T11:00:00Z'`).first('cpu_p50')).toBe(0.7);
+  });
+
+  it('keeps combining the totals when only the storage-operations combination fails', async () => {
+    const f = fakeFetch({ hourly: HOURLY, kvOps: [{ namespaceId: 'ns-used', datetimeHour: '2026-11-09T11:00:00Z', requests: 3 }] });
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const body = String(init?.body);
+      if (String(input).endsWith('/graphql') && body.includes('ops_')) return new Response(JSON.stringify({ data: null, errors: [{ message: 'too complex' }] }));
+      // Read one by one, every kind works: the combination itself was the problem.
+      if (String(input).endsWith('/graphql') && body.includes('d1AnalyticsAdaptiveGroups')) return new Response(JSON.stringify({ data: { viewer: { accounts: [{ d1AnalyticsAdaptiveGroups: [] }] } } }));
+      return f.fn(input, init);
+    });
+    const e = env();
+    await setAccountState(e.DB, 'acc1', { gql_merge_ops: 'yes' }).run();
+    await e.DB.prepare(`INSERT INTO resources (account, kind, id, name) VALUES ('acc1', 'd1', 'db1', 'main'), ('acc1', 'kv', 'ns-used', 'cache')`).run();
+    await scan(e, NOW);
+    const s = await getAccountState(e.DB, 'acc1');
+    expect(s.gql_merge_ops).toBe('no');
+    expect(s.gql_merge).toBe('yes');
+  });
+});

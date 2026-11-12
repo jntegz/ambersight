@@ -25,7 +25,8 @@ export async function activeAccounts(env: Env, now = new Date(), opts: { resolve
   if (pinned) {
     const known = new Map((await listAccounts(db, true)).map((a) => [a.id, a]));
     const missing = pinned.filter((id) => !known.has(id));
-    if (missing.length) await db.batch(missing.map((id) => upsertAccount(db, { id }, now)));
+    // A new account changes the cached overview and account list.
+    if (missing.length) await db.batch([...missing.map((id) => upsertAccount(db, { id }, now)), bumpRevision(db)]);
     return pinned.map((id) => known.get(id) ?? { id, name: null, enabled: 1, detected_plan: null, added_at: now.toISOString() });
   }
   const list = await listAccounts(db);

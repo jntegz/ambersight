@@ -57,6 +57,8 @@ export function estimate(
 }
 
 const round = (n: number) => Math.round(n * 100) / 100;
+/** Usage history needed before the month-end forecast can raise a budget finding. */
+const FORECAST_AFTER_MS = 3 * 86_400_000;
 
 /**
  * Workers Paid budget: a warning when the month-end forecast passes the budget or the month so far
@@ -68,18 +70,25 @@ export function budgetFinding(
 ): Finding | null {
   const e = estimate(now, monthToDate, storage, [], trackedSince);
   const share = e.monthToDate / budgetUsd;
-  if (share < 0.8 && e.forecast < budgetUsd) return null;
+  // A forecast from the first hours of a month (or of tracking) multiplies them by up to 720:
+  // it is only trusted after 3 days. What has already been spent counts from the first hour.
+  const monthStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
+  const tracked = now.getTime() - Math.max(monthStart, trackedSince ? Date.parse(trackedSince) : monthStart);
+  const forecastOver = tracked >= FORECAST_AFTER_MS && e.forecast >= budgetUsd;
+  if (share < 0.8 && !forecastOver) return null;
   const severity = share >= 1 ? 'critical' : 'warning';
-  const usd = (n: number) => `$${n.toFixed(2)}`;
+  // Whole dollars and 5% steps: the message is part of what makes a finding "changed", and a
+  // finding rewritten on every scan costs D1 writes all month.
+  const usd = (n: number) => `$${Math.floor(n).toLocaleString('en-US')}`;
   const message = share >= 1
     ? `The estimated bill this month is ${usd(e.monthToDate)}, past the budget of ${usd(budgetUsd)}.`
     : share >= 0.8
-      ? `The estimated bill this month is ${usd(e.monthToDate)}, ${Math.round(share * 100)}% of the budget of ${usd(budgetUsd)}.`
+      ? `The estimated bill this month is ${usd(e.monthToDate)}, ${Math.floor(share * 20) * 5}% of the budget of ${usd(budgetUsd)}.`
       : `At this pace the bill reaches about ${usd(e.forecast)} this month, above the budget of ${usd(budgetUsd)}.`;
   return {
     id: 'budget:*:monthly-budget', module: 'budget', script: '*', code: 'monthly-budget', severity, message,
     // Rounded to whole dollars so the finding is not rewritten on every scan.
-    evidence: { monthToDate: `$${Math.round(e.monthToDate)}`, forecast: `$${Math.round(e.forecast)}`, budget: `$${Math.round(budgetUsd)}` },
+    evidence: { monthToDate: usd(e.monthToDate), ...(tracked >= FORECAST_AFTER_MS ? { forecast: usd(e.forecast) } : {}), budget: usd(budgetUsd) },
     action: 'Open Analytics › Cost to see which Workers and products drive the spend, and look for runaway findings. Workers Paid has no hard spending cap.',
     docsUrl: PRICES.docs,
   };

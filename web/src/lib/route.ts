@@ -12,13 +12,22 @@ export interface Location {
   params: URLSearchParams;
 }
 
+/** decodeURIComponent that keeps a malformed escape ("50%off") as typed instead of throwing. */
+export function safeDecode(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
 const PAGES: Route[] = ['analytics', 'findings', 'timeline', 'resources', 'packages', 'settings', 'accounts'];
 
 export function parseHash(hash: string): Location {
   const [path, query = ''] = hash.replace(/^#/, '').split('?');
   const params = new URLSearchParams(query);
   const parts = path.split('/').filter(Boolean);
-  if (parts[0] === 'worker' && parts[1]) return { route: 'worker', arg: decodeURIComponent(parts.slice(1).join('/')), params };
+  if (parts[0] === 'worker' && parts[1]) return { route: 'worker', arg: safeDecode(parts.slice(1).join('/')), params };
   const page = PAGES.find((p) => p === parts[0]);
   return { route: page ?? 'overview', arg: null, params };
 }

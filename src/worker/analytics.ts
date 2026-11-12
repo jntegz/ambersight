@@ -175,7 +175,8 @@ export async function buildAnalytics(env: Env, requested: string | undefined, ra
   const tags = new Map((workersR.results as { name: string; tags: string | null }[]).map((r) => [r.name, r.tags ? (JSON.parse(r.tags) as string[]) : []]));
   const prevBy = new Map((prevWorker.results as (Agg & { k: string })[]).map((r) => [r.k, r]));
   const sparkBuckets = w.granularity === 'hour'
-    ? (range === '24h' ? w.buckets.map((b) => b.slice(0, 13)) : Array.from({ length: 7 }, (_, i) => dayOf(w.end - (7 - i) * DAY)))
+    // w.end is the next hour boundary: the last day is the day of the hour before it (today).
+    ? (range === '24h' ? w.buckets.map((b) => b.slice(0, 13)) : Array.from({ length: 7 }, (_, i) => dayOf(w.end - HOUR - (6 - i) * DAY)))
     : Array.from({ length: 30 }, (_, i) => dayOf(w.end - (30 - i) * DAY));
   const spark = new Map<string, Map<string, number>>();
   for (const r of sparkR.results as { script: string; t: string; n: number }[]) {
