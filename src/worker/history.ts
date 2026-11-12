@@ -40,14 +40,19 @@ export function rollupStatements(db: D1Database, account: string, days: string[]
   const to = `${addDays(days.at(-1)!, 1)}T00:00:00Z`;
   return [
     db.prepare(
-      `INSERT INTO metrics_daily (account, script, day, requests, errors, subrequests, cpu_time_us, exceeded, exceeded_cpu, exceeded_memory, cpu_p99_max, active_hours)
+      `INSERT INTO metrics_daily (account, script, day, requests, errors, subrequests, cpu_time_us, exceeded, exceeded_cpu, exceeded_memory, cpu_p99_max, active_hours,
+         cpu_p50, wall_p50, wall_p99_max)
        SELECT account, script, substr(hour, 1, 10), COALESCE(SUM(requests), 0), COALESCE(SUM(errors), 0), COALESCE(SUM(subrequests), 0),
          COALESCE(SUM(cpu_time_us), 0), COALESCE(SUM(exceeded), 0), COALESCE(SUM(exceeded_cpu), 0), COALESCE(SUM(exceeded_memory), 0),
-         MAX(cpu_p99), SUM(CASE WHEN requests > 0 THEN 1 ELSE 0 END)
+         MAX(cpu_p99), SUM(CASE WHEN requests > 0 THEN 1 ELSE 0 END),
+         -- Medians cannot be added up: the day gets the hourly medians weighted by each hour's requests.
+         SUM(cpu_p50 * requests) / NULLIF(SUM(CASE WHEN cpu_p50 IS NOT NULL THEN requests END), 0),
+         SUM(wall_p50 * requests) / NULLIF(SUM(CASE WHEN wall_p50 IS NOT NULL THEN requests END), 0), MAX(wall_p99)
        FROM metrics_hourly WHERE account = ?1 AND hour >= ?2 AND hour < ?3 GROUP BY script, substr(hour, 1, 10)
        ON CONFLICT(account, script, day) DO UPDATE SET requests = excluded.requests, errors = excluded.errors, subrequests = excluded.subrequests,
          cpu_time_us = excluded.cpu_time_us, exceeded = excluded.exceeded, exceeded_cpu = excluded.exceeded_cpu,
-         exceeded_memory = excluded.exceeded_memory, cpu_p99_max = excluded.cpu_p99_max, active_hours = excluded.active_hours`,
+         exceeded_memory = excluded.exceeded_memory, cpu_p99_max = excluded.cpu_p99_max, active_hours = excluded.active_hours,
+         cpu_p50 = excluded.cpu_p50, wall_p50 = excluded.wall_p50, wall_p99_max = excluded.wall_p99_max`,
     ).bind(account, from, to),
     db.prepare(
       `INSERT INTO resource_daily (account, kind, resource, day, ops, rows_read, rows_written, reads, writes, deletes, lists, peak_ops)

@@ -351,3 +351,60 @@ describe('analytics and the Worker page', () => {
     expect(missing.exists).toBe(false);
   });
 });
+
+describe('smarter detection from the same data', () => {
+  it('judges an hour against the same hour of day when that is its usual peak', async () => {
+    const { usual } = await import('../src/worker/scan');
+    // A nightly batch: 10 requests most hours, 5,000 at 03:00 every day.
+    expect(usual([10, 10, 10, 10, 10, 5000, 5000, 5000], [5000, 5000, 5000])).toBe(5000);
+    // A quiet hour never lowers the bar below the plain median.
+    expect(usual([100, 100, 100, 100], [1, 1, 1])).toBe(100);
+    // Too few days of that hour: the plain median.
+    expect(usual([10, 10, 10], [5000, 5000])).toBe(10);
+  });
+
+  it('adds the change that came just before a spike no deploy explains', async () => {
+    const { addChangeContext } = await import('../src/worker/checks');
+    const base = { id: 'r', script: 'api', module: 'runaway' as const, severity: 'critical' as const, code: 'traffic-spike', message: 'Requests are 9x usual.', evidence: {}, action: 'Look for a loop.' };
+    const changes = {
+      latestDeploys: [], removedBindings: [{ script: 'api', name: 'CACHE', at: '2026-11-09T09:00:00Z' }],
+      audit: [{ id: 'a', at: '2026-11-09T10:30:00Z', actor: 'ops@example.com', action: 'update', description: 'Updated a secret', product: 'workers', resourceType: 'script', resourceId: 'api' }],
+      pages: null, certs: [], dns: [], d1Queries: [], workerNames: new Set(['api']), workersSubdomain: null,
+    };
+    const [f] = addChangeContext([base], { now: NOW, plan: 'free', accountRequestsToday: 0, workers: [], crons: [], changes });
+    expect(f.message).toBe('Requests are 9x usual. Shortly before, Updated a secret by ops@example.com (audit log).');
+    expect(f.evidence.changedAt).toBe('2026-11-09T10:30:00Z');
+    // Too long ago, or already explained by a deploy: unchanged.
+    const old = addChangeContext([base], { now: new Date('2026-11-10T12:00:00Z'), plan: 'free', accountRequestsToday: 0, workers: [], crons: [], changes });
+    expect(old[0].message).toBe(base.message);
+    const deployed = addChangeContext([{ ...base, evidence: { deployId: 'd1' } }], { now: NOW, plan: 'free', accountRequestsToday: 0, workers: [], crons: [], changes });
+    expect(deployed[0].message).toBe(base.message);
+  });
+});
+
+describe('median CPU and wall time', () => {
+  it('reads them in the request that already reads CPU p99, and rolls them up', async () => {
+    const f = stub({ hourly: HOURLY });
+    const e = env();
+    await scan(e, NOW);
+    expect(f.calls.filter((c) => c.endsWith('/graphql')).length).toBeLessThanOrEqual(4);
+    const row = await e.DB.prepare(`SELECT cpu_p50, wall_p50, wall_p99 FROM metrics_hourly WHERE script = 'api' AND hour = '2026-11-09T11:00:00Z'`).first();
+    expect(row).toEqual({ cpu_p50: 0.7, wall_p50: 12, wall_p99: 95 });
+    const day = await e.DB.prepare(`SELECT cpu_p50, wall_p50, wall_p99_max FROM metrics_daily WHERE script = 'api' AND day = '2026-11-08'`).first();
+    expect(day).toEqual({ cpu_p50: 0.7, wall_p50: 12, wall_p99_max: 95 });
+    expect((await getAccountState(e.DB, 'acc1')).extra_quantiles).toBe('yes');
+  });
+
+  it('asks without them when the account rejects them, and remembers', async () => {
+    const f = stub({ hourly: HOURLY, rejectQuantiles: true, kvOps: [{ namespaceId: 'ns-used', datetimeHour: '2026-11-09T11:00:00Z', requests: 3 }] });
+    const e = env();
+    await scan(e, NOW);
+    expect(await e.DB.prepare(`SELECT SUM(requests) AS n FROM metrics_hourly`).first('n')).toBe(2450);
+    expect((await getAccountState(e.DB, 'acc1')).extra_quantiles).toBe('unsupported');
+    expect((await getAccountState(e.DB, 'acc1')).gql_merge).toBe('yes');
+    f.calls.length = 0;
+    await scan(e, new Date(NOW.getTime() + H));
+    // Totals, cron and KV: the rejected fields are not asked for again today, so no retry.
+    expect(f.calls.filter((c) => c.endsWith('/graphql')).length).toBeLessThanOrEqual(3);
+  });
+});

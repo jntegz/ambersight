@@ -68,6 +68,8 @@
   const SEV = { critical: 0, warning: 1, info: 2 } as const;
   const open = $derived((data?.findings.filter((f) => f.status !== 'resolved') ?? []).sort((a, b) => SEV[a.severity] - SEV[b.severity]));
   const resolved = $derived(data?.findings.filter((f) => f.status === 'resolved') ?? []);
+  const hasMedians = $derived(data?.series.some((p) => p.cpuP50 != null) ?? false);
+  const hasWall = $derived(data?.series.some((p) => p.wallP99 != null) ?? false);
   const isCron = $derived(data?.handlers.includes('scheduled') ?? false);
   const csvBase = $derived(`ambersight-${name}-${range}`);
   const when = (iso: string) => new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' }) + ' UTC';
@@ -107,6 +109,7 @@
       <Stat label="Requests" value={compact(data.totals.requests)} now={data.totals.requests} before={data.previous.requests} compare="the {RANGE_LABEL[range]} before" />
       <Stat label="Error rate" value={pct(rate(data.totals))} now={rate(data.totals)} before={rate(data.previous)} upIsBad compare="the {RANGE_LABEL[range]} before" />
       <Stat label="CPU per request" value={ms(cpuPer(data.totals))} now={cpuPer(data.totals)} before={cpuPer(data.previous)} upIsBad hint="average" compare="the {RANGE_LABEL[range]} before" />
+      {#if data.totals.wallP50 != null}<Stat label="Median wall time" value={ms(data.totals.wallP50)} now={data.totals.wallP50} before={data.previous.wallP50} upIsBad compare="the {RANGE_LABEL[range]} before" />{/if}
       <Stat label="Highest CPU p99" value={ms(data.totals.cpuP99)} now={data.totals.cpuP99} before={data.previous.cpuP99} upIsBad compare="the {RANGE_LABEL[range]} before" />
       <Stat label="Subrequests per request" value={subPer(data.totals) == null ? '–' : subPer(data.totals)!.toFixed(2)} now={subPer(data.totals)} before={subPer(data.previous)} upIsBad compare="the {RANGE_LABEL[range]} before" />
       <Stat label="Limit hits" value={num(data.totals.exceeded)} now={data.totals.exceeded} before={data.previous.exceeded} upIsBad compare="the {RANGE_LABEL[range]} before" />
@@ -139,11 +142,26 @@
           {labels} granularity={data.granularity} title="CPU time for {name}" {markers} csvName="{csvBase}-cpu"
           series={[
             { label: 'Highest p99', values: data.series.map((p) => p.cpuP99), tone: 'accent' },
+            ...(hasMedians ? [{ label: 'Median', values: data.series.map((p) => p.cpuP50), tone: 'healthy' as const }] : []),
             { label: 'Average per request', values: data.series.map((p) => (p.requests ? p.cpuTimeUs / 1000 / p.requests : null)), tone: 'ink', dashed: true },
           ]}
           format={(v) => ms(v)}
         />
       </article>
+      {#if hasWall}
+        <article class="card panel">
+          <h2>Wall time</h2>
+          <Chart
+            {labels} granularity={data.granularity} title="Wall time for {name}" {markers} csvName="{csvBase}-wall-time"
+            series={[
+              { label: 'Highest p99', values: data.series.map((p) => p.wallP99), tone: 'accent' },
+              { label: 'Median', values: data.series.map((p) => p.wallP50), tone: 'healthy' },
+            ]}
+            format={(v) => ms(v)}
+          />
+          <p class="hint">Time from start to finish of each invocation, including waiting on fetches, storage and other Workers. CPU time is the part spent computing.</p>
+        </article>
+      {/if}
       <article class="card panel">
         <h2>Subrequests and limit hits</h2>
         {#if data.totals.exceeded === 0}

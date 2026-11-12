@@ -641,7 +641,44 @@ export function runChecks(input: CheckInput): Finding[] {
   if (input.meta && input.inventory) out.push(...hygieneFindings(input.now, input.meta, input.workers, input.inventory, config, tf));
   if (input.meta && input.changes) out.push(...changeFindings(input.now, input.meta, input.changes, config, tf));
   if (m.timeline) out = correlateDeploys(out, input, tf);
-  return out;
+  return addChangeContext(out, input);
+}
+
+/** Hours before a spike or error in which a change counts as its likely cause. */
+const CONTEXT_HOURS = 6;
+
+/**
+ * Anomalies that no deploy explains get the change that came just before them, when there was one:
+ * a binding that disappeared or an audit log entry for the same Worker (a settings, secret or route
+ * change made outside a deploy). Read from facts already loaded; nothing is fetched.
+ */
+export function addChangeContext(findings: Finding[], input: CheckInput): Finding[] {
+  const changes = input.changes;
+  if (!changes) return findings;
+  const end = input.now.getTime();
+  const from = end - CONTEXT_HOURS * 3_600_000;
+  const when = (iso: string) => `${iso.slice(0, 16).replace('T', ' ')} UTC`;
+  const recent = (iso: string) => {
+    const t = new Date(iso).getTime();
+    return t >= from && t <= end;
+  };
+  return findings.map((f) => {
+    const anomaly = f.module === 'runaway' || (f.module === 'errors' && (f.code === 'error-rate' || f.code === 'error-baseline'))
+      || (f.module === 'usage' && /^(ops-spike|idle-loop)-/.test(f.code));
+    if (!anomaly || f.script === '*' || f.evidence.deployId) return f;
+    const removed = changes.removedBindings.filter((b) => b.script === f.script && recent(b.at)).sort((a, b) => b.at.localeCompare(a.at))[0];
+    const audit = changes.audit.filter((a) => a.resourceId === f.script && recent(a.at)).sort((a, b) => b.at.localeCompare(a.at))[0];
+    const change = removed && (!audit || removed.at >= audit.at)
+      ? { at: removed.at, text: `binding ${removed.name} was removed` }
+      : audit ? { at: audit.at, text: `${audit.description || audit.action || 'a change'}${audit.actor ? ` by ${audit.actor}` : ''} (audit log)` } : null;
+    if (!change) return f;
+    return {
+      ...f,
+      message: `${f.message} Shortly before, ${change.text.replace(/\.$/, '')}.`,
+      evidence: { ...f.evidence, changedAt: change.at, change: change.text },
+      action: `Check the change of ${when(change.at)} first. ${f.action}`,
+    };
+  });
 }
 
 /** Median by quickselect: linear on average, where a sort is n log n. Runs 3 times per Worker per scan. */

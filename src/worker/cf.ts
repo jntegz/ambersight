@@ -124,6 +124,10 @@ export interface HourlyRow {
   subrequests: number;
   cpuP99: number | null;
   cpuTimeUs: number;
+  /** Median CPU time and wall time, ms; absent when the account's schema rejects these fields. */
+  cpuP50?: number | null;
+  wallP50?: number | null;
+  wallP99?: number | null;
 }
 
 export interface CronRunRow {
@@ -564,10 +568,10 @@ export class CfClient {
    * hourlyMetrics and exceededByHour in one request (two aliased fields): one subrequest instead
    * of two on every scan. Throws when the account rejects the combined query; callers fall back.
    */
-  async invocations(since: Date, until: Date, withCpuSum = true): Promise<{ hourly: HourlyRow[]; exceeded: ExceededRow[] }> {
+  async invocations(since: Date, until: Date, withCpuSum = true, extras = false): Promise<{ hourly: HourlyRow[]; exceeded: ExceededRow[] }> {
     const query = `query($account: string!, $since: Time!, $until: Time!) {
       viewer { accounts(filter: { accountTag: $account }) {
-        ${HOURLY_FIELDS('totals: workersInvocationsAdaptive', withCpuSum)}
+        ${HOURLY_FIELDS('totals: workersInvocationsAdaptive', withCpuSum, extras)}
         ${EXCEEDED_FIELDS('limits: workersInvocationsAdaptive')}
       } }
     }`;
@@ -822,14 +826,14 @@ function mergeOps(kind: ResourceOps['kind'], spec: OpsSpec, idDim: string, data:
 type InvocationRow = {
   dimensions: { scriptName: string; datetimeHour: string };
   sum: { requests: number; errors: number; subrequests: number; cpuTimeUs?: number };
-  quantiles: { cpuTimeP99: number | null };
+  quantiles: { cpuTimeP99: number | null; cpuTimeP50?: number | null; wallTimeP50?: number | null; wallTimeP99?: number | null };
 };
 type ExceededGql = { dimensions: { scriptName: string; datetimeHour: string; status?: string }; sum: { requests: number } };
 
-const HOURLY_FIELDS = (field: string, withCpuSum: boolean) => `${field}(limit: 10000, filter: { datetime_geq: $since, datetime_lt: $until }) {
+const HOURLY_FIELDS = (field: string, withCpuSum: boolean, extras = false) => `${field}(limit: 10000, filter: { datetime_geq: $since, datetime_lt: $until }) {
           dimensions { scriptName datetimeHour }
           sum { requests errors subrequests${withCpuSum ? ' cpuTimeUs' : ''} }
-          quantiles { cpuTimeP99 }
+          quantiles { cpuTimeP99${extras ? ' cpuTimeP50 wallTimeP50 wallTimeP99' : ''} }
         }`;
 
 const EXCEEDED_FIELDS = (field: string) => `${field}(limit: 10000, filter: {
@@ -850,6 +854,12 @@ function readHourly(rows: InvocationRow[]): HourlyRow[] {
     // cpuTime is reported in microseconds.
     cpuP99: r.quantiles.cpuTimeP99 == null ? null : r.quantiles.cpuTimeP99 / 1000,
     cpuTimeUs: r.sum.cpuTimeUs ?? 0,
+    // Quantiles are reported in microseconds.
+    ...('cpuTimeP50' in r.quantiles ? {
+      cpuP50: r.quantiles.cpuTimeP50 == null ? null : r.quantiles.cpuTimeP50 / 1000,
+      wallP50: r.quantiles.wallTimeP50 == null ? null : r.quantiles.wallTimeP50 / 1000,
+      wallP99: r.quantiles.wallTimeP99 == null ? null : r.quantiles.wallTimeP99 / 1000,
+    } : {}),
   }));
 }
 

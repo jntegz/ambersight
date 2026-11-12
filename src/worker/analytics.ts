@@ -33,16 +33,20 @@ export function windowOf(range: Range, now: Date) {
   return { granularity, start, end, prevStart: start - RANGE_MS[range], buckets };
 }
 
-const ZERO: MetricTotals = { requests: 0, errors: 0, subrequests: 0, cpuTimeUs: 0, cpuP99: null, exceeded: 0, exceededCpu: 0, exceededMemory: 0 };
+const ZERO: MetricTotals = { requests: 0, errors: 0, subrequests: 0, cpuTimeUs: 0, cpuP99: null, cpuP50: null, wallP50: null, wallP99: null, exceeded: 0, exceededCpu: 0, exceededMemory: 0 };
 
-type Agg = { t?: string; script?: string; requests: number | null; errors: number | null; subrequests: number | null; cpu_time_us: number | null; cpu: number | null; exceeded: number | null; exceeded_cpu: number | null; exceeded_memory: number | null };
+type Agg = { t?: string; script?: string; requests: number | null; errors: number | null; subrequests: number | null; cpu_time_us: number | null; cpu: number | null; exceeded: number | null; exceeded_cpu: number | null; exceeded_memory: number | null;
+  cpu50: number | null; wall50: number | null; wall99: number | null };
 const toTotals = (r: Agg | undefined): MetricTotals => (r ? {
   requests: r.requests ?? 0, errors: r.errors ?? 0, subrequests: r.subrequests ?? 0, cpuTimeUs: r.cpu_time_us ?? 0, cpuP99: r.cpu,
+  cpuP50: r.cpu50 ?? null, wallP50: r.wall50 ?? null, wallP99: r.wall99 ?? null,
   exceeded: r.exceeded ?? 0, exceededCpu: r.exceeded_cpu ?? 0, exceededMemory: r.exceeded_memory ?? 0,
 } : { ...ZERO });
 
 const SUMS = `SUM(requests) AS requests, SUM(errors) AS errors, SUM(subrequests) AS subrequests, SUM(cpu_time_us) AS cpu_time_us,
-  MAX(cpu) AS cpu, SUM(exceeded) AS exceeded, SUM(exceeded_cpu) AS exceeded_cpu, SUM(exceeded_memory) AS exceeded_memory`;
+  MAX(cpu) AS cpu, SUM(exceeded) AS exceeded, SUM(exceeded_cpu) AS exceeded_cpu, SUM(exceeded_memory) AS exceeded_memory,
+  SUM(cpu50 * requests) / NULLIF(SUM(CASE WHEN cpu50 IS NOT NULL THEN requests END), 0) AS cpu50,
+  SUM(wall50 * requests) / NULLIF(SUM(CASE WHEN wall50 IS NOT NULL THEN requests END), 0) AS wall50, MAX(wall99) AS wall99`;
 
 /**
  * Worker metrics between two times, from the daily rollups up to the last rolled-up day and from
@@ -57,8 +61,11 @@ function metricsQuery(
   if (hourly) {
     const key = by === 'hour' ? 'hour' : by === 'script' ? 'script' : "'all'";
     return db.prepare(
-      `SELECT ${key} AS k, ${SUMS.replace('MAX(cpu)', 'MAX(cpu_p99)')} FROM metrics_hourly
-       WHERE account = ?1 AND hour >= ?5 AND hour < ?6 ${scriptFilter} GROUP BY k`,
+      `SELECT ${key} AS k, ${SUMS} FROM (
+         SELECT hour, script, requests, errors, subrequests, cpu_time_us, cpu_p99 AS cpu, exceeded, exceeded_cpu, exceeded_memory,
+           cpu_p50 AS cpu50, wall_p50 AS wall50, wall_p99 AS wall99
+         FROM metrics_hourly WHERE account = ?1 AND hour >= ?5 AND hour < ?6 ${scriptFilter}
+       ) GROUP BY k`,
     ).bind(account, null, null, null, isoHour(new Date(start)), isoHour(new Date(end)), script);
   }
   // Hours after the last rolled-up day (today, and any day a scan has not folded yet).
@@ -66,10 +73,12 @@ function metricsQuery(
   const key = by === 'day' ? 't' : by === 'script' ? 'script' : "'all'";
   return db.prepare(
     `SELECT ${key} AS k, ${SUMS} FROM (
-       SELECT day AS t, script, requests, errors, subrequests, cpu_time_us, cpu_p99_max AS cpu, exceeded, exceeded_cpu, exceeded_memory
+       SELECT day AS t, script, requests, errors, subrequests, cpu_time_us, cpu_p99_max AS cpu, exceeded, exceeded_cpu, exceeded_memory,
+         cpu_p50 AS cpu50, wall_p50 AS wall50, wall_p99_max AS wall99
        FROM metrics_daily WHERE account = ?1 AND day >= ?2 AND day < ?3 AND (?4 IS NOT NULL AND day <= ?4) ${scriptFilter}
        UNION ALL
-       SELECT substr(hour, 1, 10), script, requests, errors, subrequests, cpu_time_us, cpu_p99, exceeded, exceeded_cpu, exceeded_memory
+       SELECT substr(hour, 1, 10), script, requests, errors, subrequests, cpu_time_us, cpu_p99, exceeded, exceeded_cpu, exceeded_memory,
+         cpu_p50, wall_p50, wall_p99
        FROM metrics_hourly WHERE account = ?1 AND hour >= ?5 AND hour < ?6 ${scriptFilter}
      ) GROUP BY k`,
   ).bind(account, dayOf(start), dayOf(end), rolled, isoHour(new Date(hourlyFrom)), isoHour(new Date(end)), script);
@@ -361,7 +370,7 @@ export async function buildWorkerDetail(env: Env, requested: string | undefined,
     ).bind(A, name, new Date(w.start).toISOString()),
     // Hourly rows around the deploys in the range (24 hours either side), for before and after.
     db.prepare(
-      `SELECT hour, requests, errors, subrequests, cpu_time_us, cpu_p99, exceeded, exceeded_cpu, exceeded_memory FROM metrics_hourly
+      `SELECT hour, requests, errors, subrequests, cpu_time_us, cpu_p99, exceeded, exceeded_cpu, exceeded_memory, cpu_p50, wall_p50, wall_p99 FROM metrics_hourly
        WHERE account = ?1 AND script = ?2 AND hour >= ?3 ORDER BY hour`,
     ).bind(A, name, isoHour(new Date(w.start - DAY))),
   ]);
@@ -383,10 +392,12 @@ export async function buildWorkerDetail(env: Env, requested: string | undefined,
   }
 
   // Before and after each deploy: the 24 hours either side, from the hourly rows.
-  type HRow = { hour: string; requests: number; errors: number; subrequests: number; cpu_time_us: number; cpu_p99: number | null; exceeded: number; exceeded_cpu: number | null; exceeded_memory: number | null };
+  type HRow = { hour: string; requests: number; errors: number; subrequests: number; cpu_time_us: number; cpu_p99: number | null; exceeded: number; exceeded_cpu: number | null; exceeded_memory: number | null;
+    cpu_p50: number | null; wall_p50: number | null; wall_p99: number | null };
   const hours = impactR.results as HRow[];
   const sum = (from: number, to: number): MetricTotals => {
     const t = { ...ZERO };
+    let w50 = 0, n50 = 0, c50 = 0, m50 = 0;
     for (const h of hours) {
       const ts = Date.parse(h.hour);
       if (ts < from || ts >= to) continue;
@@ -398,7 +409,12 @@ export async function buildWorkerDetail(env: Env, requested: string | undefined,
       t.exceededCpu += h.exceeded_cpu ?? 0;
       t.exceededMemory += h.exceeded_memory ?? 0;
       if (h.cpu_p99 != null) t.cpuP99 = Math.max(t.cpuP99 ?? 0, h.cpu_p99);
+      if (h.wall_p99 != null) t.wallP99 = Math.max(t.wallP99 ?? 0, h.wall_p99);
+      if (h.cpu_p50 != null) { c50 += h.cpu_p50 * h.requests; m50 += h.requests; }
+      if (h.wall_p50 != null) { w50 += h.wall_p50 * h.requests; n50 += h.requests; }
     }
+    t.cpuP50 = m50 ? c50 / m50 : null;
+    t.wallP50 = n50 ? w50 / n50 : null;
     return t;
   };
   const deployImpact = deploys.slice(0, 20).map((d) => {

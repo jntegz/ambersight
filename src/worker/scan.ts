@@ -141,8 +141,18 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
   let exceeded: ExceededRow[] = [];
   if (!light) {
     if (mergeOk) {
+      // Median CPU and wall time ride along in the same request; an account whose schema rejects
+      // them is asked without them, and again a day later.
+      const extras = settings.extra_quantiles !== 'unsupported' || now.getTime() - new Date(settings.extra_quantiles_checked ?? 0).getTime() > DAY;
       try {
-        ({ hourly, exceeded } = await cf.invocations(since, now, cpuSum));
+        try {
+          ({ hourly, exceeded } = await cf.invocations(since, now, cpuSum, extras));
+          if (extras && settings.extra_quantiles !== 'yes') Object.assign(settings, { extra_quantiles: 'yes', extra_quantiles_checked: stamp });
+        } catch (e) {
+          if (!extras) throw e;
+          ({ hourly, exceeded } = await cf.invocations(since, now, cpuSum, false));
+          Object.assign(settings, { extra_quantiles: 'unsupported', extra_quantiles_checked: stamp });
+        }
         mergeResult(true);
       } catch {
         [hourly, exceeded] = await separately();
@@ -552,15 +562,19 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
        WHERE workers.account = ?1 AND workers.name = a.script AND (workers.last_active_hour IS NULL OR workers.last_active_hour < a.hour)`,
     ).bind(A, j(hourly)),
     db.prepare(
-      `INSERT INTO metrics_hourly (account, script, hour, requests, errors, subrequests, cpu_p99, cpu_time_us)
+      `INSERT INTO metrics_hourly (account, script, hour, requests, errors, subrequests, cpu_p99, cpu_time_us, cpu_p50, wall_p50, wall_p99)
        SELECT ?1, json_extract(value,'$.script'), json_extract(value,'$.hour'), json_extract(value,'$.requests'),
-         json_extract(value,'$.errors'), json_extract(value,'$.subrequests'), json_extract(value,'$.cpuP99'), json_extract(value,'$.cpuTimeUs')
+         json_extract(value,'$.errors'), json_extract(value,'$.subrequests'), json_extract(value,'$.cpuP99'), json_extract(value,'$.cpuTimeUs'),
+         json_extract(value,'$.cpuP50'), json_extract(value,'$.wallP50'), json_extract(value,'$.wallP99')
        FROM json_each(?2) WHERE true
        ON CONFLICT(account, script, hour) DO UPDATE SET requests=excluded.requests, errors=excluded.errors,
-         subrequests=excluded.subrequests, cpu_p99=excluded.cpu_p99, cpu_time_us=excluded.cpu_time_us
+         subrequests=excluded.subrequests, cpu_p99=excluded.cpu_p99, cpu_time_us=excluded.cpu_time_us,
+         cpu_p50=COALESCE(excluded.cpu_p50, metrics_hourly.cpu_p50), wall_p50=COALESCE(excluded.wall_p50, metrics_hourly.wall_p50),
+         wall_p99=COALESCE(excluded.wall_p99, metrics_hourly.wall_p99)
        WHERE metrics_hourly.requests IS NOT excluded.requests OR metrics_hourly.errors IS NOT excluded.errors
          OR metrics_hourly.subrequests IS NOT excluded.subrequests OR metrics_hourly.cpu_p99 IS NOT excluded.cpu_p99
-         OR metrics_hourly.cpu_time_us IS NOT excluded.cpu_time_us`,
+         OR metrics_hourly.cpu_time_us IS NOT excluded.cpu_time_us OR metrics_hourly.cpu_p50 IS NOT excluded.cpu_p50
+         OR metrics_hourly.wall_p50 IS NOT excluded.wall_p50 OR metrics_hourly.wall_p99 IS NOT excluded.wall_p99`,
     ).bind(A, j(hourly)),
     db.prepare(
       `INSERT INTO metrics_hourly (account, script, hour, exceeded, exceeded_cpu, exceeded_memory)
@@ -810,6 +824,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
       ...(rolled.length ? { rollup_day: rolled.at(-1)! } : {}),
       ...(settings.gql_merge ? { gql_merge: settings.gql_merge, gql_merge_checked: settings.gql_merge_checked ?? stamp } : {}),
       ...(settings.cpu_sum ? { cpu_sum: settings.cpu_sum } : {}),
+      ...(settings.extra_quantiles ? { extra_quantiles: settings.extra_quantiles, extra_quantiles_checked: settings.extra_quantiles_checked ?? stamp } : {}),
       ...(settings.cron_cpu ? { cron_cpu: settings.cron_cpu } : {}),
       ...(settings.ops_checked ? { ops_unavailable: settings.ops_unavailable ?? '', ops_simple: settings.ops_simple ?? '', ops_checked: settings.ops_checked } : {}),
       ...(settings.quota_unavailable != null ? { quota_unavailable: settings.quota_unavailable } : {}),
@@ -1056,6 +1071,7 @@ export async function loadFacts(
   db: D1Database, account: string, now: Date, config: Config, settings: Settings, cronWindow: { from: Date; to: Date } | null, subdomain: string | null,
 ): Promise<Facts> {
   const lastFullHour = isoHour(new Date(hourFloor(now).getTime() - HOUR));
+  const hourOfDay = lastFullHour.slice(11, 13);
   const dayAgo = isoHour(new Date(now.getTime() - DAY));
   const weekAgo = isoHour(new Date(now.getTime() - 7 * DAY));
   const zombieFrom = isoHour(new Date(now.getTime() - Math.min(config.thresholds.zombieDays, config.retentionDays) * DAY));
@@ -1122,6 +1138,8 @@ export async function loadFacts(
     let cpuMax: number | null = null;
     let last: H | undefined;
     const beforeReq: number[] = [], beforeCpu: number[] = [], beforeSub: number[] = [];
+    // The same hour of day on the days before: a nightly job or a daily peak is usual at its hour.
+    const sameReq: number[] = [], sameCpu: number[] = [], sameSub: number[] = [];
     const hours24: HourPoint[] = [];
     for (const h of hs) {
       if (h.hour >= dayAgo) {
@@ -1139,6 +1157,11 @@ export async function loadFacts(
         beforeReq.push(h.requests);
         beforeCpu.push(h.cpu_time_us ?? 0);
         beforeSub.push(h.subrequests ?? 0);
+        if (h.hour.slice(11, 13) === hourOfDay) {
+          sameReq.push(h.requests);
+          sameCpu.push(h.cpu_time_us ?? 0);
+          sameSub.push(h.subrequests ?? 0);
+        }
       } else if (h.hour === lastFullHour) last = h;
     }
     return {
@@ -1151,11 +1174,11 @@ export async function loadFacts(
       exceeded24h,
       cpuP99Max24h: cpuMax,
       lastHourRequests: last?.requests ?? 0,
-      hourlyMedian7d: median(beforeReq),
+      hourlyMedian7d: usual(beforeReq, sameReq),
       lastHourCpuUs: last?.cpu_time_us ?? 0,
-      hourlyMedianCpuUs7d: median(beforeCpu),
+      hourlyMedianCpuUs7d: usual(beforeCpu, sameCpu),
       lastHourSubrequests: last?.subrequests ?? 0,
-      hourlyMedianSubrequests7d: median(beforeSub),
+      hourlyMedianSubrequests7d: usual(beforeSub, sameSub),
       historyHours: beforeReq.length + (last ? 1 : 0),
       hours24,
       // Any request since the start of the no-traffic window counts as activity.
@@ -1248,12 +1271,13 @@ export async function loadFacts(
     const [kind, resource] = k.split('|') as [ResourceStats['kind'], string];
     const last = list.find((o) => o.hour === lastFullHour);
     const before = list.filter((o) => o.hour < lastFullHour);
+    const sameHour = before.filter((o) => o.hour.slice(11, 13) === hourOfDay);
     const label = kind === 'do' ? `Durable Objects in ${resource}` : (labelOf.get(`${kind}|${resource}`) ?? resource);
     const target = kind === 'queues' ? (labelOf.get(`${kind}|${resource}`) ?? resource) : resource;
     const script = kind === 'do' ? resource : (bindingOwner.get(target) ?? '*');
     const owners = kind === 'do' ? [resource] : (boundBy.get(target) ?? []);
     return {
-      kind, resource, label, script, lastHour: last?.ops ?? 0, median7d: median(before.map((o) => o.ops)), historyHours: before.length + (last ? 1 : 0),
+      kind, resource, label, script, lastHour: last?.ops ?? 0, median7d: usual(before.map((o) => o.ops), sameHour.map((o) => o.ops)), historyHours: before.length + (last ? 1 : 0),
       recentOps: recentHours.map((h) => list.find((o) => o.hour === h)?.ops ?? 0),
       // null when no Worker is known to use it: the idle check then has nothing to compare with.
       recentRequests: owners.length ? recentHours.map((h) => requestsAt(owners, h)) : null,
@@ -1331,6 +1355,17 @@ export async function loadFacts(
     inventory,
     thresholdsFor: tf,
   };
+}
+
+/**
+ * The usual hourly level a "5x" check compares with: the median hour of the last 7 days, or the
+ * median of the same hour of day when that is higher (with at least 3 such days). A nightly batch
+ * or a weekday peak is then judged against its own hour and stops raising runaway alerts, while
+ * the bar never drops below the plain median, so no check becomes more sensitive.
+ */
+export function usual(all: number[], sameHour: number[]): number {
+  const m = median(all);
+  return sameHour.length >= 3 ? Math.max(m, median(sameHour)) : m;
 }
 
 /** Expected vs observed runs in [from, to), plus how many of the latest expected slots went bad in a row. */

@@ -68,6 +68,8 @@ export interface FakeOptions {
   npm?: Record<string, string | number>;
   /** KV operations per namespace and hour (kvOperationsAdaptiveGroups). Default: the dataset is unavailable. */
   kvOps?: { namespaceId: string; datetimeHour: string; requests: number; actionType?: string }[];
+  /** Reject the CPU p50 and wall-time quantiles like an older schema would. */
+  rejectQuantiles?: boolean;
   /** Limit outcomes per Worker, hour and status (the status_in query). Default: none. */
   exceeded?: { scriptName: string; datetimeHour: string; status: string; requests: number }[];
   /** KV storage per namespace (kvStorageAdaptiveGroups). Default: the dataset is unavailable. */
@@ -168,12 +170,14 @@ function answerDataset(q: string, opts: FakeOptions): { dataset: string; rows: u
   }
   if (q.includes('workersInvocationsAdaptive')) {
     if (opts.rejectCpuSum && q.includes('cpuTimeUs')) return { error: 'unknown field cpuTimeUs' };
+    if (opts.rejectQuantiles && q.includes('wallTimeP99')) return { error: 'unknown field wallTimeP99' };
+    const extras = q.includes('wallTimeP99');
     return {
       dataset,
       rows: (opts.hourly ?? []).map((h) => ({
         dimensions: { scriptName: h.scriptName, datetimeHour: h.datetimeHour },
         sum: { requests: h.requests, errors: h.errors, subrequests: h.subrequests ?? 0, cpuTimeUs: h.cpuTimeUs ?? 0 },
-        quantiles: { cpuTimeP99: 1500 },
+        quantiles: { cpuTimeP99: 1500, ...(extras ? { cpuTimeP50: 700, wallTimeP50: 12_000, wallTimeP99: 95_000 } : {}) },
       })),
     };
   }

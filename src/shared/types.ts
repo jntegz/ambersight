@@ -263,6 +263,10 @@ export interface MetricPoint {
   cpuTimeUs: number;
   /** Highest hourly CPU p99 in the bucket, ms; null without data. */
   cpuP99: number | null;
+  /** Median CPU time and wall time (hourly medians weighted by requests), and the highest wall-time p99, ms. */
+  cpuP50: number | null;
+  wallP50: number | null;
+  wallP99: number | null;
   /** Invocations that hit a limit, and of those the CPU and memory limits. */
   exceeded: number;
   exceededCpu: number;
