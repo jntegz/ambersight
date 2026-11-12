@@ -159,7 +159,15 @@ export async function sendAlerts(env: Env, now: Date, config: Config): Promise<v
       sent.push(...viaHook.map((r) => r.id));
     }
     if (sent.length) {
-      await db.prepare(`UPDATE findings SET notified_at = ?1 WHERE id IN (SELECT value FROM json_each(?2))`).bind(stamp, JSON.stringify([...new Set(sent)])).run();
+      const ids = JSON.stringify([...new Set(sent)]);
+      await db.batch([
+        // The alert in the finding's history, for alert-quality analytics.
+        db.prepare(
+          `INSERT INTO finding_events (account, finding_id, at, kind, severity, check_id, script)
+           SELECT account, id, ?1, 'alerted', severity, module || ':' || code, script FROM findings WHERE id IN (SELECT value FROM json_each(?2))`,
+        ).bind(stamp, ids),
+        db.prepare(`UPDATE findings SET notified_at = ?1 WHERE id IN (SELECT value FROM json_each(?2))`).bind(stamp, ids),
+      ]);
     }
   }
 

@@ -8,7 +8,7 @@ import { groupsFor, inScope, repoFor, thresholdsFor, type Config } from '../shar
 import { checkOf } from '../shared/findings';
 import type { Finding } from '../shared/types';
 import type { QuotaMetric, StorageKind } from '../shared/limits';
-import { CfClient, CronRunsTruncated, type ApiScript, type ApiWorker, type AuditEvent, type CfAlert, type CronRunRow, type D1Query, type Deployment, type InventoryItem, type QuotaRow, type ResourceOps, type ScriptSettings, type StorageSize, type Zone } from './cf';
+import { CfClient, CronRunsTruncated, type ExceededRow, type HourlyRow, type ApiScript, type ApiWorker, type AuditEvent, type CfAlert, type CronRunRow, type D1Query, type Deployment, type InventoryItem, type QuotaRow, type ResourceOps, type ScriptSettings, type StorageSize, type Zone } from './cf';
 import { median, runChecks, type CronStats, type HourPoint, type ResourceStats, type WorkerMeta, type WorkerStats } from './checks';
 import { countRuns } from './cron';
 import { configFrom, getAccountState, getSettings, hourFloor, isoHour, planFrom, recordUsage, setAccountState, setSettings, upsertAccount, utcMidnight, type Settings } from './db';
@@ -16,6 +16,7 @@ import type { Env } from './env';
 import { boundByMap, type InventoryFacts, type StorageKind4 } from './hygiene';
 import type { ChangeFacts } from './security';
 import { metered } from './meter';
+import { bumpRevision, historyRetention, rollupDays, rollupStatements, scanRunStatement } from './history';
 import { fetchIncidents, type Incident } from './incidents';
 import { allowedFetch } from './net';
 import { sendAlerts } from './notify';
@@ -113,7 +114,18 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
     : new Date(hourFloor(now).getTime() - 48 * HOUR);
   const light = opts.continuation === true;
   const cpuSum = settings.cpu_sum !== 'unsupported';
-  const [hourly, exceeded] = light ? [[], []] : await Promise.all([
+  // Several GraphQL datasets go into one request with aliases. An account that rejects that is
+  // read the old way (one request per dataset) and asked again a day later.
+  const mergeOk = settings.gql_merge !== 'no' || now.getTime() - new Date(settings.gql_merge_checked ?? 0).getTime() > DAY;
+  const mergeResult = (merged: boolean | null) => {
+    if (merged === null) return;
+    const v = merged ? 'yes' : 'no';
+    if (settings.gql_merge !== v || !merged) {
+      settings.gql_merge = v;
+      settings.gql_merge_checked = stamp;
+    }
+  };
+  const separately = () => Promise.all([
     cf.hourlyMetrics(since, now, cpuSum).catch(async (e: Error) => {
       if (!cpuSum) throw e;
       settings.cpu_sum = 'unsupported';
@@ -125,6 +137,22 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
       return [];
     }),
   ]);
+  let hourly: HourlyRow[] = [];
+  let exceeded: ExceededRow[] = [];
+  if (!light) {
+    if (mergeOk) {
+      try {
+        ({ hourly, exceeded } = await cf.invocations(since, now, cpuSum));
+        mergeResult(true);
+      } catch {
+        [hourly, exceeded] = await separately();
+        // Keep combining when only the CPU field was the problem: the next scan asks without it.
+        if (settings.cpu_sum !== 'unsupported' || !cpuSum) mergeResult(false);
+      }
+    } else {
+      [hourly, exceeded] = await separately();
+    }
+  }
 
   // 3. Cron runs (experimental dataset; retried once a day if unavailable).
   const scheduled = inventory.filter((w) => w.handlers.includes('scheduled')).map((w) => w.name);
@@ -167,7 +195,10 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
     if (tryKinds.length) {
       // Kinds whose richer query (D1 rows, KV by action) the account rejected; retried with the others daily.
       const simple = new Set(retryFailed ? [] : (settings.ops_simple ?? '').split(',').filter(Boolean));
-      const r = await cf.resourceOps(opsFrom, now, tryKinds, simple);
+      const r = await cf.resourceOps(opsFrom, now, tryKinds, simple, mergeOk);
+      // A dataset the account lacks fails the combined request too; it is left out from now on,
+      // so the combination is not to blame.
+      mergeResult(r.merged === false && (r.failed.length || r.downgraded.length) ? null : r.merged);
       resourceOps = r.rows;
       for (const k of tryKinds) if (!r.failed.includes(k)) opsCollected.add(k);
       if (retryFailed || r.failed.length || r.downgraded.length) {
@@ -308,7 +339,8 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
     const kinds = new Set<StorageKind>([...kindRows.map((k) => k.kind), ...refreshed.filter((r) => ['kv', 'd1', 'r2'].includes(r.kind)).map((r) => r.kind as StorageKind)]);
     if (known.some((k) => k.has_do)) kinds.add('do');
     if (kinds.size) {
-      const r = await cf.storageSizes([...kinds], now);
+      const r = await cf.storageSizes([...kinds], now, mergeOk);
+      mergeResult(r.merged === false && r.failed.length ? null : r.merged);
       storageSizes = r.sizes;
       if (r.failed.length) warnings.push(`Storage sizes unavailable: ${r.failed.join(', ')}.`);
     }
@@ -531,10 +563,13 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
          OR metrics_hourly.cpu_time_us IS NOT excluded.cpu_time_us`,
     ).bind(A, j(hourly)),
     db.prepare(
-      `INSERT INTO metrics_hourly (account, script, hour, exceeded)
-       SELECT ?1, json_extract(value,'$.script'), json_extract(value,'$.hour'), json_extract(value,'$.count')
+      `INSERT INTO metrics_hourly (account, script, hour, exceeded, exceeded_cpu, exceeded_memory)
+       SELECT ?1, json_extract(value,'$.script'), json_extract(value,'$.hour'), json_extract(value,'$.count'),
+         json_extract(value,'$.cpu'), json_extract(value,'$.memory')
        FROM json_each(?2) WHERE true
-       ON CONFLICT(account, script, hour) DO UPDATE SET exceeded=excluded.exceeded WHERE metrics_hourly.exceeded IS NOT excluded.exceeded`,
+       ON CONFLICT(account, script, hour) DO UPDATE SET exceeded=excluded.exceeded, exceeded_cpu=excluded.exceeded_cpu, exceeded_memory=excluded.exceeded_memory
+       WHERE metrics_hourly.exceeded IS NOT excluded.exceeded OR metrics_hourly.exceeded_cpu IS NOT excluded.exceeded_cpu
+         OR metrics_hourly.exceeded_memory IS NOT excluded.exceeded_memory`,
     ).bind(A, j(exceeded)),
     // Detail: bindings, flags, schedules, deployments.
     db.prepare(
@@ -615,11 +650,17 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
   if (resourceOps.length) {
     writes.push(
       db.prepare(
-        `INSERT INTO resource_hourly (account, kind, resource, hour, ops)
-         SELECT ?1, json_extract(value,'$.kind'), json_extract(value,'$.resource'), json_extract(value,'$.hour'), json_extract(value,'$.ops')
+        `INSERT INTO resource_hourly (account, kind, resource, hour, ops, rows_read, rows_written, reads, writes, deletes, lists)
+         SELECT ?1, json_extract(value,'$.kind'), json_extract(value,'$.resource'), json_extract(value,'$.hour'), json_extract(value,'$.ops'),
+           json_extract(value,'$.split.rowsRead'), json_extract(value,'$.split.rowsWritten'), json_extract(value,'$.split.reads'),
+           json_extract(value,'$.split.writes'), json_extract(value,'$.split.deletes'), json_extract(value,'$.split.lists')
          FROM json_each(?2) WHERE true
-         ON CONFLICT(account, kind, resource, hour) DO UPDATE SET ops=excluded.ops WHERE resource_hourly.ops IS NOT excluded.ops`,
-      ).bind(A, j(resourceOps)),
+         ON CONFLICT(account, kind, resource, hour) DO UPDATE SET ops=excluded.ops, rows_read=excluded.rows_read, rows_written=excluded.rows_written,
+           reads=excluded.reads, writes=excluded.writes, deletes=excluded.deletes, lists=excluded.lists
+         WHERE resource_hourly.ops IS NOT excluded.ops OR resource_hourly.rows_read IS NOT excluded.rows_read
+           OR resource_hourly.rows_written IS NOT excluded.rows_written OR resource_hourly.reads IS NOT excluded.reads
+           OR resource_hourly.writes IS NOT excluded.writes OR resource_hourly.deletes IS NOT excluded.deletes OR resource_hourly.lists IS NOT excluded.lists`,
+      ).bind(A, j(resourceOps.map(({ metrics: _m, ...r }) => r))),
       // The last hour each storage resource had operations, for the unused-storage checks (no
       // rereading of 30 days of hourly rows). Written only when it moves forward.
       db.prepare(
@@ -649,6 +690,12 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
          SELECT ?1, json_extract(value,'$.kind'), json_extract(value,'$.id'), json_extract(value,'$.bytes'), json_extract(value,'$.objects'), ?3
          FROM json_each(?2) WHERE true ON CONFLICT(account, kind, id) DO UPDATE SET bytes = excluded.bytes, objects = excluded.objects, at = excluded.at`,
       ).bind(A, j(storageSizes), stamp),
+      // The same sizes as one row per resource and day, for growth over time.
+      db.prepare(
+        `INSERT INTO storage_daily (account, kind, id, day, bytes, objects)
+         SELECT ?1, json_extract(value,'$.kind'), json_extract(value,'$.id'), ?3, json_extract(value,'$.bytes'), json_extract(value,'$.objects')
+         FROM json_each(?2) WHERE true ON CONFLICT(account, kind, id, day) DO UPDATE SET bytes = excluded.bytes, objects = excluded.objects`,
+      ).bind(A, j(storageSizes), stamp.slice(0, 10)),
     );
   }
   if (cfAlerts.length) {
@@ -736,6 +783,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
       ).bind(A, j(refreshed.filter((r) => refreshedKinds.has(r.kind)).map((r) => ({ ...r, extra: r.extra ? j(r.extra) : null })))),
       // Retention, once per inventory refresh.
       ...retentionDeletes(db, A, now, config.retentionDays),
+      ...historyRetention(db, A, now),
       // Housekeeping progress for the overview, counted once a day instead of on every page load.
       db.prepare(
         `INSERT INTO account_state (account, key, value)
@@ -754,8 +802,13 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
       upsertAccount(db, { id: A, detectedPlan }, now),
     );
   }
+  // Daily rollups of the days that are complete, after this scan's hourly rows (same batch, in order).
+  const rolled = light ? [] : rollupDays(now, settings.rollup_day);
+  writes.push(...rollupStatements(db, A, rolled));
   writes.push(
     setAccountState(db, A, {
+      ...(rolled.length ? { rollup_day: rolled.at(-1)! } : {}),
+      ...(settings.gql_merge ? { gql_merge: settings.gql_merge, gql_merge_checked: settings.gql_merge_checked ?? stamp } : {}),
       ...(settings.cpu_sum ? { cpu_sum: settings.cpu_sum } : {}),
       ...(settings.cron_cpu ? { cron_cpu: settings.cron_cpu } : {}),
       ...(settings.ops_checked ? { ops_unavailable: settings.ops_unavailable ?? '', ops_simple: settings.ops_simple ?? '', ops_checked: settings.ops_checked } : {}),
@@ -814,7 +867,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
   // findings as they are rather than resolving them as if every cron had recovered.
   // Cron findings stay as they are when this scan did not read cron runs (paused, or a continuation).
   const keepModules = cronTruncated || cronDataEmpty || light ? ['cron'] : [];
-  await saveFindings(db, accountId, muted.size ? findings.filter((f) => !muted.has(checkOf(f))) : findings, stamp, keepModules, inventory.map((w) => w.name));
+  const changed = await saveFindings(db, accountId, muted.size ? findings.filter((f) => !muted.has(checkOf(f))) : findings, stamp, keepModules, inventory.map((w) => w.name));
 
   // 9. Alerts and digest, then the run's own cost.
   if (!light) await sendAlerts(env, now, config).catch((e: Error) => warnings.push(`Alerts failed: ${e.message}`));
@@ -827,6 +880,11 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
       scan_failures: '0',
     }),
     recordUsage(db, now, { cronRuns: 1, subrequests: calls(), rowsRead: meter.rowsRead, rowsWritten: meter.rowsWritten }),
+    scanRunStatement(db, A, {
+      at: stamp, ms: Date.now() - started, calls: calls(), rowsRead: meter.rowsRead, rowsWritten: meter.rowsWritten,
+      warnings: warnings.length, findings: findings.length, opened: changed.opened, resolved: changed.resolved,
+    }),
+    bumpRevision(db),
   ]);
 
   return { workers: inventory.length, findings: findings.length, subrequests: calls(), d1Queries: meter.queries, warnings, detailRemaining, zonesRemaining: zonesLeft };
@@ -1317,9 +1375,47 @@ export function cronStats(
 /** Stored finding IDs carry the account, so the same check on a same-named Worker in two accounts stays apart. */
 export const findingKey = (account: string, id: string) => `${account}/${id}`;
 
-async function saveFindings(db: D1Database, account: string, findings: Finding[], stamp: string, keepModules: string[] = [], workerNames: string[] = []): Promise<void> {
+/** How serious a severity is, for escalated and eased events. */
+const RANK = (col: string) => `CASE ${col} WHEN 'critical' THEN 3 WHEN 'warning' THEN 2 ELSE 1 END`;
+
+/**
+ * Saves this scan's findings and records every change in finding_events: opened, reopened,
+ * escalated, eased and resolved. Returns how many findings opened (or reopened) and resolved.
+ */
+async function saveFindings(
+  db: D1Database, account: string, findings: Finding[], stamp: string, keepModules: string[] = [], workerNames: string[] = [],
+): Promise<{ opened: number; resolved: number }> {
   const rows = findings.map((f) => ({ ...f, id: findingKey(account, f.id), evidence: JSON.stringify(f.evidence), docsUrl: f.docsUrl ?? null }));
-  await db.batch([
+  const rowsJson = JSON.stringify(rows);
+  // Findings of this account that this scan did not raise. Findings of a Worker that no longer
+  // exists resolve too, even in a module whose findings are being kept (paused cron data), so a
+  // deleted Worker leaves "Needs attention" on the next scan.
+  const resolvedWhere = `account = ?3 AND status <> 'resolved'
+         AND id NOT IN (SELECT json_extract(value,'$.id') FROM json_each(?4))
+         AND (module NOT IN (SELECT value FROM json_each(?2))
+              OR (script <> '*' AND script NOT IN (SELECT value FROM json_each(?5))))`;
+  const resolvedArgs = [stamp, JSON.stringify(keepModules), account, rowsJson, JSON.stringify(workerNames)];
+  const event = (kind: string) => `json_extract(n.value,'$.id'), ?2, ${kind}, json_extract(n.value,'$.severity'),
+           json_extract(n.value,'$.module') || ':' || json_extract(n.value,'$.code'), json_extract(n.value,'$.script')`;
+  const results = await db.batch([
+    // New findings, and findings that come back after being resolved.
+    db.prepare(
+      `INSERT INTO finding_events (account, finding_id, at, kind, severity, check_id, script)
+       SELECT ?3, ${event(`CASE WHEN f.id IS NULL THEN 'opened' ELSE 'reopened' END`)}
+       FROM json_each(?1) AS n LEFT JOIN findings f ON f.id = json_extract(n.value,'$.id')
+       WHERE f.id IS NULL OR f.status = 'resolved'`,
+    ).bind(rowsJson, stamp, account),
+    // Open findings whose severity changed.
+    db.prepare(
+      `INSERT INTO finding_events (account, finding_id, at, kind, severity, check_id, script)
+       SELECT ?3, ${event(`CASE WHEN ${RANK("json_extract(n.value,'$.severity')")} > ${RANK('f.severity')} THEN 'escalated' ELSE 'eased' END`)}
+       FROM json_each(?1) AS n JOIN findings f ON f.id = json_extract(n.value,'$.id')
+       WHERE f.status <> 'resolved' AND f.severity IS NOT json_extract(n.value,'$.severity')`,
+    ).bind(rowsJson, stamp, account),
+    db.prepare(
+      `INSERT INTO finding_events (account, finding_id, at, kind, severity, check_id, script)
+       SELECT account, id, ?1, 'resolved', severity, module || ':' || code, script FROM findings WHERE ${resolvedWhere}`,
+    ).bind(...resolvedArgs),
     db.prepare(
       `INSERT INTO findings (id, account, script, module, severity, code, message, evidence, action, docs_url, first_seen, last_seen, status)
        SELECT json_extract(value,'$.id'), ?3, json_extract(value,'$.script'), json_extract(value,'$.module'),
@@ -1331,6 +1427,10 @@ async function saveFindings(db: D1Database, account: string, findings: Finding[]
          last_seen=excluded.last_seen,
          first_seen = CASE WHEN findings.status = 'resolved' THEN excluded.first_seen ELSE findings.first_seen END,
          notified_at = CASE WHEN findings.status = 'resolved' THEN NULL ELSE findings.notified_at END,
+         reopen_count = findings.reopen_count + (findings.status = 'resolved'),
+         status_at = CASE WHEN findings.status = 'resolved'
+           OR (findings.status = 'acknowledged' AND findings.severity <> excluded.severity)
+           OR (findings.status = 'snoozed' AND findings.snooze_until < excluded.last_seen) THEN excluded.last_seen ELSE findings.status_at END,
          status = CASE
            WHEN findings.status = 'resolved' THEN 'open'
            WHEN findings.status = 'acknowledged' AND findings.severity <> excluded.severity THEN 'open'
@@ -1341,16 +1441,10 @@ async function saveFindings(db: D1Database, account: string, findings: Finding[]
        WHERE findings.status = 'resolved' OR findings.severity IS NOT excluded.severity OR findings.message IS NOT excluded.message
          OR findings.evidence IS NOT excluded.evidence OR findings.action IS NOT excluded.action OR findings.docs_url IS NOT excluded.docs_url
          OR (findings.status = 'snoozed' AND findings.snooze_until < excluded.last_seen)`,
-    ).bind(JSON.stringify(rows), stamp, account),
-    // Resolved: findings of this account that this scan did not raise. Findings of a Worker that no
-    // longer exists resolve too, even in a module whose findings are being kept (paused cron data),
-    // so a deleted Worker leaves "Needs attention" on the next scan.
-    db.prepare(
-      `UPDATE findings SET status = 'resolved', last_seen = ?1
-       WHERE account = ?3 AND status <> 'resolved'
-         AND id NOT IN (SELECT json_extract(value,'$.id') FROM json_each(?4))
-         AND (module NOT IN (SELECT value FROM json_each(?2))
-              OR (script <> '*' AND script NOT IN (SELECT value FROM json_each(?5))))`,
-    ).bind(stamp, JSON.stringify(keepModules), account, JSON.stringify(rows), JSON.stringify(workerNames)),
+    ).bind(rowsJson, stamp, account),
+    db.prepare(`UPDATE findings SET status = 'resolved', last_seen = ?1 WHERE ${resolvedWhere}`).bind(...resolvedArgs),
   ]);
+  // `changes` counts rows; rows_written also counts the index entries each row touched.
+  const count = (m: D1Meta) => m.changes ?? m.rows_written ?? 0;
+  return { opened: count(results[0].meta), resolved: count(results[2].meta) };
 }

@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { CfClient } from './cf';
+import { bumpRevision } from './history';
 import { configFrom, getAccountState, getSettings, listAccounts, pinnedAccounts, setAccountState, upsertAccount, type AccountRow } from './db';
 import { sendSystemAlert } from './notify';
 import type { Env, ScanMessage } from './env';
@@ -97,7 +98,8 @@ export async function scanAccount(env: Env, account: string, now = new Date(), f
       ).catch(() => false);
       if (sent) update.failure_alert_at = now.toISOString();
     }
-    await setAccountState(db, account, update).run();
+    // The failed-scan banner is part of the cached overview: mark the change.
+    await db.batch([setAccountState(db, account, update), bumpRevision(db)]);
     return { error: message };
   }
 }

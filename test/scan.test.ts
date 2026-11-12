@@ -88,7 +88,6 @@ describe('first scan of a small fleet', () => {
     expect(o.workers.find((w) => w.name === 'api')?.entryPoints).toEqual(['example.com/*']);
     expect(o.workers.find((w) => w.name === 'legacy')?.entryPoints).toEqual(['legacy.me.workers.dev']);
     expect(o.update).toEqual({ current: VERSION, latest: NEXT_RELEASE, url: `https://github.com/x/releases/${NEXT_RELEASE}` });
-    expect(o.workers[0].spark24).toHaveLength(24);
 
     const tl = await buildTimeline(e, 'acc1');
     expect(tl.map((t) => [t.script, t.author, t.message])).toEqual([['api', 'dev@example.com', 'Fix login']]);

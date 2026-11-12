@@ -17,7 +17,7 @@ const SEVERITY_ORDER: Record<Severity, number> = { critical: 0, warning: 1, info
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 
-interface FindingRow {
+export interface FindingRow {
   id: string;
   script: string;
   module: Finding['module'];
@@ -31,7 +31,7 @@ interface FindingRow {
   status: Finding['status'];
 }
 
-const toFinding = (r: FindingRow): Finding => ({
+export const toFinding = (r: FindingRow): Finding => ({
   id: r.id,
   script: r.script,
   module: r.module,
@@ -134,16 +134,10 @@ export async function buildOverview(env: Env, requested?: string | null, now = n
     .filter((f) => f.script === '*' || visibleNames.has(f.script))
     .sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] || (b.firstSeen ?? '').localeCompare(a.firstSeen ?? ''));
 
-  // Last 24 hours, hourly, and last 7 days, daily.
-  const hours = Array.from({ length: 24 }, (_, i) => isoHour(new Date(now.getTime() - (23 - i) * HOUR)));
+  // Last 7 days, daily.
   const days = Array.from({ length: 7 }, (_, i) => new Date(utcMidnight(now).getTime() - (6 - i) * DAY).toISOString().slice(0, 10));
-  const spark24 = new Map<string, number[]>();
   const dayTotals = new Map<string, { requests: number; errors: number }>();
   for (const r of hourly.results as { script: string; hour: string; requests: number; errors: number }[]) {
-    const s = spark24.get(r.script) ?? hours.map(() => 0);
-    const i = hours.indexOf(r.hour);
-    if (i >= 0) s[i] = r.requests;
-    spark24.set(r.script, s);
     const t = dayTotals.get(r.script) ?? { requests: 0, errors: 0 };
     t.requests += r.requests;
     t.errors += r.errors;
@@ -171,7 +165,6 @@ export async function buildOverview(env: Env, requested?: string | null, now = n
       requests24h: dayTotals.get(w.name)?.requests ?? 0,
       errors24h: dayTotals.get(w.name)?.errors ?? 0,
       spark: spark7.get(w.name) ?? days.map(() => 0),
-      spark24: spark24.get(w.name) ?? hours.map(() => 0),
       deployedOn: w.deployed_on ?? w.modified_on,
       handlers,
       groups: w.groups,
@@ -393,7 +386,8 @@ export async function buildSelfCost(env: Env, account: string): Promise<SelfCost
   const db = env.DB;
   const settings = await getAccountState(db, account);
   const { results } = await db
-    .prepare('SELECT * FROM usage_daily WHERE day >= ?1 ORDER BY day DESC')
+    // Oldest first: the panel reads the last day as today and draws the bars left to right.
+    .prepare('SELECT * FROM usage_daily WHERE day >= ?1 ORDER BY day')
     .bind(new Date(Date.now() - 7 * DAY).toISOString().slice(0, 10))
     .all<{ day: string; cron_runs: number; api_requests: number; subrequests: number; rows_read: number; rows_written: number }>();
   return {

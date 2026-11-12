@@ -22,7 +22,7 @@ class Stmt {
       return { results: rows.map((r) => ({ ...r })), meta: { rows_read: rows.length, rows_written: 0 }, success: true };
     }
     const r = s.run(...this.params);
-    return { results: [], meta: { rows_read: 0, rows_written: Number(r.changes) }, success: true };
+    return { results: [], meta: { rows_read: 0, rows_written: Number(r.changes), changes: Number(r.changes) }, success: true };
   }
   async all() {
     return this.exec();

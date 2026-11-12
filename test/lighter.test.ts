@@ -94,7 +94,8 @@ describe('writes only what changed', () => {
     vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
       if (String(input).endsWith('/graphql')) {
         const b = JSON.parse(String(init?.body));
-        if (/workersInvocationsAdaptive\(limit: 10000, filter: \{ datetime_geq/.test(b.query) && !b.query.includes('status_in')) calls.push(b.variables.since);
+        // The request that reads the hourly totals (alone, or combined with the limit outcomes).
+        if (/(totals: )?workersInvocationsAdaptive\(limit: 10000, filter: \{ datetime_geq: \$since, datetime_lt: \$until \}\)/.test(b.query)) calls.push(b.variables.since);
       }
       return base.fn(input, init);
     });

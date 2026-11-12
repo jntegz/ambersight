@@ -67,7 +67,11 @@ export interface FakeOptions {
   /** Packages check: npm package -> latest version, or an HTTP status. */
   npm?: Record<string, string | number>;
   /** KV operations per namespace and hour (kvOperationsAdaptiveGroups). Default: the dataset is unavailable. */
-  kvOps?: { namespaceId: string; datetimeHour: string; requests: number }[];
+  kvOps?: { namespaceId: string; datetimeHour: string; requests: number; actionType?: string }[];
+  /** Limit outcomes per Worker, hour and status (the status_in query). Default: none. */
+  exceeded?: { scriptName: string; datetimeHour: string; status: string; requests: number }[];
+  /** KV storage per namespace (kvStorageAdaptiveGroups). Default: the dataset is unavailable. */
+  kvSizes?: { namespaceId: string; bytes: number; keys: number }[];
 }
 
 export function fakeFetch(opts: FakeOptions = {}) {
@@ -94,25 +98,21 @@ export function fakeFetch(opts: FakeOptions = {}) {
     if (url.hostname === 'hooks.slack.com') return new Response('ok');
     if (path === '/graphql') {
       const q = JSON.parse(String(init?.body)).query as string;
-      if (q.includes('workersInvocationsScheduled')) {
-        if (opts.cronError) return new Response(JSON.stringify({ data: null, errors: [{ message: 'dataset not available' }] }));
-        return gql({ viewer: { accounts: [{ workersInvocationsScheduled: opts.cronRuns ?? CRON_JOB_RUNS }] } });
+      // One dataset per query: answer it. Several aliased datasets: answer each, all or nothing.
+      const aliases = [...q.matchAll(/(\w+): (\w+)\(limit/g)];
+      if (!aliases.length) {
+        const r = answerDataset(q, opts);
+        return 'error' in r ? new Response(JSON.stringify({ data: null, errors: [{ message: r.error }] })) : gql({ viewer: { accounts: [{ [r.dataset]: r.rows }] } });
       }
-      if (q.includes('status_in')) return gql({ viewer: { accounts: [{ workersInvocationsAdaptive: [] }] } });
-      if (q.includes('workersInvocationsAdaptive')) {
-        if (opts.rejectCpuSum && q.includes('cpuTimeUs')) return new Response(JSON.stringify({ data: null, errors: [{ message: 'unknown field cpuTimeUs' }] }));
-        const rows = (opts.hourly ?? []).map((h) => ({
-          dimensions: { scriptName: h.scriptName, datetimeHour: h.datetimeHour },
-          sum: { requests: h.requests, errors: h.errors, subrequests: h.subrequests ?? 0, cpuTimeUs: h.cpuTimeUs ?? 0 },
-          quantiles: { cpuTimeP99: 1500 },
-        }));
-        return gql({ viewer: { accounts: [{ workersInvocationsAdaptive: rows }] } });
+      graphqlAliases.push(aliases.map((m) => m[2]));
+      const acc: Record<string, unknown[]> = {};
+      for (let i = 0; i < aliases.length; i++) {
+        const block = q.slice(aliases[i].index, aliases[i + 1]?.index ?? q.length).replace(`${aliases[i][1]}: `, '');
+        const r = answerDataset(block, opts);
+        if ('error' in r) return new Response(JSON.stringify({ data: null, errors: [{ message: r.error }] }));
+        acc[aliases[i][1]] = r.rows;
       }
-      if (q.includes('kvOperationsAdaptiveGroups') && opts.kvOps) {
-        const rows = opts.kvOps.map((o) => ({ dimensions: { namespaceId: o.namespaceId, datetimeHour: o.datetimeHour, actionType: 'read' }, sum: { requests: o.requests } }));
-        return gql({ viewer: { accounts: [{ kvOperationsAdaptiveGroups: rows }] } });
-      }
-      return new Response(JSON.stringify({ data: null, errors: [{ message: 'dataset not available' }] }));
+      return gql({ viewer: { accounts: [acc] } });
     }
     // Which account this call is for: acc1 is the default fleet, others come from opts.fleets.
     const acct = path.match(/^\/accounts\/([^/]+)\//)?.[1] ?? 'acc1';
@@ -151,5 +151,37 @@ export function fakeFetch(opts: FakeOptions = {}) {
     }
     return new Response(JSON.stringify({ success: false, errors: [{ message: `no fixture for ${path}` }] }), { status: 404 });
   };
-  return { fn: fn as typeof fetch, calls, auth };
+  /** The datasets of each combined (aliased) GraphQL request, in order. */
+  const graphqlAliases: string[][] = [];
+  return { fn: fn as typeof fetch, calls, auth, graphqlAliases };
+}
+
+/** The rows one GraphQL dataset query returns in the fake, or the error it fails with. */
+function answerDataset(q: string, opts: FakeOptions): { dataset: string; rows: unknown[] } | { error: string } {
+  const dataset = q.match(/(\w+)\(limit/)?.[1] ?? '';
+  if (q.includes('workersInvocationsScheduled')) {
+    if (opts.cronError) return { error: 'dataset not available' };
+    return { dataset, rows: opts.cronRuns ?? CRON_JOB_RUNS };
+  }
+  if (q.includes('status_in')) {
+    return { dataset, rows: (opts.exceeded ?? []).map((e) => ({ dimensions: { scriptName: e.scriptName, datetimeHour: e.datetimeHour, status: e.status }, sum: { requests: e.requests } })) };
+  }
+  if (q.includes('workersInvocationsAdaptive')) {
+    if (opts.rejectCpuSum && q.includes('cpuTimeUs')) return { error: 'unknown field cpuTimeUs' };
+    return {
+      dataset,
+      rows: (opts.hourly ?? []).map((h) => ({
+        dimensions: { scriptName: h.scriptName, datetimeHour: h.datetimeHour },
+        sum: { requests: h.requests, errors: h.errors, subrequests: h.subrequests ?? 0, cpuTimeUs: h.cpuTimeUs ?? 0 },
+        quantiles: { cpuTimeP99: 1500 },
+      })),
+    };
+  }
+  if (q.includes('kvOperationsAdaptiveGroups') && opts.kvOps) {
+    return { dataset, rows: opts.kvOps.map((o) => ({ dimensions: { namespaceId: o.namespaceId, datetimeHour: o.datetimeHour, actionType: o.actionType ?? 'read' }, sum: { requests: o.requests } })) };
+  }
+  if (q.includes('kvStorageAdaptiveGroups') && opts.kvSizes) {
+    return { dataset: 'kvStorageAdaptiveGroups', rows: opts.kvSizes.map((z) => ({ dimensions: { namespaceId: z.namespaceId }, max: { byteCount: z.bytes, keyCount: z.keys } })) };
+  }
+  return { error: 'dataset not available' };
 }

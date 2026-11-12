@@ -4,6 +4,15 @@ All notable changes to Ambersight. Each version here has a matching [GitHub rele
 
 ## Unreleased
 
+- **History for 13 months.** Each complete UTC day is folded into daily tables (`metrics_daily`, `resource_daily`, `quota_daily`, `cron_daily`), kept for 400 days while the hourly rows keep their retention. Storage sizes are kept per day (`storage_daily`) instead of being overwritten. The upgrade builds the daily rows from the hourly history already stored (migration 0011).
+- **Finding history.** Every open, reopen, escalation, resolve, acknowledge, snooze, restore and alert is recorded in `finding_events`, and each finding counts its reopens.
+- **Undo acknowledge and snooze**, and list findings by status: `GET /api/findings?status=acknowledged`, `POST /api/findings/:id/restore` and the `restore` bulk action. `GET /api/findings/:id/history` returns a finding's events.
+- **Splits that used to be thrown away are kept:** limit hits by type (CPU, memory), D1 rows read and written and read and write queries per database, KV reads, writes, deletes and lists per namespace.
+- **Fewer Cloudflare API calls.** The hourly totals and the limit outcomes are read in one GraphQL request, the storage operations of every kind in one, and the daily storage sizes in one. An hourly scan now makes at most 3 GraphQL requests instead of up to 8. An account that rejects a combined request is read the old way and asked again a day later.
+- **Faster, cheaper page loads.** The overview, All accounts, Timeline, Resources and Packages are built once per change and served from one D1 row, with an ETag: a browser that already has the current version gets a `304`. The dashboard's request count is written every 10 requests instead of once per request.
+- **Scan log**: one row per scan in `scan_runs` (duration, calls, D1 rows, warnings, findings opened and resolved), kept 90 days.
+- Fixed: the Self-cost panel showed the oldest day as today, and its bars ran backwards. The overview no longer sends an unused 24-hour series per Worker.
+
 - **Explain in plain words** on every finding: what it means, why it matters, and numbered steps with where to click, written for people new to Cloudflare. Also in the `.md` export. A test fails if a check has no explanation.
 - **Clean up leftovers.** Unused KV, D1, R2 and queues, and Workers with no traffic or never deployed, now show **How to remove it** with the exact `wrangler` command (a backup first for D1). Routes and custom domains left behind get the dashboard or API step. Ambersight still never deletes anything.
 - **Export .md** next to **Needs attention** and **Housekeeping**: the findings as a Markdown checklist, and for Housekeeping every cleanup command in one block.

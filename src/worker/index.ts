@@ -2,7 +2,7 @@
 // Static assets (the Svelte UI) are served by Cloudflare before this code runs.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { csrf } from 'hono/csrf';
 import { HTTPException } from 'hono/http-exception';
 import { ConfigError, defaultConfig, isValidTimeZone, parseConfig } from '../shared/config';
@@ -11,6 +11,9 @@ import { CfClient } from './cf';
 import { configFrom, getSettings, listAccounts, pinnedAccounts, recordUsage, setSettings, upsertAccount } from './db';
 import type { Env, ScanMessage } from './env';
 import { metered } from './meter';
+import { bumpRevision } from './history';
+import { buildFindingHistory, buildFindingsList } from './findingsView';
+import { hashText } from './scan';
 import { sendTest } from './notify';
 import { buildAccounts, buildOverview, buildSelfCost, buildTimeline, pickAccount } from './overview';
 import { buildPackages } from './packages';
@@ -22,16 +25,38 @@ import { VERSION } from './version';
 
 const app = new Hono<{ Bindings: Env }>();
 
+// The app's own request count for the Self-cost panel, written in batches instead of one D1 row
+// per request. Kept per isolate: at most USAGE_FLUSH_REQUESTS requests or USAGE_FLUSH_MS of
+// counts can be lost when Cloudflare recycles the isolate, which the panel says.
+const USAGE_FLUSH_REQUESTS = 10;
+const USAGE_FLUSH_MS = 5 * 60_000;
+const pendingUsage = { apiRequests: 0, rowsRead: 0, rowsWritten: 0, since: 0 };
+
+/** Test only: the counts not written yet, and a way to flush them. */
+export const usageBuffer = {
+  pending: () => ({ ...pendingUsage }),
+  reset: () => Object.assign(pendingUsage, { apiRequests: 0, rowsRead: 0, rowsWritten: 0, since: 0 }),
+};
+
 // Security headers on every API response, and the app's own request count for the Self-cost panel.
 app.use('/api/*', async (c, next) => {
   const { db, meter } = metered(c.env.DB);
   const raw = c.env.DB;
   c.env = { ...c.env, DB: db };
   await next();
-  c.header('Cache-Control', 'no-store');
+  // Cached views revalidate with their ETag; everything else is never stored.
+  if (!c.res.headers.get('Cache-Control')) c.header('Cache-Control', 'no-store');
   c.header('X-Content-Type-Options', 'nosniff');
   c.header('Referrer-Policy', 'no-referrer');
-  const write = recordUsage(raw, new Date(), { apiRequests: 1, rowsRead: meter.rowsRead, rowsWritten: meter.rowsWritten }).run().catch(() => {});
+  const now = Date.now();
+  pendingUsage.apiRequests++;
+  pendingUsage.rowsRead += meter.rowsRead;
+  pendingUsage.rowsWritten += meter.rowsWritten;
+  pendingUsage.since ||= now;
+  if (pendingUsage.apiRequests < USAGE_FLUSH_REQUESTS && now - pendingUsage.since < USAGE_FLUSH_MS) return;
+  const u = { ...pendingUsage };
+  usageBuffer.reset();
+  const write = recordUsage(raw, new Date(now), u).run().catch(() => {});
   try {
     c.executionCtx.waitUntil(write);
   } catch {
@@ -82,17 +107,52 @@ async function accountOf(env: Env, requested: string | undefined): Promise<strin
   return account.id;
 }
 
-app.get('/api/overview', async (c) => c.json(await buildOverview(c.env, c.req.query('account'))));
-app.get('/api/accounts', async (c) => c.json(await buildAccounts(c.env)));
-app.get('/api/timeline', async (c) =>
-  c.json(await buildTimeline(c.env, await accountOf(c.env, c.req.query('account')), Math.min(30, Math.max(1, Number(c.req.query('days')) || 14)))),
-);
-app.get('/api/packages', async (c) =>
-  c.json(await buildPackages(c.env.DB, await accountOf(c.env, c.req.query('account')), configFrom(await getSettings(c.env.DB)), Boolean(c.env.GITHUB_TOKEN))),
-);
-app.get('/api/resources', async (c) =>
-  c.json(await buildResources(c.env.DB, await accountOf(c.env, c.req.query('account')), configFrom(await getSettings(c.env.DB)))),
-);
+/**
+ * A view built once per change and served from one D1 row until the next: the ETag carries the
+ * change counter (bumped by every scan, acknowledge, snooze and settings save) and the hour, so a
+ * browser that already has it gets a 304 after a single one-row read.
+ */
+async function cachedJson(c: Context<{ Bindings: Env }>, view: string, key: string, build: () => Promise<unknown>) {
+  const db = c.env.DB;
+  const rev = (await db.prepare(`SELECT value FROM settings WHERE key = 'data_rev'`).first<string>('value')) ?? '0';
+  const etag = `W/"${VERSION}.${rev}.${new Date().toISOString().slice(0, 13)}.${hashText(`${view}|${key}`)}"`;
+  const headers = { ETag: etag, 'Cache-Control': 'private, no-cache' };
+  if (c.req.header('If-None-Match') === etag) return c.body(null, 304, headers);
+  const cached = await db.prepare('SELECT etag, body FROM view_cache WHERE account = ?1 AND view = ?2').bind(key, view).first<{ etag: string; body: string }>();
+  let body = cached?.etag === etag ? cached.body : null;
+  if (body === null) {
+    body = JSON.stringify(await build());
+    // D1 rows are limited to 2 MB; a fleet that large is simply built on every request.
+    if (body.length < 1_500_000) {
+      const write = db.prepare(
+        `INSERT INTO view_cache (account, view, etag, body) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(account, view) DO UPDATE SET etag = excluded.etag, body = excluded.body`,
+      ).bind(key, view, etag, body).run().catch(() => {});
+      try {
+        c.executionCtx.waitUntil(write);
+      } catch {
+        await write;
+      }
+    }
+  }
+  return c.body(body, 200, { ...headers, 'Content-Type': 'application/json; charset=UTF-8' });
+}
+
+app.get('/api/overview', (c) => cachedJson(c, 'overview', c.req.query('account') ?? '', () => buildOverview(c.env, c.req.query('account'))));
+app.get('/api/accounts', (c) => cachedJson(c, 'accounts', '', () => buildAccounts(c.env)));
+app.get('/api/timeline', async (c) => {
+  const account = await accountOf(c.env, c.req.query('account'));
+  const days = Math.min(30, Math.max(1, Number(c.req.query('days')) || 14));
+  return cachedJson(c, `timeline-${days}`, account, () => buildTimeline(c.env, account, days));
+});
+app.get('/api/packages', async (c) => {
+  const account = await accountOf(c.env, c.req.query('account'));
+  return cachedJson(c, 'packages', account, async () => buildPackages(c.env.DB, account, configFrom(await getSettings(c.env.DB)), Boolean(c.env.GITHUB_TOKEN)));
+});
+app.get('/api/resources', async (c) => {
+  const account = await accountOf(c.env, c.req.query('account'));
+  return cachedJson(c, 'resources', account, async () => buildResources(c.env.DB, account, configFrom(await getSettings(c.env.DB))));
+});
 app.get('/api/self-cost', async (c) => c.json(await buildSelfCost(c.env, await accountOf(c.env, c.req.query('account')))));
 
 app.post('/api/scan', async (c) => {
@@ -123,38 +183,75 @@ app.put('/api/accounts', async (c) => {
   await c.env.DB.batch([
     ...ids.map((id) => upsertAccount(c.env.DB, { id, name: byId.get(id)!.name, enabled: true })),
     ...known.filter((a) => !ids.includes(a.id)).map((a) => upsertAccount(c.env.DB, { id: a.id, enabled: false })),
+    bumpRevision(c.env.DB),
   ]);
   return c.json(await buildAccounts(c.env));
 });
 
+/**
+ * Status changes by a person, in one batch: the change itself, its event in the finding's history
+ * and the change counter. `from` is the status a finding must have for the change to apply.
+ */
+function statusChange(db: D1Database, ids: string[], to: 'acknowledged' | 'snoozed' | 'open', until: string | null) {
+  const from = to === 'open' ? ['acknowledged', 'snoozed'] : ['open'];
+  const kind = to === 'open' ? 'restored' : to;
+  const now = new Date().toISOString();
+  const json = JSON.stringify(ids);
+  return db.batch([
+    db.prepare(
+      `INSERT INTO finding_events (account, finding_id, at, kind, severity, check_id, script)
+       SELECT account, id, ?2, ?3, severity, module || ':' || code, script FROM findings
+       WHERE id IN (SELECT value FROM json_each(?1)) AND status IN (SELECT value FROM json_each(?4))`,
+    ).bind(json, now, kind, JSON.stringify(from)),
+    db.prepare(
+      `UPDATE findings SET status = ?2, snooze_until = ?3, status_at = ?5
+       WHERE id IN (SELECT value FROM json_each(?1)) AND status IN (SELECT value FROM json_each(?4))`,
+    ).bind(json, to, until, JSON.stringify(from), now),
+    bumpRevision(db),
+  ]).then((r) => r[1].meta.changes ?? r[1].meta.rows_written ?? 0);
+}
+
+const snoozeUntil = (days: unknown) => new Date(Date.now() + ([7, 30, 90].includes(Number(days)) ? Number(days) : 7) * 86_400_000).toISOString();
+
 app.post('/api/findings/:id/acknowledge', async (c) => {
-  await c.env.DB.prepare(`UPDATE findings SET status = 'acknowledged' WHERE id = ?1 AND status = 'open'`).bind(c.req.param('id')).run();
+  await statusChange(c.env.DB, [c.req.param('id')], 'acknowledged', null);
   return c.json({ ok: true });
 });
 
 app.post('/api/findings/:id/snooze', async (c) => {
   const { days } = await c.req.json<{ days?: number }>().catch(() => ({ days: 7 }));
-  const allowed = [7, 30, 90].includes(Number(days)) ? Number(days) : 7;
-  const until = new Date(Date.now() + allowed * 86_400_000).toISOString();
-  await c.env.DB.prepare(`UPDATE findings SET status = 'snoozed', snooze_until = ?2 WHERE id = ?1 AND status = 'open'`)
-    .bind(c.req.param('id'), until)
-    .run();
+  const until = snoozeUntil(days);
+  await statusChange(c.env.DB, [c.req.param('id')], 'snoozed', until);
   return c.json({ ok: true, until });
 });
 
-/** Acknowledge or snooze many findings at once (a whole group). */
+/** Undo an acknowledge or a snooze: the finding is back in "Needs attention". */
+app.post('/api/findings/:id/restore', async (c) => {
+  await statusChange(c.env.DB, [c.req.param('id')], 'open', null);
+  return c.json({ ok: true });
+});
+
+/** Acknowledge, snooze or restore many findings at once (a whole group). */
 app.post('/api/findings/bulk', async (c) => {
   const body = await c.req.json<{ ids?: unknown; action?: string; days?: number }>().catch(() => null);
   const ids = Array.isArray(body?.ids) ? body.ids.filter((x): x is string => typeof x === 'string').slice(0, 500) : [];
-  if (!ids.length || (body?.action !== 'acknowledge' && body?.action !== 'snooze')) return c.json({ error: 'Send ids and an action.' }, 400);
-  const days = [7, 30, 90].includes(Number(body.days)) ? Number(body.days) : 7;
-  const until = new Date(Date.now() + days * 86_400_000).toISOString();
-  const stmt = body.action === 'acknowledge'
-    ? c.env.DB.prepare(`UPDATE findings SET status = 'acknowledged' WHERE status = 'open' AND id IN (SELECT value FROM json_each(?1))`).bind(JSON.stringify(ids))
-    : c.env.DB.prepare(`UPDATE findings SET status = 'snoozed', snooze_until = ?2 WHERE status = 'open' AND id IN (SELECT value FROM json_each(?1))`).bind(JSON.stringify(ids), until);
-  const r = await stmt.run();
-  return c.json({ ok: true, changed: r.meta.rows_written ?? 0 });
+  const actions: Record<string, 'acknowledged' | 'snoozed' | 'open'> = { acknowledge: 'acknowledged', snooze: 'snoozed', restore: 'open' };
+  const to = Object.hasOwn(actions, body?.action ?? '') ? actions[body!.action!] : undefined;
+  if (!ids.length || !to) return c.json({ error: 'Send ids and an action.' }, 400);
+  const changed = await statusChange(c.env.DB, ids, to, to === 'snoozed' ? snoozeUntil(body!.days) : null);
+  return c.json({ ok: true, changed });
 });
+
+/** The findings inbox: open, acknowledged, snoozed or recently resolved findings of one account. */
+app.get('/api/findings', async (c) => {
+  const account = await accountOf(c.env, c.req.query('account'));
+  const status = c.req.query('status') ?? 'open';
+  if (!['open', 'acknowledged', 'snoozed', 'resolved'].includes(status)) return c.json({ error: 'Unknown status.' }, 400);
+  return c.json(await buildFindingsList(c.env.DB, account, status as 'open'));
+});
+
+/** One finding's history: every open, resolve, acknowledge, snooze and alert. */
+app.get('/api/findings/:id/history', async (c) => c.json(await buildFindingHistory(c.env.DB, c.req.param('id'))));
 
 // ---- Setup wizard ----------------------------------------------------------
 
@@ -198,6 +295,7 @@ app.post('/api/setup/complete', async (c) => {
     setSettings(c.env.DB, { setup_done: '1', config: JSON.stringify(config) }),
     ...watch.map((id, i) => upsertAccount(c.env.DB, { id, name: names.get(id) ?? null, enabled: true, detectedPlan: plans[i] })),
     ...known.filter((a) => !watch.includes(a.id)).map((a) => upsertAccount(c.env.DB, { id: a.id, enabled: false })),
+    bumpRevision(c.env.DB),
   ]);
   // First scan of the first account runs in the background; the scheduler picks up the others.
   if (watch[0]) c.executionCtx.waitUntil(scanAccount(c.env, watch[0], new Date(), true).catch((e) => console.error(e)));
@@ -212,7 +310,7 @@ app.put('/api/config', async (c) => {
   const body = await c.req.json().catch(() => null);
   try {
     const config = parseConfig(body);
-    await setSettings(c.env.DB, { config: JSON.stringify(config) }).run();
+    await c.env.DB.batch([setSettings(c.env.DB, { config: JSON.stringify(config) }), bumpRevision(c.env.DB)]);
     return c.json(config);
   } catch (e) {
     if (e instanceof ConfigError) return c.json({ error: e.message }, 400);

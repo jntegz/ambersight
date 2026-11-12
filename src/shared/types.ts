@@ -27,7 +27,6 @@ export interface WorkerSummary {
   requests24h: number;
   errors24h: number;
   spark: number[]; // requests per day, last 7 days, oldest first
-  spark24: number[]; // requests per hour, last 24 hours, oldest first
   deployedOn: string | null;
   handlers: string[];
   groups: string[];
@@ -190,6 +189,22 @@ export interface SelfCost {
   days: SelfCostDay[];
   lastScan: { at: string | null; subrequests: number; durationMs: number; warnings: string[] };
   allowances: { requestsPerDay: number; subrequestsPerRun: number; rowsWrittenPerDay: number; rowsReadPerDay: number };
+}
+
+/** A finding in the inbox: any status, with its history counters. */
+export interface FindingListItem extends Finding {
+  lastSeen: string;
+  /** When it was last acknowledged, snoozed or reopened. */
+  statusAt: string | null;
+  snoozeUntil: string | null;
+  reopenCount: number;
+}
+
+/** One change in a finding's life. */
+export interface FindingEvent {
+  at: string;
+  kind: 'opened' | 'reopened' | 'escalated' | 'eased' | 'resolved' | 'acknowledged' | 'snoozed' | 'restored' | 'alerted';
+  severity: Severity | null;
 }
 
 export const SEVERITY_WEIGHT: Record<Severity, number> = { critical: 10, warning: 3, info: 1 };
