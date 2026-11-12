@@ -4,7 +4,7 @@
   import { fmtBytes } from '../../../src/shared/limits';
   import type { ResourcesView } from '../../../src/shared/types';
   import Icon from '../components/Icon.svelte';
-  import { api, workerId } from '../lib/api';
+  import { api, workerHref, workerId } from '../lib/api';
   import { loadPrefs, savePrefs } from '../lib/prefs';
 
   let { query, account = null, onUnauthorized }: { query: string; account?: string | null; onUnauthorized: () => void } = $props();
@@ -96,7 +96,7 @@
             <td><span class="kind">{KIND[r.kind]}</span> <span class="mono">{r.name}</span>{#if r.objects === 0 && (r.kind === 'kv' || r.kind === 'r2')} <span class="tag-chip">empty</span>{/if}</td>
             <td>
               {#if r.boundBy.length}
-                {#each r.boundBy as w, i (w)}{#if i}, {/if}<a class="mono" href="#{workerId(w)}">{w}</a>{/each}
+                {#each r.boundBy as w, i (w)}{#if i}, {/if}<a class="mono" href={workerHref(w)}>{w}</a>{/each}
               {:else if r.inUse}
                 <span class="muted">a queue consumer</span>
               {:else}

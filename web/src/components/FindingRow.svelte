@@ -3,18 +3,33 @@
 <script lang="ts">
   import { checkOf, cleanupFor, isHiddenEvidence } from '../../../src/shared/findings';
   import CheckExplain from './CheckExplain.svelte';
-  import type { Finding } from '../../../src/shared/types';
-  import { timeAgo, workerId } from '../lib/api';
+  import type { Finding, FindingEvent, FindingListItem } from '../../../src/shared/types';
+  import { api, timeAgo, workerHref } from '../lib/api';
   import Icon, { type IconName } from './Icon.svelte';
   import SnoozeMenu from './SnoozeMenu.svelte';
 
-  let { finding, onAcknowledge, onSnooze, compact = false }: {
-    finding: Finding;
+  let { finding, onAcknowledge, onSnooze, onRestore, compact = false, showWorker = true }: {
+    finding: Finding | FindingListItem;
     onAcknowledge: (id: string) => void;
     onSnooze: (id: string, days: 7 | 30 | 90) => void;
+    /** Acknowledged and snoozed findings get a Restore button instead. */
+    onRestore?: (id: string) => void;
     /** Inside a group: the group already shows the fix, so leave it out. */
     compact?: boolean;
+    /** On a Worker's own page its name is already the title. */
+    showWorker?: boolean;
   } = $props();
+  const item = $derived('lastSeen' in finding ? finding : null);
+  let history = $state<FindingEvent[] | null>(null);
+  let historyOpen = $state(false);
+  async function toggleHistory() {
+    historyOpen = !historyOpen;
+    if (historyOpen && !history) history = await api.history(finding.id).catch(() => []);
+  }
+  const EVENT: Record<FindingEvent['kind'], string> = {
+    opened: 'Opened', reopened: 'Reopened', escalated: 'Got worse', eased: 'Eased', resolved: 'Resolved',
+    acknowledged: 'Acknowledged', snoozed: 'Snoozed', restored: 'Restored', alerted: 'Alert sent',
+  };
 
   const LABEL = { critical: 'Critical', warning: 'Warning', info: 'Info' } as const;
   const MODULE_ICON: Record<Finding['module'], IconName> = {
@@ -50,14 +65,19 @@
       <span class="label">{LABEL[finding.severity]}</span>
       {#if finding.script === '*'}
         <span class="script mono">Account</span>
-      {:else}
-        <a class="script mono" href="#{workerId(finding.script)}" title="Show this Worker">{finding.script}</a>
+      {:else if showWorker}
+        <a class="script mono" href={workerHref(finding.script)} title="Show this Worker">{finding.script}</a>
       {/if}
       <span class="module muted">
         {#if MODULE_ICON[finding.module]}<Icon name={MODULE_ICON[finding.module]} size={14} />{/if}
         {finding.module}
       </span>
-      {#if finding.firstSeen}<span class="age muted" title={finding.firstSeen}>· opened {timeAgo(finding.firstSeen)}</span>{/if}
+      {#if finding.status === 'resolved' && item}
+        <span class="age muted" title={item.lastSeen}>· resolved {timeAgo(item.lastSeen)}</span>
+      {:else if finding.firstSeen}<span class="age muted" title={finding.firstSeen}>· opened {timeAgo(finding.firstSeen)}</span>{/if}
+      {#if finding.status === 'snoozed' && item?.snoozeUntil}<span class="pill">Snoozed until {new Date(item.snoozeUntil).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })}</span>{/if}
+      {#if finding.status === 'acknowledged'}<span class="pill">Acknowledged{item?.statusAt ? ` ${timeAgo(item.statusAt)}` : ''}</span>{/if}
+      {#if item?.reopenCount}<span class="pill recur" title="Resolved and came back">Came back {item.reopenCount}×</span>{/if}
     </p>
     <p class="message">{finding.message}</p>
     {#if !compact}
@@ -83,9 +103,24 @@
     {/if}
   </div>
   <div class="buttons">
-    <button type="button" onclick={() => onAcknowledge(finding.id)}><Icon name="check" size={16} /> Acknowledge</button>
-    <SnoozeMenu onSnooze={(days) => onSnooze(finding.id, days)} />
+    {#if (finding.status === 'acknowledged' || finding.status === 'snoozed') && onRestore}
+      <button type="button" onclick={() => onRestore(finding.id)}><Icon name="undo" size={16} /> Restore</button>
+    {:else if finding.status !== 'resolved'}
+      <button type="button" onclick={() => onAcknowledge(finding.id)}><Icon name="check" size={16} /> Acknowledge</button>
+      <SnoozeMenu onSnooze={(days) => onSnooze(finding.id, days)} />
+    {/if}
+    {#if item}
+      <button type="button" aria-expanded={historyOpen} onclick={toggleHistory}><Icon name="timeline" size={16} /> History</button>
+    {/if}
   </div>
+  {#if historyOpen}
+    <ol class="history" aria-label="History of this finding">
+      {#if !history}<li class="muted">Loading…</li>{:else if !history.length}<li class="muted">No history recorded yet.</li>{/if}
+      {#each history ?? [] as h, i (i)}
+        <li><span class="ev {h.kind}">{EVENT[h.kind] ?? h.kind}</span>{#if h.severity && (h.kind === 'opened' || h.kind === 'reopened' || h.kind === 'escalated' || h.kind === 'eased')}<span class="muted"> as {h.severity}</span>{/if}<time class="muted num" datetime={h.at}>{new Date(h.at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })} UTC</time></li>
+      {/each}
+    </ol>
+  {/if}
 </li>
 
 <style>
@@ -127,6 +162,14 @@
     .row { grid-template-columns: 20px 1fr; padding: 14px 16px; }
     .buttons { grid-column: 2; justify-content: flex-start; }
   }
+  .pill { font-size: 11px; line-height: 18px; padding: 0 7px; border-radius: 999px; background: var(--line); color: var(--ink-muted); }
+  .pill.recur { background: var(--chip); color: var(--chip-text); font-weight: 600; }
+  .history { grid-column: 2 / -1; margin: 0; padding: 0 0 0 14px; list-style: none; border-left: 2px solid var(--line); display: grid; gap: 4px; font-size: 13px; }
+  .history li { display: flex; gap: 6px; flex-wrap: wrap; align-items: baseline; }
+  .history time { margin-left: auto; font-size: 12px; }
+  .ev { font-weight: 600; }
+  .ev.resolved, .ev.restored { color: var(--healthy); }
+  .ev.opened, .ev.reopened, .ev.escalated { color: var(--warning-text); }
   .cleanup { margin-top: 10px; font-size: 13px; }
   .cleanup summary { cursor: pointer; color: var(--ink-muted); font-weight: 500; width: fit-content; }
   .cleanup summary:hover { color: var(--ink); }

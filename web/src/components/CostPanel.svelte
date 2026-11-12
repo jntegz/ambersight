@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <script lang="ts">
   import type { CostEstimate } from '../../../src/shared/types';
-  import { workerId } from '../lib/api';
+  import { workerHref, workerId } from '../lib/api';
   import Icon from './Icon.svelte';
 
   let { cost }: { cost: CostEstimate } = $props();
@@ -41,7 +41,7 @@
     <p class="sub muted">Costliest Workers · requests and CPU, per month</p>
     <ul class="items" aria-label="Costliest Workers">
       {#each cost.topWorkers as w (w.name)}
-        <li><a class="mono" href="#{workerId(w.name)}">{w.name}</a><span></span><span class="num">{usd(w.amount)}</span></li>
+        <li><a class="mono" href={workerHref(w.name)}>{w.name}</a><span></span><span class="num">{usd(w.amount)}</span></li>
       {/each}
     </ul>
   {/if}

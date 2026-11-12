@@ -88,6 +88,8 @@ export function historyRetention(db: D1Database, account: string, now: Date): D1
     db.prepare('DELETE FROM cron_daily WHERE account = ?1 AND day < ?2').bind(account, day),
     db.prepare('DELETE FROM storage_daily WHERE account = ?1 AND day < ?2').bind(account, day),
     db.prepare('DELETE FROM finding_events WHERE account = ?1 AND at < ?2').bind(account, iso),
+    // Cached Worker pages pile up one per Worker and range viewed; a day later they are stale anyway.
+    db.prepare(`DELETE FROM view_cache WHERE view LIKE 'worker-%'`),
     db.prepare('DELETE FROM scan_runs WHERE account = ?1 AND at < ?2').bind(account, new Date(now.getTime() - SCAN_RUN_DAYS * DAY).toISOString()),
   ];
 }

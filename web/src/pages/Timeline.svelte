@@ -5,7 +5,7 @@
   import GroupFilter from '../components/GroupFilter.svelte';
   import Icon from '../components/Icon.svelte';
   import TrendBars from '../components/TrendBars.svelte';
-  import { api, num, timeAgo, workerId } from '../lib/api';
+  import { api, num, timeAgo, workerHref, workerId } from '../lib/api';
   import { loadPrefs, savePrefs } from '../lib/prefs';
 
   let { groups, query, account = null, onUnauthorized }: { groups: string[]; query: string; account?: string | null; onUnauthorized: () => void } = $props();
@@ -152,7 +152,7 @@
                 {:else}
                 <div class="body">
                   <p class="line1">
-                    <a class="script mono" href="#{workerId(e.script)}">{e.script}</a>
+                    <a class="script mono" href={workerHref(e.script)}>{e.script}</a>
                     {#if e.source}<span class="tag-chip">{e.source}</span>{/if}
                     {#each e.groups as g (g)}<span class="tag-chip accent">{g}</span>{/each}
                     <span class="ago muted">{timeAgo(e.createdOn)}</span>

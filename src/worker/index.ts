@@ -11,6 +11,7 @@ import { CfClient } from './cf';
 import { configFrom, getSettings, listAccounts, pinnedAccounts, recordUsage, setSettings, upsertAccount } from './db';
 import type { Env, ScanMessage } from './env';
 import { metered } from './meter';
+import { buildAnalytics, buildWorkerDetail, parseRange } from './analytics';
 import { bumpRevision } from './history';
 import { buildFindingHistory, buildFindingsList } from './findingsView';
 import { hashText } from './scan';
@@ -152,6 +153,18 @@ app.get('/api/packages', async (c) => {
 app.get('/api/resources', async (c) => {
   const account = await accountOf(c.env, c.req.query('account'));
   return cachedJson(c, 'resources', account, async () => buildResources(c.env.DB, account, configFrom(await getSettings(c.env.DB))));
+});
+/** Fleet analytics: trends, cost, limits, storage growth and reliability for one range. */
+app.get('/api/analytics', (c) => {
+  const range = parseRange(c.req.query('range'), '30d');
+  return cachedJson(c, `analytics-${range}`, c.req.query('account') ?? '', () => buildAnalytics(c.env, c.req.query('account'), range));
+});
+/** Everything about one Worker over one range. */
+app.get('/api/workers/:name', (c) => {
+  const range = parseRange(c.req.query('range'), '7d');
+  const name = c.req.param('name');
+  if (name.length > 200) return c.json({ error: 'Unknown Worker.' }, 400);
+  return cachedJson(c, `worker-${range}-${name}`, c.req.query('account') ?? '', () => buildWorkerDetail(c.env, c.req.query('account'), name, range));
 });
 app.get('/api/self-cost', async (c) => c.json(await buildSelfCost(c.env, await accountOf(c.env, c.req.query('account')))));
 

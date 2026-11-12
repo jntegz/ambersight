@@ -4,6 +4,17 @@ All notable changes to Ambersight. Each version here has a matching [GitHub rele
 
 ## Unreleased
 
+- **Worker page** (`#/worker/<name>`): requests, errors, error rate, CPU p99 and CPU per request, subrequests, limit hits by type and cron runs over 24 hours to 12 months, with deploys marked on every chart. Each deploy shows error rate, CPU and traffic for the 24 hours before and after. Also the Worker's open and resolved findings with their history, recent changes (bindings removed, audit log), entry points and bindings. Every Worker name in the app now links here; old `#w-<name>` links still work.
+- **Analytics page** with a time range from 24 hours to 12 months and a comparison with the period before:
+  - **Trends**: totals with their change, requests and errors for the account, error rate and CPU per request, the Workers growing and shrinking fastest, and a sortable table of every Worker with a sparkline.
+  - **Cost** (Workers Paid): the estimated bill per month, usage at list price per day, and Workers by cost per month and per million requests.
+  - **Limits and storage**: each daily quota per day against its free limit, how often it ran above 70% or 90% or ran out, its usual busiest hour; storage size, growth per day and the date it reaches its cap at that pace.
+  - **Reliability**: findings opened and resolved per day, median time to resolve by severity, deploys per day and how many were followed by a finding, and alert quality per check, which flags checks whose findings are mostly acknowledged or snoozed.
+- **Findings inbox** (`#/findings`): open, acknowledged, snoozed and resolved findings, each with a **History**; **Restore** undoes an acknowledge or a snooze, one at a time or all at once.
+- **Charts** with axes, units, gridlines, deploy markers and limit lines. Use the arrow keys on a focused chart to read each hour or day; screen readers announce each value. **Show data** opens the numbers as a table and **Download CSV** saves them; the Analytics tables export as CSV too.
+- **Go to** with Ctrl+K or Cmd+K: any Worker, page or account by typing part of its name. `g` then `o`, `a`, `f`, `t`, `r` or `s` opens Overview, Analytics, Findings, Timeline, Resources or Settings.
+- The time range, tab and status are in the URL, so a view can be bookmarked or shared.
+- All of it reads Ambersight's own D1 database. Opening a page makes no Cloudflare API call.
 - **History for 13 months.** Each complete UTC day is folded into daily tables (`metrics_daily`, `resource_daily`, `quota_daily`, `cron_daily`), kept for 400 days while the hourly rows keep their retention. Storage sizes are kept per day (`storage_daily`) instead of being overwritten. The upgrade builds the daily rows from the hourly history already stored (migration 0011).
 - **Finding history.** Every open, reopen, escalation, resolve, acknowledge, snooze, restore and alert is recorded in `finding_events`, and each finding counts its reopens.
 - **Undo acknowledge and snooze**, and list findings by status: `GET /api/findings?status=acknowledged`, `POST /api/findings/:id/restore` and the `restore` bulk action. `GET /api/findings/:id/history` returns a finding's events.

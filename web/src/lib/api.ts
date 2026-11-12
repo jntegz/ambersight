@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import type { Config } from '../../../src/shared/config';
-import type { AccountSummary, Overview, PackagesView, ResourcesView, SelfCost, SetupStatus, TimelineEntry } from '../../../src/shared/types';
+import type { AccountSummary, AnalyticsView, FindingEvent, FindingListItem, Overview, PackagesView, Range, ResourcesView, SelfCost, SetupStatus, TimelineEntry, WorkerDetail } from '../../../src/shared/types';
 
 export interface ScanResult {
   skipped?: boolean;
@@ -57,8 +57,16 @@ export const api = {
   acknowledge: (id: string) => call<{ ok: true }>(`/api/findings/${encodeURIComponent(id)}/acknowledge`, { method: 'POST' }),
   snooze: (id: string, days: 7 | 30 | 90) =>
     call<{ ok: true }>(`/api/findings/${encodeURIComponent(id)}/snooze`, { method: 'POST', body: JSON.stringify({ days }) }),
+  /** Undo an acknowledge or a snooze. */
+  restore: (id: string) => call<{ ok: true }>(`/api/findings/${encodeURIComponent(id)}/restore`, { method: 'POST' }),
+  findings: (status: 'open' | 'acknowledged' | 'snoozed' | 'resolved', account?: string) =>
+    call<FindingListItem[]>(`/api/findings?status=${status}${account ? `&account=${encodeURIComponent(account)}` : ''}`),
+  history: (id: string) => call<FindingEvent[]>(`/api/findings/${encodeURIComponent(id)}/history`),
+  analytics: (range: Range, account?: string) => call<AnalyticsView>(`/api/analytics?range=${range}${account ? `&account=${encodeURIComponent(account)}` : ''}`),
+  worker: (name: string, range: Range, account?: string) =>
+    call<WorkerDetail>(`/api/workers/${encodeURIComponent(name)}?range=${range}${account ? `&account=${encodeURIComponent(account)}` : ''}`),
   /** A whole group at once. */
-  bulk: (ids: string[], action: 'acknowledge' | 'snooze', days?: 7 | 30 | 90) =>
+  bulk: (ids: string[], action: 'acknowledge' | 'snooze' | 'restore', days?: 7 | 30 | 90) =>
     call<{ ok: true; changed: number }>('/api/findings/bulk', { method: 'POST', body: JSON.stringify({ ids, action, days }) }),
 };
 
@@ -91,5 +99,29 @@ export function dayLabels(n = 7, now = Date.now()): string[] {
   });
 }
 
-/** Stable DOM id for a Worker's card or table row, used by in-page links. */
+/** Stable DOM id for a Worker's card or table row. */
 export const workerId = (name: string) => `w-${name}`;
+
+/** The Worker page. */
+export const workerHref = (name: string) => `#/worker/${encodeURIComponent(name)}`;
+
+/** Signed change against the period before: "+12%", "−3%", "new" or "" when both are zero. */
+export function change(now: number, before: number): { text: string; dir: 'up' | 'down' | 'flat' } {
+  if (!before) return now ? { text: 'new', dir: 'up' } : { text: '', dir: 'flat' };
+  const r = (now - before) / before;
+  if (Math.abs(r) < 0.005) return { text: '0%', dir: 'flat' };
+  const p = Math.abs(r) * 100;
+  return { text: `${r > 0 ? '+' : '−'}${p >= 100 ? Math.round(p).toLocaleString('en-US') : p.toFixed(p < 10 ? 1 : 0)}%`, dir: r > 0 ? 'up' : 'down' };
+}
+
+export const usd = (n: number) => (n < 0.01 && n > 0 ? '<$0.01' : `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+
+/** "1.2 ms" style durations from milliseconds. */
+export const ms = (n: number | null) => (n == null ? '–' : n < 1 ? `${n.toFixed(2)} ms` : n < 10 ? `${n.toFixed(1)} ms` : `${Math.round(n).toLocaleString('en-US')} ms`);
+
+export const bytes = (n: number) => {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (n >= 1000 && i < units.length - 1) { n /= 1000; i++; }
+  return `${n >= 100 || i === 0 ? Math.round(n) : n.toPrecision(2)} ${units[i]}`;
+};

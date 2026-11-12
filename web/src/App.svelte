@@ -7,18 +7,22 @@
   import Icon, { type IconName } from './components/Icon.svelte';
   import Login from './components/Login.svelte';
   import Logo from './components/Logo.svelte';
+  import CommandPalette, { type Command } from './components/CommandPalette.svelte';
   import Accounts from './pages/Accounts.svelte';
+  import Analytics from './pages/Analytics.svelte';
+  import Findings from './pages/Findings.svelte';
+  import Worker from './pages/Worker.svelte';
   import Overview from './pages/Overview.svelte';
   import Packages from './pages/Packages.svelte';
   import Resources from './pages/Resources.svelte';
   import Settings from './pages/Settings.svelte';
   import Setup from './pages/Setup.svelte';
   import Timeline from './pages/Timeline.svelte';
-  import { api, ApiError, num, timeAgo } from './lib/api';
+  import { api, ApiError, num, timeAgo, workerHref } from './lib/api';
+  import { parseHash, type Route } from './lib/route';
   import { currentTheme, setTheme, type Theme } from './lib/theme';
 
   type View = 'loading' | 'login' | 'ready' | 'error';
-  type Route = 'overview' | 'timeline' | 'resources' | 'packages' | 'settings' | 'accounts';
   let view = $state<View>('loading');
   let data = $state<OverviewData | null>(null);
   let config = $state<Config | null>(null);
@@ -53,15 +57,23 @@
     await load();
   }
 
-  // ---- Routing: "#/timeline" and "#/settings" are pages; any other hash (like "#w-name") is an anchor on the overview.
-  const routeFrom = (hash: string): Route =>
-    hash === '#/timeline' ? 'timeline' : hash === '#/resources' ? 'resources' : hash === '#/packages' ? 'packages' : hash === '#/settings' ? 'settings' : hash === '#/accounts' ? 'accounts' : 'overview';
-  let route = $state<Route>(routeFrom(location.hash));
+  // ---- Routing: "#/<page>?params" and "#/worker/<name>?range=30d" are pages; any other hash (like
+  // "#attention-title") is an anchor on the overview. Old "#w-<name>" links open the Worker page.
+  const initial = parseHash(location.hash.startsWith('#w-') ? `#/worker/${location.hash.slice(3)}` : location.hash);
+  let route = $state<Route>(initial.route);
+  let routeArg = $state<string | null>(initial.arg);
+  let routeParams = $state<URLSearchParams>(initial.params);
   async function onHash() {
-    const next = routeFrom(location.hash);
-    const anchor = location.hash.startsWith('#w-') || location.hash === '#attention-title';
-    if (next !== route) {
-      route = next;
+    if (location.hash.startsWith('#w-')) {
+      location.replace(workerHref(decodeURIComponent(location.hash.slice(3))));
+      return;
+    }
+    const loc = parseHash(location.hash);
+    const anchor = location.hash === '#attention-title';
+    if (loc.route !== route || loc.arg !== routeArg) {
+      route = loc.route;
+      routeArg = loc.arg;
+      routeParams = loc.params;
       query = '';
       if (!anchor) scrollTo(0, 0);
     }
@@ -77,6 +89,8 @@
   const NAV_ALL: { route: Route; href: string; label: string; icon: IconName; multiOnly?: boolean; packagesOnly?: boolean }[] = [
     { route: 'accounts', href: '#/accounts', label: 'Accounts', icon: 'grid', multiOnly: true },
     { route: 'overview', href: '#/', label: 'Overview', icon: 'overview' },
+    { route: 'analytics', href: '#/analytics', label: 'Analytics', icon: 'chart' },
+    { route: 'findings', href: '#/findings', label: 'Findings', icon: 'inbox' },
     { route: 'timeline', href: '#/timeline', label: 'Timeline', icon: 'timeline' },
     { route: 'resources', href: '#/resources', label: 'Resources', icon: 'zombies' },
     { route: 'packages', href: '#/packages', label: 'Packages', icon: 'list', packagesOnly: true },
@@ -139,6 +153,11 @@
     await load();
   }
 
+  async function restore(id: string) {
+    await api.restore(id);
+    await load();
+  }
+
   async function bulk(ids: string[], action: 'acknowledge' | 'snooze', days?: 7 | 30 | 90) {
     await api.bulk(ids, action, days);
     await load();
@@ -175,8 +194,42 @@
     try { localStorage.setItem(DISMISS, version); } catch {}
   }
 
+  // ---- Command palette (Ctrl+K / Cmd+K) and "g then a letter" shortcuts.
+  let palette = $state(false);
+  let pendingG = 0;
+  const GO: Record<string, string> = { o: '#/', a: '#/analytics', f: '#/findings', t: '#/timeline', r: '#/resources', s: '#/settings' };
+  const commands = $derived.by((): Command[] => [
+    ...NAV.map((n) => ({ id: `page-${n.route}`, label: n.label, hint: 'Page', icon: n.icon, run: () => (location.hash = n.href) })),
+    ...(data?.workers ?? []).map((w) => ({
+      id: `w-${w.name}`, label: w.name, icon: 'worker' as const,
+      hint: [w.topFinding?.severity, ...w.groups].filter(Boolean).join(' · ') || 'Worker',
+      run: () => (location.hash = workerHref(w.name)),
+    })),
+    ...(multi ? (accounts ?? []).map((a) => ({ id: `a-${a.id}`, label: a.label, hint: 'Switch account', icon: 'grid' as const, run: () => selectAccount(a.id) })) : []),
+    { id: 'scan', label: 'Scan now', hint: 'Action', icon: 'refresh', run: scanNow },
+    { id: 'theme', label: theme === 'dark' ? 'Light theme' : 'Dark theme', hint: 'Action', icon: theme === 'dark' ? 'sun' : 'moon', run: toggleTheme },
+  ]);
+
   function onKey(e: KeyboardEvent) {
     const typing = e.target instanceof HTMLElement && e.target.closest('input, textarea, select, [contenteditable]');
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k' && view === 'ready') {
+      e.preventDefault();
+      palette = !palette;
+      return;
+    }
+    if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey && view === 'ready') {
+      if (e.key === 'g') {
+        pendingG = Date.now();
+        return;
+      }
+      if (pendingG && Date.now() - pendingG < 1200 && GO[e.key]) {
+        pendingG = 0;
+        e.preventDefault();
+        location.hash = GO[e.key];
+        return;
+      }
+      pendingG = 0;
+    }
     if (e.key === '/' && !typing && searchEl) {
       e.preventDefault();
       searchEl.focus();
@@ -194,7 +247,10 @@
     else view = 'login';
   });
 
-  const searchable = $derived(route !== 'settings');
+  const searchable = $derived(route !== 'settings' && route !== 'worker');
+  const searchLabel = $derived(
+    ({ timeline: 'Search deploys', accounts: 'Search accounts', packages: 'Search packages', resources: 'Search resources', findings: 'Search findings' } as Partial<Record<Route, string>>)[route] ?? 'Search Workers',
+  );
   // An account that has not been scanned for 3 of its intervals: the cron may be detached.
   // Without the scan queue, one cron tick (every 15 min) scans one account.
   const interval = $derived(data?.features?.queue ? (config?.scanIntervalMinutes ?? 60) : Math.max(config?.scanIntervalMinutes ?? 60, (data?.accountCount ?? 1) * 15));
@@ -235,9 +291,9 @@
       {#if searchable}
         <div class="search" class:filled={!!query}>
           <label class="search-field">
-            <span class="sr-only">{route === 'timeline' ? 'Search deploys' : route === 'accounts' ? 'Search accounts' : route === 'packages' ? 'Search packages' : route === 'resources' ? 'Search resources' : 'Search Workers'}</span>
+            <span class="sr-only">{searchLabel}</span>
             <Icon name="search" size={16} />
-            <input type="search" placeholder={route === 'timeline' ? 'Search deploys' : route === 'accounts' ? 'Search accounts' : route === 'packages' ? 'Search packages' : route === 'resources' ? 'Search resources' : 'Search Workers'} autocomplete="off" spellcheck="false" bind:value={query} bind:this={searchEl} />
+            <input type="search" placeholder={searchLabel} autocomplete="off" spellcheck="false" bind:value={query} bind:this={searchEl} />
           </label>
           {#if query}
             <button type="button" class="clear" aria-label="Clear search" onclick={() => { query = ''; searchEl?.focus(); }}><Icon name="close" size={14} /></button>
@@ -246,6 +302,7 @@
           {/if}
         </div>
       {/if}
+      <button type="button" class="icon-btn" onclick={() => (palette = true)} aria-label="Go to (Ctrl+K)" title="Go to a Worker or page (Ctrl+K)"><Icon name="command" size={16} /></button>
 
       <div class="scan" class:busy={scanning}>
         <span class="scanned" title={data.lastScanAt ? `Last scan ${new Date(data.lastScanAt).toUTCString()}` : 'No scan yet'}>
@@ -308,6 +365,15 @@
   <main class="page">
     {#if route === 'accounts' && multi}
       <Accounts {accounts} {selected} {query} onSelect={selectAccount} />
+    {:else if route === 'worker' && routeArg}
+      {#key `${routeArg}|${selected}`}
+        <Worker name={routeArg} params={routeParams} account={selected} onUnauthorized={() => signedOut()}
+          onAcknowledge={(id) => api.acknowledge(id).then(() => load())} onSnooze={(id, d) => api.snooze(id, d).then(() => load())} onRestore={(id) => restore(id)} />
+      {/key}
+    {:else if route === 'analytics'}
+      <Analytics params={routeParams} account={selected} {query} onUnauthorized={() => signedOut()} />
+    {:else if route === 'findings'}
+      <Findings params={routeParams} account={selected} {query} onUnauthorized={() => signedOut()} onChanged={load} />
     {:else if route === 'timeline'}
       <Timeline groups={data.groups ?? []} {query} account={selected} onUnauthorized={() => signedOut()} />
     {:else if route === 'resources'}
@@ -329,6 +395,8 @@
     {:else}
       <Overview {data} {query} scanInterval={config ? interval : null} mutedChecks={config?.mutedChecks ?? []} onAcknowledge={acknowledge} onSnooze={snooze} onBulk={bulk} onMute={mute} />
     {/if}
+
+    {#if palette}<CommandPalette {commands} onClose={() => (palette = false)} />{/if}
 
     <footer class="foot muted">
       Last scan {timeAgo(data.lastScanAt)} · Read-only · Runs in your own Cloudflare account ·
@@ -474,6 +542,11 @@
     .multi .search { order: 3; width: 100%; margin: 0; }
     .multi .search-field { flex: 1; }
     .multi .search input, .multi .search:focus-within input, .multi .search.filled input { width: 100%; }
+  }
+  /* Eight pages: below 1400 px only the current page keeps its label; the others are icons with a tooltip. */
+  @media (max-width: 1400px) {
+    .nav a:not([aria-current='page']) span { display: none; }
+    .nav a:not([aria-current='page']) { padding: 0 10px; }
   }
   @media (max-width: 1320px) {
     .search input { width: 150px; }

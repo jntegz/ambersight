@@ -247,3 +247,105 @@ export interface PackagesView {
     packages: { name: string; locked: string; latest: string | null; gap: Gap; dev: boolean }[];
   }[];
 }
+
+/** Time ranges the charts offer. 24h and 7d are drawn by hour, the others by day. */
+export type Range = '24h' | '7d' | '30d' | '90d' | '365d';
+export const RANGES: Range[] = ['24h', '7d', '30d', '90d', '365d'];
+
+/** One bucket (hour or UTC day) of Worker metrics. */
+export interface MetricPoint {
+  /** ISO hour ("2026-11-09T11:00:00Z") or day ("2026-11-09"). */
+  t: string;
+  requests: number;
+  errors: number;
+  subrequests: number;
+  /** Total CPU time, microseconds. */
+  cpuTimeUs: number;
+  /** Highest hourly CPU p99 in the bucket, ms; null without data. */
+  cpuP99: number | null;
+  /** Invocations that hit a limit, and of those the CPU and memory limits. */
+  exceeded: number;
+  exceededCpu: number;
+  exceededMemory: number;
+}
+
+export type MetricTotals = Omit<MetricPoint, 't'>;
+
+/** Fleet analytics for one account and range (the Analytics page). */
+export interface AnalyticsView {
+  range: Range;
+  granularity: 'hour' | 'day';
+  from: string;
+  to: string;
+  /** The first day any history exists for this account; charts say so instead of drawing a flat line. */
+  historyStart: string | null;
+  plan: 'free' | 'paid';
+  series: MetricPoint[];
+  totals: MetricTotals;
+  /** The same length of time just before `from`. */
+  previous: MetricTotals;
+  workers: { name: string; groups: string[]; totals: MetricTotals; previous: MetricTotals; spark: number[] }[];
+  /** Daily usage per quota metric, with the daily free limit where there is one. */
+  quotas: { metric: string; label: string; limit: number | null; days: { day: string; value: number; peakHour: string | null }[] }[];
+  /** Workers Paid: usage at list price per day, and the bill per calendar month. Null on Free. */
+  cost: {
+    days: { day: string; amount: number }[];
+    months: { month: string; amount: number; partial: boolean }[];
+    perWorker: { name: string; amount: number; perMillion: number | null }[];
+    pricesAsOf: string;
+  } | null;
+  /** Storage per resource: size now, growth per day and when it reaches its cap at that pace. */
+  storage: {
+    kind: 'd1' | 'kv' | 'r2' | 'do';
+    id: string;
+    label: string;
+    bytes: number;
+    growthPerDay: number | null;
+    limit: number | null;
+    capDate: string | null;
+    days: { day: string; bytes: number }[];
+  }[];
+  reliability: {
+    /** Findings opened and resolved per day. */
+    days: { day: string; opened: number; resolved: number }[];
+    /** Median hours from open to resolve, per severity, for findings resolved in the range. */
+    mttrHours: Record<Severity, number | null>;
+    /** Per check: how often it fired and what people did with it. */
+    checks: { check: string; opened: number; alerted: number; acknowledged: number; snoozed: number; resolved: number; medianOpenHours: number | null; reopened: number }[];
+  };
+  deploys: { day: string; count: number; followedByFinding: number }[];
+}
+
+/** Everything about one Worker (the Worker page). */
+export interface WorkerDetail {
+  name: string;
+  exists: boolean;
+  range: Range;
+  granularity: 'hour' | 'day';
+  from: string;
+  to: string;
+  historyStart: string | null;
+  groups: string[];
+  handlers: string[];
+  deployedOn: string | null;
+  createdOn: string | null;
+  compatibilityDate: string | null;
+  usageModel: string | null;
+  workersDev: boolean | null;
+  previewsEnabled: boolean | null;
+  logsEnabled: boolean | null;
+  entryPoints: string[];
+  bindings: { type: string; name: string; target?: string }[] | null;
+  crons: string[];
+  series: MetricPoint[];
+  totals: MetricTotals;
+  previous: MetricTotals;
+  cron: { t: string; runs: number; failures: number; cpuMaxMs: number | null }[];
+  deploys: { id: string; createdOn: string; author: string | null; message: string | null; source: string | null; correlated: string[] }[];
+  /** Before and after each deploy in the range: 24 hours either side. */
+  deployImpact: { id: string; createdOn: string; before: MetricTotals; after: MetricTotals }[];
+  findings: FindingListItem[];
+  changes: { at: string; kind: string; detail: string | null }[];
+  /** List price of this Worker's requests and CPU time in the range, before included usage. Paid only. */
+  cost: { amount: number; perMillion: number | null } | null;
+}

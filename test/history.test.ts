@@ -270,3 +270,84 @@ describe('the Self-cost panel', () => {
     expect(await e.DB.prepare('SELECT api_requests FROM usage_daily').first('api_requests')).toBe(10);
   });
 });
+
+describe('analytics and the Worker page', () => {
+  it('draws the last 30 days by day from the rollups plus today, and compares with the period before', async () => {
+    stub({ hourly: HOURLY });
+    const e = env();
+    await scan(e, NOW);
+    const { buildAnalytics } = await import('../src/worker/analytics');
+    const a = await buildAnalytics(e, 'acc1', '30d', NOW);
+    expect(a.granularity).toBe('day');
+    expect(a.series).toHaveLength(30);
+    expect(a.series.at(-1)!.t).toBe('2026-11-09');
+    expect(a.series.find((p) => p.t === '2026-11-08')!.requests).toBe(2400); // from metrics_daily
+    expect(a.series.at(-1)!.requests).toBe(50); // today, from the hourly rows
+    expect(a.totals.requests).toBe(2450);
+    expect(a.previous.requests).toBe(0);
+    expect(a.workers[0]).toMatchObject({ name: 'api', totals: { requests: 2450, errors: 7 } });
+    expect(a.workers[0].spark).toHaveLength(30);
+    expect(a.historyStart).toBe('2026-11-08');
+    const requests = a.quotas.find((q) => q.metric === 'workers.requests')!;
+    expect(requests.limit).toBe(100_000);
+    expect(requests.days.find((d) => d.day === '2026-11-08')).toMatchObject({ value: 2400 });
+    expect(a.reliability.days.at(-1)!.opened).toBeGreaterThan(0);
+  });
+
+  it('draws 24 hours by hour', async () => {
+    stub({ hourly: HOURLY });
+    const e = env();
+    await scan(e, NOW);
+    const { buildAnalytics } = await import('../src/worker/analytics');
+    const a = await buildAnalytics(e, 'acc1', '24h', NOW);
+    expect(a.granularity).toBe('hour');
+    expect(a.series).toHaveLength(24);
+    expect(a.series.at(-1)!.t).toBe('2026-11-09T12:00:00Z');
+    expect(a.series.find((p) => p.t === '2026-11-09T11:00:00Z')!.requests).toBe(50);
+    // The window ends with the current hour (12:00); the 24 hours before it start at 13:00 the day before.
+    expect(a.totals.requests).toBe(50 + 100 * 11);
+    expect(a.previous.requests).toBe(100 * 13);
+  });
+
+  it('works out time to resolve and per-check outcomes from the event log', async () => {
+    const { reliability } = await import('../src/worker/analytics');
+    const t = (h: number) => new Date(Date.parse('2026-11-01T00:00:00Z') + h * H).toISOString();
+    const r = reliability([
+      { finding_id: 'a', at: t(0), kind: 'opened', severity: 'critical', check_id: 'errors:rate' },
+      { finding_id: 'a', at: t(1), kind: 'alerted', severity: 'critical', check_id: 'errors:rate' },
+      { finding_id: 'a', at: t(4), kind: 'resolved', severity: 'critical', check_id: 'errors:rate' },
+      { finding_id: 'b', at: t(2), kind: 'opened', severity: 'warning', check_id: 'cron:missed' },
+      { finding_id: 'b', at: t(3), kind: 'snoozed', severity: 'warning', check_id: 'cron:missed' },
+    ], Date.parse('2026-11-01T00:00:00Z'), Date.parse('2026-11-02T00:00:00Z'), ['2026-11-01']);
+    expect(r.mttrHours).toEqual({ critical: 4, warning: null, info: null });
+    expect(r.checks.find((c) => c.check === 'errors:rate')).toMatchObject({ opened: 1, alerted: 1, resolved: 1, medianOpenHours: 4 });
+    expect(r.checks.find((c) => c.check === 'cron:missed')).toMatchObject({ opened: 1, snoozed: 1, resolved: 0 });
+    expect(r.days).toEqual([{ day: '2026-11-01', opened: 2, resolved: 1 }]);
+  });
+
+  it('shows one Worker with its series, deploys, before and after, and findings', async () => {
+    const hourly = [
+      ...HOURLY,
+      { scriptName: 'api', datetimeHour: '2026-11-09T10:00:00Z', requests: 80, errors: 8 },
+    ];
+    stub({ hourly });
+    const e = env();
+    await scan(e, NOW);
+    const cookie = await signedIn(e);
+    const res = await get(e, cookie, '/api/workers/api?range=7d');
+    expect(res.status).toBe(200);
+    const w = (await res.json()) as import('../src/shared/types').WorkerDetail;
+    expect(w.exists).toBe(true);
+    expect(w.granularity).toBe('hour');
+    expect(w.series).toHaveLength(168);
+    expect(w.totals.requests).toBe(2530);
+    expect(w.deploys.map((d) => d.id)).toEqual(['dep-api-1']);
+    // The deploy at 10:40: the 24 hours before its hour hold yesterday from 10:00, the 24 after it 11:00.
+    expect(w.deployImpact[0].after.requests).toBe(50);
+    expect(w.deployImpact[0].before.requests).toBe(100 * 14);
+    expect(w.findings.length).toBeGreaterThan(0);
+    expect(w.bindings?.map((b) => b.name)).toContain('CACHE');
+    const missing = (await (await get(e, cookie, '/api/workers/nope')).json()) as { exists: boolean };
+    expect(missing.exists).toBe(false);
+  });
+});

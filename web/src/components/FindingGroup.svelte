@@ -3,7 +3,7 @@
 <script lang="ts">
   import { CHECK_GROUP_FIX, type FindingGroup } from '../../../src/shared/findings';
   import type { Finding } from '../../../src/shared/types';
-  import { num, workerId } from '../lib/api';
+  import { num, workerHref, workerId } from '../lib/api';
   import CheckExplain from './CheckExplain.svelte';
   import FindingRow from './FindingRow.svelte';
   import Icon, { type IconName } from './Icon.svelte';
@@ -50,7 +50,7 @@
     <p class="title">{group.title} <span class="affected">· {num(count)} {noun}</span></p>
     {#if scripts.length}
       <p class="chips">
-        {#each scripts.slice(0, CHIPS) as s (s)}<a class="script mono" href="#{workerId(s)}" title="Show this Worker">{s}</a>{/each}
+        {#each scripts.slice(0, CHIPS) as s (s)}<a class="script mono" href={workerHref(s)} title="Show this Worker">{s}</a>{/each}
         {#if scripts.length > CHIPS}<button type="button" class="more" onclick={() => (open = true)}>+{scripts.length - CHIPS} more</button>{/if}
       </p>
     {/if}

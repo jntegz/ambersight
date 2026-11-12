@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <script lang="ts">
   import type { WorkerSummary } from '../../../src/shared/types';
-  import { num, workerId } from '../lib/api';
+  import { num, workerHref, workerId } from '../lib/api';
 
   let { workers }: { workers: WorkerSummary[] } = $props();
 
@@ -28,7 +28,7 @@
       <li>
         <a
           class="cell {stateOf(w)}"
-          href="#{workerId(w.name)}"
+          href={workerHref(w.name)}
           aria-label="{w.name}: {LABEL[stateOf(w)]}"
           onpointerenter={(e) => show(w, e.currentTarget)}
           onpointerleave={() => (tip = null)}

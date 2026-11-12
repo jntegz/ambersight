@@ -5,7 +5,7 @@
     | 'worker' | 'cron' | 'budget' | 'errors' | 'runaway' | 'critical' | 'warning' | 'info'
     | 'healthy' | 'search' | 'refresh' | 'logout' | 'external' | 'snooze' | 'check' | 'sun' | 'moon' | 'grid' | 'list' | 'close'
     | 'usage' | 'deprecation' | 'exposure' | 'zombies' | 'timeline' | 'settings' | 'chevron' | 'download' | 'upload'
-    | 'mail' | 'webhook' | 'shield' | 'plus' | 'trash' | 'overview' | 'key' | 'arrow';
+    | 'mail' | 'webhook' | 'shield' | 'plus' | 'trash' | 'overview' | 'key' | 'arrow' | 'chart' | 'inbox' | 'command' | 'undo';
 </script>
 
 <script lang="ts">
@@ -49,6 +49,10 @@
     overview: 'M4 4H10V12H4ZM14 4H20V8H14ZM14 12H20V20H14ZM4 16H10V20H4Z',
     key: 'M14.5 9.5A4.5 4.5 0 1 0 10.7 13.8L4 20.5M14.5 9.5H14.6M10.7 13.8L13 16M7 17.5L9 19.5',
     arrow: 'M5 12H19M13 6L19 12L13 18',
+    chart: 'M4 4V20H20M8 16V12M12 16V8M16 16V10',
+    inbox: 'M4 13L6.5 5H17.5L20 13V19H4ZM4 13H9L10 15.5H14L15 13H20',
+    command: 'M9 6A3 3 0 1 0 6 9H18A3 3 0 1 0 15 6V18A3 3 0 1 0 18 15H6A3 3 0 1 0 9 18Z',
+    undo: 'M9 14L4 9L9 4M4 9H15A5 5 0 0 1 15 19H11',
   };
 </script>
 

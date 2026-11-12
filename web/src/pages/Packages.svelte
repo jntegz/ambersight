@@ -3,7 +3,7 @@
 <script lang="ts">
   import type { PackagesView } from '../../../src/shared/types';
   import Icon from '../components/Icon.svelte';
-  import { api, timeAgo, workerId } from '../lib/api';
+  import { api, timeAgo, workerHref, workerId } from '../lib/api';
   import { loadPrefs, savePrefs } from '../lib/prefs';
 
   let { query, account = null, onUnauthorized }: { query: string; account?: string | null; onUnauthorized: () => void } = $props();
@@ -71,7 +71,7 @@
     {#each workers as w (w.name)}
       <section class="card worker" aria-labelledby="pk-{w.name}">
         <header class="w-head">
-          <h2 id="pk-{w.name}"><a class="mono" href="#{workerId(w.name)}">{w.name}</a></h2>
+          <h2 id="pk-{w.name}"><a class="mono" href={workerHref(w.name)}>{w.name}</a></h2>
           <span class="muted hint">{w.repo}{w.dir ? `/${w.dir}` : ''} · read {timeAgo(w.checkedAt)}</span>
           {#if !w.error && w.packages.length}<span class="tag-chip" class:warn={w.behind > 0}>{w.behind} of {w.packages.length} behind</span>{/if}
         </header>

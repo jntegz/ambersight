@@ -15,7 +15,7 @@
   import TrendBars from '../components/TrendBars.svelte';
   import WorkerCard from '../components/WorkerCard.svelte';
   import WorkerTable from '../components/WorkerTable.svelte';
-  import { compact, num, pct, timeAgo, workerId } from '../lib/api';
+  import { compact, num, pct, timeAgo, workerHref, workerId } from '../lib/api';
   import { download } from '../lib/download';
   import { findingsMarkdown } from '../lib/exportMd';
   import { loadPrefs, savePrefs } from '../lib/prefs';
@@ -161,7 +161,7 @@
       <div class="map-area">
         <FleetMap workers={scoped} />
         {#if top}
-          <a class="urgent {top.severity}" href={top.script === '*' ? '#attention-title' : `#${workerId(top.script)}`}>
+          <a class="urgent {top.severity}" href={top.script === '*' ? '#attention-title' : workerHref(top.script)}>
             <Icon name={top.severity} size={16} />
             <span><span class="urgent-label">Most urgent</span> <span class="mono">{top.script === '*' ? 'Account' : top.script}</span> · {top.message}</span>
           </a>
@@ -212,7 +212,7 @@
         <ul>
           {#each errorSources as w (w.name)}
             <li>
-              <a class="mono" href="#{workerId(w.name)}">{w.name}</a>
+              <a class="mono" href={workerHref(w.name)}>{w.name}</a>
               <span class="bar-track"><span class="bar" class:hot={w.topFinding?.severity === 'critical'} style="width: {(w.errors24h / errorMax) * 100}%"></span></span>
               <span class="num">{num(w.errors24h)}</span>
             </li>
