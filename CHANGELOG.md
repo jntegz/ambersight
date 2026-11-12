@@ -4,6 +4,14 @@ All notable changes to Ambersight. Each version here has a matching [GitHub rele
 
 ## Unreleased
 
+- **Fewer false runaway alerts.** The "5x usual" checks compare an hour with the same hour of day over the last week when that is higher than the plain median, so a nightly batch or a daily peak no longer raises an alert. No check becomes more sensitive.
+- **What changed just before.** A traffic, CPU or storage spike, or an error rise, that no deploy explains now names the binding that disappeared or the audit log change in the 6 hours before it.
+- **Median CPU time and wall time** per Worker, read in the request that already reads CPU p99 (migration 0012). An account whose schema rejects these fields is asked without them, and again a day later. The Worker page charts them.
+- **Monthly budget** per account on Workers Paid (**Settings › Accounts**): a finding at 80% of it, past it, and when the month-end forecast passes it, within the hour. The estimated bill shows the budget as a bar.
+- **Read-only API tokens** (**Settings › Security**) for Ambersight's own JSON API: overview, analytics, Worker pages, findings and the timeline for Grafana or scripts. A token cannot change anything or read settings. Only a digest is stored (migration 0013). See [docs/api.md](docs/api.md).
+- **Since your last visit** on the overview: findings opened, made worse and resolved since this browser last opened it.
+- **Compare Workers**: tick two to four Workers in **Analytics › Trends** to see requests, error rate and CPU per request on shared axes.
+- **Installable app**: add Ambersight to your home screen or dock. It opens offline with the last data it showed; signing out clears that copy.
 - **Worker page** (`#/worker/<name>`): requests, errors, error rate, CPU p99 and CPU per request, subrequests, limit hits by type and cron runs over 24 hours to 12 months, with deploys marked on every chart. Each deploy shows error rate, CPU and traffic for the 24 hours before and after. Also the Worker's open and resolved findings with their history, recent changes (bindings removed, audit log), entry points and bindings. Every Worker name in the app now links here; old `#w-<name>` links still work.
 - **Analytics page** with a time range from 24 hours to 12 months and a comparison with the period before:
   - **Trends**: totals with their change, requests and errors for the account, error rate and CPU per request, the Workers growing and shrinking fastest, and a sortable table of every Worker with a sparkline.

@@ -5,6 +5,7 @@
   import { untrack } from 'svelte';
   import type { AnalyticsView, MetricTotals, Range } from '../../../src/shared/types';
   import Chart from '../components/Chart.svelte';
+  import CompareWorkers from '../components/CompareWorkers.svelte';
   import Icon from '../components/Icon.svelte';
   import RangePicker from '../components/RangePicker.svelte';
   import Sparkline from '../components/Sparkline.svelte';
@@ -18,6 +19,12 @@
   let range = $state<Range>(untrack(() => rangeParam(params, '30d')));
   let tab = $state<Tab>(untrack(() => (['trends', 'cost', 'limits', 'reliability'].includes(params.get('tab') ?? '') ? (params.get('tab') as Tab) : 'trends')));
   let data = $state<AnalyticsView | null>(null);
+  // Compare mode: up to 4 Workers, kept in the URL.
+  let compared = $state<string[]>(untrack(() => (params.get('compare') ?? '').split(',').filter(Boolean).slice(0, 4)));
+  function toggleCompare(name: string) {
+    compared = compared.includes(name) ? compared.filter((n) => n !== name) : [...compared, name].slice(-4);
+    setParam('compare', compared.join(',') || null);
+  }
   let error = $state('');
 
   async function load() {
@@ -182,15 +189,20 @@
         </article>
       {/each}
     </div>
+    {#if compared.length >= 2}
+      <CompareWorkers names={compared} {range} {account} onClear={() => { compared = []; setParam('compare', null); }} />
+    {/if}
     <article class="card">
       <div class="section-head pad">
         <h2>Workers <span class="count">{rows.length}</span></h2>
+        <span class="hint">{compared.length === 1 ? 'Tick one more Worker to compare.' : compared.length ? '' : 'Tick 2 to 4 Workers to compare them.'}</span>
         <button type="button" class="ghost" onclick={workersCsv}><Icon name="download" size={16} /> CSV</button>
       </div>
       <div class="scroll">
         <table class="t">
           <thead>
             <tr>
+              <th class="pick"><span class="sr-only">Compare</span></th>
               {#each [['name', 'Worker'], ['requests', 'Requests'], ['change', 'Change'], ['errors', 'Errors'], ['rate', 'Error rate'], ['cpu', 'CPU / request'], ['sub', 'Subreq. / request'], ['limits', 'Limit hits']] as [col, label] (col)}
                 <th class:r={col !== 'name'} aria-sort={aria(col as Col)}><button type="button" class="sort" onclick={() => by(col as Col)}>{label}{#if sort.col === col}<span aria-hidden="true">{sort.desc ? ' ↓' : ' ↑'}</span>{/if}</button></th>
               {/each}
@@ -202,6 +214,7 @@
               {@const c = change(w.totals.requests, w.previous.requests)}
               {@const er = rate(w.totals)}
               <tr>
+                <td class="pick"><input type="checkbox" aria-label="Compare {w.name}" checked={compared.includes(w.name)} onchange={() => toggleCompare(w.name)} /></td>
                 <td><a class="mono" href="{workerHref(w.name)}?range={range}">{w.name}</a>{#each w.groups as g (g)} <span class="tag-chip">{g}</span>{/each}</td>
                 <td class="r num">{num(w.totals.requests)}</td>
                 <td class="r num {c.dir}">{c.text}</td>
@@ -213,7 +226,7 @@
                 <td class="spark-col"><Sparkline values={w.spark} label="Requests for {w.name}" height={24} /></td>
               </tr>
             {:else}
-              <tr><td colspan="9" class="muted">No Worker matches.</td></tr>
+              <tr><td colspan="10" class="muted">No Worker matches.</td></tr>
             {/each}
           </tbody>
         </table>
@@ -378,6 +391,8 @@
   .sort { min-height: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer; }
   .sort:hover { color: var(--ink); }
   .spark-col { width: 120px; }
+  .t .pick { width: 28px; padding-right: 0; }
+  .section-head .hint { flex: 1; }
   .up { color: var(--critical); }
   td.up, .movers .up { color: var(--ink); }
   .hot { color: var(--critical); font-weight: 600; }
