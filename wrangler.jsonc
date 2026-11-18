@@ -20,7 +20,7 @@
 
   // One Cron Trigger. The Free plan allows 5 per account; Ambersight uses 1.
   // It fires every 15 minutes; runs inside the scan interval set in Settings (default 1 hour)
-  // stop after one D1 read, so changing the interval needs no redeploy.
+  // stop after a few small D1 queries, so changing the interval needs no redeploy.
   "triggers": { "crons": ["*/15 * * * *"] },
 
   // Ambersight's own previews must never be public.
@@ -37,6 +37,10 @@
     "EMAIL_FROM": "",
     // Verified recipient(s), comma-separated. Must match send_email below.
     "DIGEST_TO": "",
+    // Optional, comma-separated, each also in DIGEST_TO: addresses that still get alerts and the
+    // all-account digest although they are named as a client or group digest recipient. Not needed
+    // for an address that has the client digest of every watched account and is in no group.
+    "DIGEST_OPERATORS": "",
     // Optional: pin the accounts to watch (comma-separated IDs). Empty: choose them in the setup wizard.
     "CF_ACCOUNT_ID": "",
     // Optional: Cloudflare Turnstile on the sign-in page. Put the site key here and the secret in
@@ -44,6 +48,8 @@
     "TURNSTILE_SITE_KEY": ""
     // Optional: the Packages check reads package-lock.json from GitHub with a fine-grained token
     // (Contents: Read only): npx wrangler secret put GITHUB_TOKEN. Then turn it on in Settings.
+    // To limit which repositories a dashboard session can point it at, add
+    // "GITHUB_REPO_ALLOWLIST": "my-org, other-org/one-repo" here (owners or owner/name).
   }
 
   // ---- Optional bindings. Each is free and off until you uncomment it. -------------------------

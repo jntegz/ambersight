@@ -148,6 +148,8 @@ export interface TimelineEntry {
   id: string;
   createdOn: string;
   author: string | null;
+  /** This install does not record who makes changes (Settings › General). */
+  authorNotRecorded?: true;
   message: string | null;
   source: string | null;
   groups: string[];
@@ -164,10 +166,16 @@ export interface SetupStatus {
   /** null = the token cannot read its own permissions, so scopes could not be checked. */
   writeScopes: string[] | null;
   readScopes: string[] | null;
-  email: { configured: boolean; from: string | null; to: string[] };
+  /**
+   * `to` is everyone DIGEST_TO allows; `operators` are the ones who get alerts and all-account mail.
+   * `systemAlertUndelivered` is the UTC day a "scans are failing" alert last found no operator, while that is still so.
+   */
+  email: { configured: boolean; from: string | null; to: string[]; operators: string[]; systemAlertUndelivered: string | null };
   webhook: { configured: boolean; kind: string | null };
   setupDone: boolean;
   passphraseFromSettings: boolean;
+  /** The ADMIN_PASSPHRASE secret is in use and easy to guess; the wizard asks for a better one. */
+  passphraseWeak: boolean;
   /** Every account the token can see (up to 20); the wizard offers a choice when there are several. */
   accounts: { id: string; name: string }[];
   /** Accounts already watched (chosen at setup or pinned). */
@@ -176,6 +184,25 @@ export interface SetupStatus {
   accountPinned: boolean;
   /** This request came through Cloudflare Access. Display only: never used to grant access. */
   behindAccess: boolean;
+  /** GITHUB_REPO_ALLOWLIST as configured; null when the Packages check may read any mapped repository. */
+  githubRepoAllowlist: string[] | null;
+}
+
+/** Settings › Security: recent security-relevant changes made from the dashboard, newest first. */
+export interface AdminLogView {
+  events: {
+    id: number;
+    at: string;
+    action: string;
+    target: string;
+    /** A pseudonymous handle of the session, such as "session 1a2b3c4d". */
+    actor: string;
+    count: number;
+    /** null: no notice due. Otherwise pending, sent, none (no channel configured) or failed. */
+    notice: string | null;
+  }[];
+  retentionDays: number;
+  maxEvents: number;
 }
 
 export interface SelfCostDay {
@@ -246,7 +273,8 @@ export interface PackagesView {
     dir: string | null;
     checkedAt: string | null;
     error: string | null;
-    packages: { name: string; locked: string; latest: string | null; gap: Gap; dev: boolean }[];
+    /** `compared` is false for a package whose last lockfile read did not show it coming from the public npm registry. */
+    packages: { name: string; locked: string; latest: string | null; gap: Gap; dev: boolean; compared: boolean }[];
   }[];
 }
 
@@ -348,6 +376,8 @@ export interface WorkerDetail {
   previous: MetricTotals;
   cron: { t: string; runs: number; failures: number; cpuMaxMs: number | null }[];
   deploys: { id: string; createdOn: string; author: string | null; message: string | null; source: string | null; correlated: string[] }[];
+  /** False when this install does not record who makes changes (Settings › General). */
+  recordsAttribution: boolean;
   /** Before and after each deploy in the range: 24 hours either side. */
   deployImpact: { id: string; createdOn: string; before: MetricTotals; after: MetricTotals }[];
   findings: FindingListItem[];

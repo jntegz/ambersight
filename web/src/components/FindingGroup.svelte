@@ -4,6 +4,7 @@
   import { CHECK_GROUP_FIX, type FindingGroup } from '../../../src/shared/findings';
   import type { Finding } from '../../../src/shared/types';
   import { num, workerHref, workerId } from '../lib/api';
+  import { httpUrl } from '../lib/links';
   import CheckExplain from './CheckExplain.svelte';
   import FindingRow from './FindingRow.svelte';
   import Icon, { type IconName } from './Icon.svelte';
@@ -56,7 +57,7 @@
     {/if}
     <p class="action muted">
       {fix}
-      {#if first.docsUrl}<a href={first.docsUrl} target="_blank" rel="noopener noreferrer">Docs <Icon name="external" size={12} /></a>{/if}
+      {#if httpUrl(first.docsUrl)}<a href={httpUrl(first.docsUrl)} target="_blank" rel="noopener noreferrer">Docs <Icon name="external" size={12} /></a>{/if}
     </p>
     <CheckExplain check={group.check} />
     <button type="button" class="toggle" aria-expanded={open} onclick={() => (open = !open)}>

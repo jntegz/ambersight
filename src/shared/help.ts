@@ -185,6 +185,23 @@ export const CHECK_HELP: Record<string, CheckHelp> = {
       'If you made a new one, save it: npx wrangler secret put CF_API_TOKEN (or Ambersight › Settings › Variables and Secrets in the dashboard).',
     ],
   },
+  'health:token-scope': {
+    what: 'The API token Ambersight uses has permissions beyond the read permissions it needs. Ambersight rereads them with every inventory refresh and compares them with a fixed list.',
+    why: 'Ambersight only ever reads, but anyone who got hold of this token could use every permission it has.',
+    steps: [
+      'In the Cloudflare dashboard, open My Profile › API Tokens and edit the token (named "Ambersight read-only" if you used the link).',
+      'Remove the permissions this finding names, or create a new token from the link in the setup guide and save it: npx wrangler secret put CF_API_TOKEN.',
+      'If you added a read permission on purpose, turn this check off from the finding.',
+    ],
+  },
+  'health:token-scope-unverified': {
+    what: 'Ambersight could not read its API token\'s permissions, so it cannot tell whether the token is still read-only.',
+    why: 'A token that was widened later would go unnoticed.',
+    steps: [
+      'Add the API Tokens Read permission to the token, and the next inventory refresh checks it again.',
+      'Or check the token yourself under My Profile › API Tokens, and turn this check off.',
+    ],
+  },
 
   // ---- Runaway usage
   'runaway:traffic-spike': {
@@ -604,7 +621,7 @@ export const CHECK_HELP: Record<string, CheckHelp> = {
     why: 'Without it, Ambersight cannot tell you which package versions you use.',
     steps: [
       'In Settings › Checks › Packages, check the repository (owner/name), the folder that holds package-lock.json, and the branch.',
-      'Check that GITHUB_TOKEN has Contents: Read access to that repository.',
+      'Check that GITHUB_TOKEN has Contents: Read access to that repository, and that GITHUB_REPO_ALLOWLIST (if you set one) includes it.',
       'If the project uses pnpm or yarn, or an old npm (before version 7), the lockfile cannot be read yet.',
     ],
   },

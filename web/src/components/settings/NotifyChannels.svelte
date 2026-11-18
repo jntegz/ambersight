@@ -23,6 +23,7 @@
       busy = null;
     }
   }
+  const clientOnly = $derived(status.email.to.filter((a) => !status.email.operators.includes(a)));
   const KIND: Record<string, string> = { slack: 'Slack', discord: 'Discord', telegram: 'Telegram', ntfy: 'ntfy', json: 'JSON webhook' };
 </script>
 
@@ -32,13 +33,23 @@
     <div class="c-body">
       <p class="c-title">Email <span class="state">{status.email.configured ? 'Connected' : 'Not set up'}</span></p>
       {#if status.email.configured}
-        <p class="c-detail muted">From <span class="mono">{status.email.from}</span> to <span class="mono">{status.email.to.join(', ')}</span></p>
+        {#if status.email.operators.length}
+          <p class="c-detail muted">Alerts and the digest go from <span class="mono">{status.email.from}</span> to <span class="mono">{status.email.operators.join(', ')}</span></p>
+        {:else}
+          <p class="c-detail error-text">No alert or all-account digest can be sent: every address in <span class="mono">DIGEST_TO</span> is a client or group recipient. Add your own address, or list one in <span class="mono">DIGEST_OPERATORS</span>.</p>
+          {#if status.email.systemAlertUndelivered}
+            <p class="c-detail error-text">Scans were failing on {status.email.systemAlertUndelivered} (UTC), and that alert had no one to go to by email.</p>
+          {/if}
+        {/if}
+        {#if clientOnly.length}
+          <p class="c-detail muted">Only their own digest goes to <span class="mono">{clientOnly.join(', ')}</span></p>
+        {/if}
       {:else}
         <p class="c-detail muted">Add the <span class="mono">EMAIL</span> send_email binding and set <span class="mono">EMAIL_FROM</span> and <span class="mono">DIGEST_TO</span> in wrangler.jsonc, then deploy.</p>
       {/if}
       {#if result.email}<p class={result.email.ok ? 'success-text' : 'error-text'} role="status">{result.email.text}</p>{/if}
     </div>
-    <button type="button" disabled={!status.email.configured || busy === 'email'} onclick={() => test('email')}>{busy === 'email' ? 'Sending…' : 'Send test'}</button>
+    <button type="button" disabled={!status.email.configured || !status.email.operators.length || busy === 'email'} onclick={() => test('email')}>{busy === 'email' ? 'Sending…' : 'Send test'}</button>
   </div>
 
   <div class="channel" class:on={status.webhook.configured}>

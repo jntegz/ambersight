@@ -9,11 +9,11 @@ Ambersight has two layers of configuration:
 
 | Secret | Required | What it is |
 | --- | --- | --- |
-| `CF_API_TOKEN` | Yes | The read-only API token. The setup wizard refuses a token with any write permission. See the [README](../README.md#step-1-create-a-read-only-api-token) for the permission list. |
-| `ADMIN_PASSPHRASE` | Yes | The dashboard passphrase, at least 12 characters. Sign-in stays off until it is set. If you change the passphrase in **Settings › Security**, the new one is stored as a hash in D1 and takes priority over this secret. |
+| `CF_API_TOKEN` | Yes | The read-only API token. The setup wizard refuses a token with a write permission when it can read the token's permissions, and otherwise asks you to confirm. Each inventory refresh reads them again (`health:token-scope`). See the [README](../README.md#step-1-create-a-read-only-api-token) for the permission list. |
+| `ADMIN_PASSPHRASE` | Yes | The dashboard passphrase, at least 12 characters. Sign-in stays off until it is set. If you change the passphrase in **Settings › Security**, the new one is stored as a hash in D1 and takes priority over this secret for as long as the secret stays the same. Replacing the secret ends that passphrase, every session and every API token tied to it. Tokens from before the upgrade that added this are tied at the first sign-in, token use or scheduled run after it. |
 | `WEBHOOK_URL` | No | A Slack, Discord, Telegram, ntfy or generic JSON endpoint. See [alerts.md](alerts.md#webhooks). |
 | `TURNSTILE_SECRET` | No | The secret key of a Cloudflare Turnstile widget. With `TURNSTILE_SITE_KEY`, the sign-in page asks for a Turnstile check before the passphrase. |
-| `GITHUB_TOKEN` | No | For the [Packages check](checks.md#packages) only. A GitHub **fine-grained** token with *Contents: Read* (and the *Metadata: Read* GitHub adds) on the repositories you map, nothing else. Ambersight sends it only to `api.github.com`, never follows a redirect with it, and never shows it. |
+| `GITHUB_TOKEN` | No | For the [Packages check](checks.md#packages) only. A GitHub **fine-grained** token with *Contents: Read* (and the *Metadata: Read* GitHub adds) on the repositories you map, nothing else. Ambersight sends it only to `api.github.com`, never follows a redirect with it, and never shows it. Anyone signed in can point the check at any repository this token can read, so scope it to the repositories you mean to map, or set `GITHUB_REPO_ALLOWLIST`. |
 
 Set them with `npx wrangler secret put <NAME>`, or in the Cloudflare dashboard under **ambersight › Settings › Variables and Secrets**.
 
@@ -23,9 +23,11 @@ Set them with `npx wrangler secret put <NAME>`, or in the Cloudflare dashboard u
 | --- | --- | --- |
 | `PLAN` | `"free"` | The fallback plan, `free` or `paid`. Used only when the plan cannot be detected (the token lacks *Billing Read*) and **Settings › General** is on Auto. |
 | `EMAIL_FROM` | empty | Sender address for alerts and the digest, on a domain with Email Routing. |
-| `DIGEST_TO` | empty | Verified recipient addresses, separated by commas. They must also be listed in the `send_email` binding. |
+| `DIGEST_TO` | empty | Everyone who may receive mail: verified addresses, separated by commas. They must also be listed in the `send_email` binding. Addresses not named as a client or group recipient are the operators, who get alerts and the all-account digest. So is an address that has the per-account digest of every watched account. See [who gets what](alerts.md#who-gets-what). |
+| `DIGEST_OPERATORS` | empty | Optional. Addresses in `DIGEST_TO`, separated by commas, that stay operators even though they are named as a client or group recipient. |
 | `CF_ACCOUNT_ID` | empty | Pins the accounts to watch, as a comma-separated list of account IDs. Without it, you choose the accounts in the setup wizard and in **Settings › Accounts**. |
 | `TURNSTILE_SITE_KEY` | empty | The site key of a Cloudflare Turnstile widget (free). Turnstile is on only when this and the `TURNSTILE_SECRET` secret are both set. |
+| `GITHUB_REPO_ALLOWLIST` | not set | Optional. Owners or `owner/name` pairs, separated by commas, that the [Packages check](checks.md#packages) may read, whatever is mapped in Settings. Not set: every mapped repository the token can read. |
 
 ## Optional bindings
 
@@ -56,12 +58,13 @@ Every field below is in `config.json`. The Settings section that edits it is in 
 | `inventoryIntervalHours` | `24` | 6 to 168 | Hours between full inventory refreshes (routes, domains, storage lists, Access). |
 | `inventoryHourUtc` | `3` | 0 to 23 | The UTC hour the daily inventory refresh prefers. |
 | `timeZone` | `"UTC"` | Any IANA zone, such as `Europe/Prague` | Used for the digest time and quiet hours. |
-| `retentionDays` | `30` | 7 to 90 | Days of history to keep. Also caps the window of the no-traffic check. |
+| `retentionDays` | `30` | 7 to 90 | Days of history to keep; see [what it covers](how-it-works.md#how-long-data-is-kept). Daily totals and finding events are kept longer. Also caps the window of the no-traffic check. |
 | `updateCheck` | `true` | | Asks GitHub once a day for the latest release number and shows a notice when there is a newer one. |
+| `recordAttribution` | `true` | | Stores who deployed and who made audit-log changes, for troubleshooting. Turning it off erases the names already stored, which cannot be undone; checks work the same. A saved or imported config without this key leaves the setting as it is. See [who made a change](how-it-works.md#who-made-a-change). |
 
 ### Accounts
 
-One install can watch every account its token can see. Choose them in the setup wizard or **Settings › Accounts** (this list is stored in D1, not in `config.json`). Per-account settings are in `config.json`:
+One install can watch every account its token can see. Choose them in the setup wizard or **Settings › Accounts** (this list is stored in D1, not in `config.json`). An account you stop watching is no longer scanned or alerted on, and its stored data [ages out](how-it-works.md#how-long-data-is-kept). Per-account settings are in `config.json`, and stay there until you remove them:
 
 ```json
 "accounts": {
@@ -73,7 +76,7 @@ One install can watch every account its token can see. Choose them in the setup 
 | --- | --- |
 | `label` | The name shown in the dashboard, alerts and the digest, instead of the Cloudflare account name. One line, up to 60 characters. |
 | `plan` | `auto`, `free` or `paid` for this account. Wins over the global `plan`. |
-| `digestTo` | Sends this account its own digest (a client report by e-mail) on the digest schedule. Every address must also be in `DIGEST_TO`. |
+| `digestTo` | Sends this account its own digest (a client report by e-mail) on the digest schedule, one message per address. Every address must also be in `DIGEST_TO`, and gets no other mail unless it is also in `DIGEST_OPERATORS` or has this digest for every watched account. |
 
 ### Checks
 
@@ -139,6 +142,8 @@ Patterns match Worker names, with `*` as a wildcard. Matching is case-sensitive,
 
 An empty `include` means every Worker. `exclude` always wins. Both take name patterns or `group:<name>`.
 
+An out-of-scope Worker gets no findings, no Worker page and no package reads, and its deploys and deploy authors are not collected (those already stored are deleted at the next inventory refresh). Some of its data is still read, because account-wide numbers need it: its name and tags, its request and error totals (the account's daily limits count every Worker), its schedules (the Cron Trigger limit) and its storage bindings (so that storage it uses is not reported as unused). Other bindings are not stored.
+
 ### Overrides
 
 Overrides change thresholds for one group or one Worker. A Worker's own override beats its groups, and a group beats the global value.
@@ -179,7 +184,7 @@ Only the thresholds you list change. A few checks read only the global threshold
 }
 ```
 
-`frequency` is `daily`, `weekly`, `monthly` (on the 1st) or `off`. `weekday` runs from 0 (Sunday) to 6. `hour` is in `timeZone`. Every address in `groupRecipients` must also be in `DIGEST_TO`. `aiSummary` needs the `AI` binding; `aiModel` is any Workers AI text model ID.
+`frequency` is `daily`, `weekly`, `monthly` (on the 1st) or `off`. `weekday` runs from 0 (Sunday) to 6. `hour` is in `timeZone`. Every address in `groupRecipients` must also be in `DIGEST_TO`, gets one message per group, and gets no other mail unless it is also in `DIGEST_OPERATORS`. `aiSummary` needs the `AI` binding; `aiModel` is any Workers AI text model ID.
 
 ## Importing a config
 

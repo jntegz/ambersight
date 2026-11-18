@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import type { Config } from '../../../src/shared/config';
-import type { AccountSummary, AnalyticsView, FindingEvent, FindingListItem, Overview, PackagesView, Range, ResourcesView, SelfCost, SetupStatus, SinceView, TimelineEntry, WorkerDetail } from '../../../src/shared/types';
+import type { PersonDataStep } from '../../../src/shared/personData';
+import type { AccountSummary, AdminLogView, AnalyticsView, FindingEvent, FindingListItem, Overview, PackagesView, Range, ResourcesView, SelfCost, SetupStatus, SinceView, TimelineEntry, WorkerDetail } from '../../../src/shared/types';
 
 export interface ScanResult {
   skipped?: boolean;
@@ -12,19 +13,58 @@ export interface ScanResult {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(message: string, readonly status: number, readonly code?: string) {
     super(message);
   }
 }
 
+/** The server's answer when a request names an account this install does not watch. */
+export const UNKNOWN_ACCOUNT = 'unknown_account';
+let accountRefused: (() => void) | null = null;
+/** Called when the remembered account is refused, so the app can fall back to the default one. */
+export const onAccountRefused = (fn: () => void) => { accountRefused = fn; };
+
+/** The server's answer when there is no session. A wrong passphrase is also a 401, but not this one. */
+export const NOT_SIGNED_IN = 'not_signed_in';
+let sessionEnded: (() => void) | null = null;
+/** Called from any request that finds the session gone, whichever page sent it. */
+export const onSessionEnded = (fn: () => void) => { sessionEnded = fn; };
+
+/** How long a sign-out may take before the browser reports it as not confirmed. */
+const LOGOUT_TIMEOUT_MS = 10_000;
+
+/** Counts sign-ins in this tab: a refusal of a request sent before the latest one is out of date. */
+let signIns = 0;
+export const signInCount = () => signIns;
+
+/** What may still be sent once the session has ended here; the server may not know yet. */
+const OPEN_WITHOUT_SESSION = new Set(['/api/session', '/api/login', '/api/logout']);
+let sessionClosed = false;
+/** Until the next sign-in nothing else is asked for, so no late page action refills the offline copies. */
+export const closeSession = () => { sessionClosed = true; };
+
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
+  if (sessionClosed && !OPEN_WITHOUT_SESSION.has(path)) throw new ApiError('You are signed out.', 0);
+  const startedIn = signIns;
   const res = await fetch(path, {
     ...init,
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+  }).catch((e: unknown) => {
+    if (navigator.onLine !== false) throw e;
+    throw new ApiError(init?.method ? 'You are offline. Try again when you are connected.' : 'You are offline, and this browser has no recent copy of this page.', 0);
   });
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError((body as { error?: string }).error ?? res.statusText, res.status);
+  if (!res.ok) {
+    const { error, code } = body as { error?: string; code?: string };
+    if (startedIn !== signIns) {
+      // About the session before this one. Pages sign out on any 401, so it does not stay a 401.
+      throw new ApiError(error ?? res.statusText, res.status === 401 ? 0 : res.status, code);
+    }
+    if (code === UNKNOWN_ACCOUNT) accountRefused?.();
+    if (res.status === 401 && code === NOT_SIGNED_IN) sessionEnded?.();
+    throw new ApiError(error ?? res.statusText, res.status, code);
+  }
   return body as T;
 }
 
@@ -36,16 +76,35 @@ export interface TokenInfo {
   hint: string;
   createdAt: string;
   lastUsedAt: string | null;
+  expiresAt: string | null;
+  expired: boolean;
+  /** Issued under a passphrase that has since changed: it no longer works. */
+  invalidated: boolean;
+  accounts: 'all' | string[];
+  /** May read deploy authors, audit actors and the free text that can carry them. */
+  people: boolean;
+  /** Created before tokens had a scope: every account, no person-linked data. */
+  olderScope: boolean;
 }
 
 export const api = {
+  adminLog: () => call<AdminLogView>('/api/admin-events'),
   tokens: () => call<TokenInfo[]>('/api/tokens'),
-  createToken: (name: string) => call<{ token: string; info: TokenInfo }>('/api/tokens', { method: 'POST', body: JSON.stringify({ name }) }),
+  createToken: (name: string, days: number, passphrase: string, accounts: 'all' | string[], people: boolean) =>
+    call<{ token: string; info: TokenInfo }>('/api/tokens', { method: 'POST', body: JSON.stringify({ name, days, passphrase, accounts, people }) }),
   revokeToken: (id: string) => call<{ ok: true }>(`/api/tokens/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   session: () => call<{ authenticated: boolean; turnstileSiteKey?: string | null }>('/api/session'),
-  login: (passphrase: string, turnstile?: string) =>
-    call<{ ok: true }>('/api/login', { method: 'POST', body: JSON.stringify({ passphrase, ...(turnstile ? { turnstile } : {}) }) }),
-  logout: () => call<{ ok: true }>('/api/logout', { method: 'POST' }),
+  login: async (passphrase: string, turnstile?: string) => {
+    const done = await call<{ ok: true }>('/api/login', { method: 'POST', body: JSON.stringify({ passphrase, ...(turnstile ? { turnstile } : {}) }) });
+    signIns++;
+    sessionClosed = false;
+    return done;
+  },
+  logout: () => {
+    const stop = new AbortController();
+    const timer = setTimeout(() => stop.abort(), LOGOUT_TIMEOUT_MS);
+    return call<{ ok: true }>('/api/logout', { method: 'POST', signal: stop.signal }).finally(() => clearTimeout(timer));
+  },
   overview: (account?: string) => call<Overview>(`/api/overview${q(account)}`),
   /** The "All accounts" view. */
   accounts: () => call<AccountSummary[]>('/api/accounts'),
@@ -57,14 +116,29 @@ export const api = {
   resources: (account?: string) => call<ResourcesView>(`/api/resources${q(account)}`),
   selfCost: (account?: string) => call<SelfCost>(`/api/self-cost${q(account)}`),
   setup: (account?: string) => call<SetupStatus>(account ? `/api/setup?account=${encodeURIComponent(account)}` : '/api/setup'),
-  completeSetup: (body: { timeZone: string; confirmReadOnly?: true; accountId?: string; accountIds?: string[] }) =>
+  completeSetup: (body: { timeZone: string; confirmReadOnly?: true; accountId?: string; accountIds?: string[]; replacePassphrase?: { current: string; next: string } }) =>
     call<{ ok: true }>('/api/setup/complete', { method: 'POST', body: JSON.stringify(body) }),
   config: () => call<Config>('/api/config'),
-  saveConfig: (config: Config) => call<Config>('/api/config', { method: 'PUT', body: JSON.stringify(config) }),
+  /**
+   * Recording who made changes is sent only when the person changed it in this save, so a page opened
+   * earlier cannot put back an old value. `erase`: they agreed that turning it off erases the stored
+   * names. `resume`: they turned it on. The answer holds the value in force.
+   */
+  saveConfig: (config: Config, recording: 'keep' | 'erase' | 'resume' = 'keep') => {
+    const { recordAttribution, ...rest } = config;
+    const body = recording === 'keep' ? rest
+      : { ...rest, recordAttribution, ...(recording === 'erase' ? { confirmErase: true } : { confirmRecord: true }) };
+    return call<Config & { attributionErasure?: 'done' | 'running' }>('/api/config', { method: 'PUT', body: JSON.stringify(body) });
+  },
   testNotify: (channel: 'email' | 'webhook') => call<{ ok: true }>('/api/notify/test', { method: 'POST', body: JSON.stringify({ channel }) }),
   /** Signs out every session, including this one. */
   changePassphrase: (current: string, next: string) =>
     call<{ ok: true }>('/api/passphrase', { method: 'POST', body: JSON.stringify({ current, next }) }),
+  /** One bounded step. POST, so the identifier stays out of URLs. */
+  personalDataPreview: (identifier: string, cursor: string | null) =>
+    call<PersonDataStep>('/api/personal-data/preview', { method: 'POST', body: JSON.stringify({ identifier, cursor }) }),
+  personalDataRemove: (identifier: string, passphrase: string, confirmation: string, cursor: string | null) =>
+    call<PersonDataStep>('/api/personal-data/remove', { method: 'POST', body: JSON.stringify({ identifier, passphrase, confirmation, cursor }) }),
   acknowledge: (id: string) => call<{ ok: true }>(`/api/findings/${encodeURIComponent(id)}/acknowledge`, { method: 'POST' }),
   snooze: (id: string, days: 7 | 30 | 90) =>
     call<{ ok: true }>(`/api/findings/${encodeURIComponent(id)}/snooze`, { method: 'POST', body: JSON.stringify({ days }) }),

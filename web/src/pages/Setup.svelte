@@ -8,7 +8,7 @@
   import Logo from '../components/Logo.svelte';
   import NotifyChannels from '../components/settings/NotifyChannels.svelte';
   import PassphraseForm from '../components/settings/PassphraseForm.svelte';
-  import { api, ApiError } from '../lib/api';
+  import { api, ApiError, NOT_SIGNED_IN } from '../lib/api';
 
   let { onDone, onSignedOut, onUnauthorized }: {
     onDone: () => void;
@@ -57,28 +57,26 @@
     finishing = true;
     finishError = '';
     try {
+      // The passphrase change is part of this one request: both happen, or neither does.
       await api.completeSetup({
         timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         ...(status?.writeScopes == null && confirmReadOnly ? { confirmReadOnly: true as const } : {}),
         ...(picked.length ? { accountIds: picked } : status?.accountId ? { accountId: status.accountId } : {}),
+        ...(pending ? { replacePassphrase: pending } : {}),
       });
       if (pending) {
-        try {
-          await api.changePassphrase(pending.current, pending.next);
-        } catch (e) {
-          // Setup is already complete; report the passphrase problem but let the user in.
-          finishError = `Setup is done, but the passphrase was not changed: ${(e as Error).message} You can change it later in Settings.`;
-          finishing = false;
-          pending = null;
-          return;
-        }
         onSignedOut('Setup is done and the passphrase changed. Sign in with the new passphrase; the first scan is running.');
         return;
       }
       onDone();
     } catch (e) {
-      if (e instanceof ApiError && e.status === 401) onUnauthorized();
-      else finishError = (e as Error).message;
+      if (e instanceof ApiError && e.status === 401 && e.code === NOT_SIGNED_IN) onUnauthorized();
+      else if (e instanceof ApiError && e.status === 401) {
+        // The current passphrase was wrong. Nothing was saved, so ask for it again in the step before.
+        pending = null;
+        changePass = true;
+        finishError = `${e.message} Setup is not finished. Go back and enter it again.`;
+      } else finishError = (e as Error).message;
     } finally {
       finishing = false;
     }
@@ -157,7 +155,7 @@
                 <Icon name="warning" size={20} />
                 <div>
                   <p class="c-title">Permissions could not be read</p>
-                  <p class="muted">This token cannot list its own permissions. Check it in the Cloudflare dashboard and confirm it only has <strong>Read</strong> permissions.</p>
+                  <p class="muted">This token cannot list its own permissions. Check it in the Cloudflare dashboard and confirm it only has <strong>Read</strong> permissions. Ambersight will not be able to check it later either, and will show that as a finding.</p>
                   <label class="confirm"><input type="checkbox" bind:checked={confirmReadOnly} /> I confirm this token is read-only</label>
                 </div>
               </li>
@@ -194,7 +192,7 @@
         <p class="lead">The dashboard is behind a passphrase, and this visit came through <strong>Cloudflare Access</strong>. That is the setup we recommend.</p>
         <ul class="checks"><li class="ok"><Icon name="shield" size={20} /><div><p class="c-title">Protected by Cloudflare Access</p><p class="muted">This address is behind your Access policy. Make sure every other address of this Worker is too: turn off <code>workers_dev</code> in wrangler.jsonc if you use a custom domain.</p></div></li></ul>
       {:else}
-        <p class="lead">The dashboard is behind a passphrase. Add <strong>Cloudflare Access</strong> in front of it too, so nobody reaches the sign-in page without passing your login first, with MFA or passkeys from your identity provider. It is free for small teams.</p>
+        <p class="lead">On a public address, one passphrase is all that stands between the internet and this dashboard. Add <strong>Cloudflare Access</strong> in front of it, so nobody reaches the sign-in page without passing your login first, with MFA or passkeys from your identity provider. It is free for small teams.</p>
 
         <ol class="guide">
           <li><span class="n">1</span><p>In the Cloudflare dashboard open <strong>Workers & Pages</strong>, then this Worker, then the <strong>Access</strong> tab.</p></li>
@@ -208,7 +206,11 @@
         <div class="pass-head">
           <div>
             <p class="c-title">Change the passphrase</p>
-            <p class="muted">Optional. Replaces the one from deploy. Applied when you finish, then you sign in again.</p>
+            {#if status?.passphraseWeak}
+              <p class="error-text">The passphrase set at deploy is too easy to guess. Choose a stronger one to continue.</p>
+            {:else}
+              <p class="muted">Optional. Replaces the one from deploy. Applied when you finish, then you sign in again.</p>
+            {/if}
           </div>
           {#if !changePass && !pending}<button type="button" onclick={() => (changePass = true)}><Icon name="key" size={16} /> Change</button>{/if}
         </div>
@@ -221,7 +223,7 @@
 
       <div class="actions">
         <button type="button" class="ghost" onclick={() => (step = 0)}>Back</button>
-        <button type="button" class="primary" onclick={() => (step = 2)}>Continue <Icon name="arrow" size={16} /></button>
+        <button type="button" class="primary" disabled={status?.passphraseWeak && !status.setupDone && !pending} onclick={() => (step = 2)}>Continue <Icon name="arrow" size={16} /></button>
       </div>
     {:else}
       <h1 id="step-title">Choose where alerts go</h1>
@@ -232,11 +234,7 @@
       {#if finishError}<p class="error-text" role="alert">{finishError}</p>{/if}
       <div class="actions">
         <button type="button" class="ghost" onclick={() => (step = 1)} disabled={finishing}>Back</button>
-        {#if finishError && !pending && finishError.startsWith('Setup is done')}
-          <button type="button" class="primary" onclick={onDone}>Open dashboard <Icon name="arrow" size={16} /></button>
-        {:else}
-          <button type="button" class="primary" onclick={finish} disabled={finishing}>{finishing ? 'Finishing…' : 'Finish and start the first scan'}</button>
-        {/if}
+        <button type="button" class="primary" onclick={finish} disabled={finishing || (status?.passphraseWeak && !status.setupDone && !pending)}>{finishing ? 'Finishing…' : 'Finish and start the first scan'}</button>
       </div>
     {/if}
   </section>

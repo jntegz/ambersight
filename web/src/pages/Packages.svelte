@@ -35,6 +35,7 @@
     (view?.workers ?? []).map((w) => ({
       ...w,
       behind: w.packages.filter((p) => BEHIND.has(p.gap)).length,
+      notCompared: w.packages.filter((p) => !p.compared).length,
       shown: w.packages.filter((p) => (showDev || !p.dev) && (!onlyOutdated || BEHIND.has(p.gap)) && (!q || p.name.includes(q) || w.name.toLowerCase().includes(q))),
     })).filter((w) => !q || w.name.toLowerCase().includes(q) || w.shown.length),
   );
@@ -43,7 +44,7 @@
 <header class="page-head">
   <div>
     <h1>Packages</h1>
-    <p>Direct npm dependencies of each mapped Worker: the version locked in package-lock.json, and the latest on npm. Read once a day.</p>
+    <p>Direct npm dependencies of each mapped Worker: the version locked in package-lock.json, and the latest on npm. Read once a day. A package the lockfile does not show coming from the public npm registry is marked <strong>not compared</strong>: its name is not sent there, and a package of the same name on npm is not offered as an update.</p>
   </div>
 </header>
 
@@ -73,14 +74,15 @@
         <header class="w-head">
           <h2 id="pk-{w.name}"><a class="mono" href={workerHref(w.name)}>{w.name}</a></h2>
           <span class="muted hint">{w.repo}{w.dir ? `/${w.dir}` : ''} · read {timeAgo(w.checkedAt)}</span>
-          {#if !w.error && w.packages.length}<span class="tag-chip" class:warn={w.behind > 0}>{w.behind} of {w.packages.length} behind</span>{/if}
+          {#if !w.error && w.packages.length > w.notCompared}<span class="tag-chip" class:warn={w.behind > 0}>{w.behind} of {w.packages.length - w.notCompared} behind</span>{/if}
+          {#if !w.error && w.notCompared}<span class="tag-chip" title="The lockfile shows these did not come from the public npm registry">{w.notCompared} not compared</span>{/if}
         </header>
         {#if w.error}
           <p class="err"><Icon name="warning" size={14} /> {w.error}</p>
         {:else if !w.checkedAt}
           <p class="muted hint">Not read yet. It will be on one of the next scans.</p>
         {:else if !w.shown.length}
-          <p class="muted hint">{onlyOutdated ? 'Every direct dependency is on the latest release.' : 'No dependencies match.'}</p>
+          <p class="muted hint">{onlyOutdated ? (w.notCompared ? 'Every dependency compared with npm is on the latest release.' : 'Every direct dependency is on the latest release.') : 'No dependencies match.'}</p>
         {:else}
           <table>
             <thead><tr><th scope="col">Package</th><th scope="col">Locked</th><th scope="col">Latest</th><th scope="col"><span class="sr-only">Behind by</span></th></tr></thead>
@@ -89,7 +91,7 @@
                 <tr>
                   <td class="mono">{p.name}{#if p.dev} <span class="tag-chip">dev</span>{/if}</td>
                   <td class="mono">{p.locked}</td>
-                  <td class="mono">{p.latest ?? '…'}</td>
+                  <td class="mono">{#if p.compared}{p.latest ?? '…'}{:else}<span class="muted">not compared</span>{/if}</td>
                   <td>{#if BEHIND.has(p.gap)}<span class="gap {p.gap}">{p.gap}</span>{/if}</td>
                 </tr>
               {/each}

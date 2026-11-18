@@ -17,6 +17,11 @@ class Stmt {
   exec() {
     const s = this.db.prepare(this.sql);
     const isRead = /^\s*(SELECT|WITH)/i.test(this.sql);
+    // UPDATE ... RETURNING and INSERT ... RETURNING give rows, like D1.
+    if (!isRead && /\bRETURNING\b/i.test(this.sql)) {
+      const rows = s.all(...this.params) as Record<string, unknown>[];
+      return { results: rows.map((r) => ({ ...r })), meta: { rows_read: 0, rows_written: rows.length, changes: rows.length }, success: true };
+    }
     if (isRead) {
       const rows = s.all(...this.params) as Record<string, unknown>[];
       return { results: rows.map((r) => ({ ...r })), meta: { rows_read: rows.length, rows_written: 0 }, success: true };

@@ -22,6 +22,21 @@ export function setSettings(db: D1Database, values: Settings): D1PreparedStateme
     .bind(JSON.stringify(rows));
 }
 
+/**
+ * True at most once per `ms` for this key, however many requests arrive together. One settings row
+ * per key: the keys come from watched accounts and fixed names, so the rows stay few.
+ */
+export async function claimCooldown(db: D1Database, key: string, now: Date, ms: number): Promise<boolean> {
+  const r = await db
+    .prepare(
+      `INSERT INTO settings (key, value) VALUES (?1, ?2)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE settings.value <= ?3`,
+    )
+    .bind(key, now.toISOString(), new Date(now.getTime() - ms).toISOString())
+    .run();
+  return (r.meta.changes ?? r.meta.rows_written ?? 0) > 0;
+}
+
 export function hourFloor(d: Date): Date {
   return new Date(Math.floor(d.getTime() / 3_600_000) * 3_600_000);
 }

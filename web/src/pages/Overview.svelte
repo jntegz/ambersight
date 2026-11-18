@@ -5,7 +5,7 @@
   import BudgetMeter from '../components/BudgetMeter.svelte';
   import CostPanel from '../components/CostPanel.svelte';
   import LimitsPanel from '../components/LimitsPanel.svelte';
-  import { checkOf, groupFindings } from '../../../src/shared/findings';
+  import { checkOf, findingSentence, groupFindings } from '../../../src/shared/findings';
   import { fmtBytes } from '../../../src/shared/limits';
   import FindingGroup from '../components/FindingGroup.svelte';
   import FindingRow from '../components/FindingRow.svelte';
@@ -163,7 +163,7 @@
         {#if top}
           <a class="urgent {top.severity}" href={top.script === '*' ? '#attention-title' : workerHref(top.script)}>
             <Icon name={top.severity} size={16} />
-            <span><span class="urgent-label">Most urgent</span> <span class="mono">{top.script === '*' ? 'Account' : top.script}</span> · {top.message}</span>
+            <span><span class="urgent-label">Most urgent</span> <span class="mono">{top.script === '*' ? 'Account' : top.script}</span> · {findingSentence(top)}</span>
           </a>
         {/if}
       </div>

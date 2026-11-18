@@ -2,6 +2,57 @@
 
 All notable changes to Ambersight. Each version here has a matching [GitHub release](https://github.com/jntegz/ambersight/releases), which is what the update notice in the dashboard reads.
 
+## 1.1.3 (2026-11-18)
+
+A security and privacy release, from a full threat model of Ambersight. Nothing here needs a new Cloudflare service.
+
+**Before you upgrade**
+
+- `npm run deploy` applies migrations 0014 to 0017. Everyone is signed out once.
+- An address named as a client or group digest recipient no longer gets alerts or the all-account digest, unless it is also in the new `DIGEST_OPERATORS` variable or has the client digest of every watched account and is in no group. If that leaves no operator, those e-mails stop and **Settings › Alerts** says so.
+- Existing API tokens expire 90 days after the upgrade and stop receiving people's names. They keep access to all accounts. Scripts that create tokens must now send `accounts` and the passphrase.
+- Requests that change something must come from the dashboard page and send JSON. A script that posts with a session cookie gets 403.
+- A request naming an account this install does not watch gets 404 instead of the first account's data.
+- A weak `ADMIN_PASSPHRASE` has to be replaced during first-time setup.
+- Do not rotate `ADMIN_PASSPHRASE` in the first 15 minutes after deploying: an old unused token could attach itself to the new secret.
+
+**Sign-in and credentials**
+
+- A sign-in attempt costs the same however many addresses have tried, so a flood of attempts can no longer use up the daily D1 read allowance. IPv6 clients are limited per /64, and expired attempts are removed on schedule.
+- During a sign-in pause, a browser that signed in before, or one that passes Turnstile, can still sign in, and a signed-in session can still change the passphrase.
+- Replacing `ADMIN_PASSPHRASE` now always ends access, even after a passphrase was set in Settings.
+- A copy of the database no longer allows fast guessing of `ADMIN_PASSPHRASE`.
+- Common and repetitive passphrases are refused.
+- Dashboard API responses are no longer kept in the browser's HTTP cache, and the dashboard cannot be framed by another site.
+
+**API tokens**
+
+- Tokens expire after 30, 90 or 365 days and stop working when the passphrase changes. Creating one asks for the passphrase.
+- A token reads only the accounts chosen for it. People's names, repositories and personal account names are left out unless you grant them.
+
+**Alerts and digests**
+
+- Client and group recipients get only their own data, each in a separate e-mail.
+- Delivery is tracked per channel. A failing webhook no longer repeats e-mail or skips the digest, chat alerts that do not fit stay due, and overlapping runs do not send twice.
+- Accounts you no longer watch stop alerting.
+- Messages, e-mail, webhooks and the AI summary no longer name people. Names chosen in Cloudflare are shown in quotes.
+
+**Your data**
+
+- **Record who made changes** (**Settings › General**) can be turned off, which also erases the names already stored.
+- **Remove one person from stored data** (**Settings › Security**) finds an exact address or name and replaces it, after a preview and your passphrase.
+- D1 query text is stored without its values, and error messages lose URLs and credential-shaped values.
+- Accounts you stop watching follow the retention setting, cached views are cleared, and Settings says what is kept for how long.
+- Excluded Workers keep only what the account-wide checks need.
+- The offline copy holds less, expires after 7 days and is cleared when the session ends. Timeline and Worker pages need a connection.
+
+**Monitoring and accountability**
+
+- **Admin activity** in Settings records security-relevant changes. Changes that reduce detection also notify the operators, whatever the alert routes or quiet hours.
+- Ambersight rechecks the API token's permissions and raises a critical finding if it gained more than expected. The token template no longer asks for Access by default.
+- The Packages check compares only packages that came from the public npm registry, so private package names are not sent there. `GITHUB_REPO_ALLOWLIST` can limit which repositories it reads.
+- Wildcard patterns run in linear time, CSV exports neutralize spreadsheet formulas, and scans get a lease and cooldown so they do not overlap or pile up.
+
 ## 1.1.2 (2026-11-12)
 
 The biggest release yet: 13 months of history, a page per Worker, an Analytics page, budgets and a read-only API, built from the data each scan already reads. An hourly scan makes fewer Cloudflare API calls than before. Upgrading runs migrations 0011 to 0013; `npm run deploy` applies them.

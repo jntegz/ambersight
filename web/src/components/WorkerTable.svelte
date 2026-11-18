@@ -1,6 +1,7 @@
 <!-- Dense table view of the fleet. Same data as the cards, easier to scan at 50+ Workers. -->
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <script lang="ts">
+  import { findingSentence } from '../../../src/shared/findings';
   import type { WorkerSummary } from '../../../src/shared/types';
   import { num, pct, timeAgo, workerId } from '../lib/api';
   import Sparkline from './Sparkline.svelte';
@@ -29,7 +30,7 @@
               <span class="dot" aria-hidden="true"></span>
               <span class="mono">{w.name}</span>
             </span>
-            {#if w.topFinding}<span class="finding muted">{w.topFinding.message}</span>{/if}
+            {#if w.topFinding}<span class="finding muted">{findingSentence(w.topFinding)}</span>{/if}
           </th>
           <td class="r num">{num(w.requests24h)}</td>
           <td class="r num" class:bad={w.errors24h > 0 && tone(w) === 'critical'}>{num(w.errors24h)}</td>

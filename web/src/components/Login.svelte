@@ -5,7 +5,14 @@
   import { api } from '../lib/api';
   import Logo from './Logo.svelte';
 
-  let { onSignedIn, message = '', turnstileSiteKey = null }: { onSignedIn: () => void; message?: string; turnstileSiteKey?: string | null } = $props();
+  let { onSignedIn, message = '', turnstileSiteKey = null, onRetrySignOut = null, retrying = false }: {
+    onSignedIn: () => void;
+    message?: string;
+    turnstileSiteKey?: string | null;
+    /** Set while the server has not confirmed a sign-out. */
+    onRetrySignOut?: (() => void) | null;
+    retrying?: boolean;
+  } = $props();
   let passphrase = $state('');
   let error = $state('');
   let busy = $state(false);
@@ -62,6 +69,7 @@
     <div class="brand"><span class="draw"><Logo size={64} label="Ambersight" /></span><span class="wordmark">ambersight</span></div>
     <p class="muted">Every Worker on one page. Sign in with the passphrase you set when you deployed.</p>
     {#if message}<p class="message" role="status">{message}</p>{/if}
+    {#if onRetrySignOut}<button type="button" onclick={onRetrySignOut} disabled={retrying}>{retrying ? 'Signing out…' : 'Try signing out again'}</button>{/if}
     <label for="passphrase">Passphrase</label>
     <input id="passphrase" type="password" autocomplete="current-password" bind:value={passphrase} required />
     {#if turnstileSiteKey}<div class="turnstile" bind:this={widgetEl}></div>{/if}

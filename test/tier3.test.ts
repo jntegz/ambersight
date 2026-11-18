@@ -89,7 +89,7 @@ describe('digest', () => {
     expect(d.movers).toEqual([{ name: 'api', now: 9000, before: 1000 }]);
     const { text, html } = renderDigest('t', 'i', [d], { periodLabel: 'This week' });
     expect(text).toContain('KV writes: 90%');
-    expect(text).toContain('api: 9,000 requests, 9.0x up');
+    expect(text).toContain('"api": 9,000 requests, 9.0x up');
     expect(html).toContain('Biggest changes in traffic');
   });
 
@@ -104,7 +104,7 @@ describe('digest', () => {
     await e.DB.batch([upsertAccount(e.DB, { id: 'acc1' }, NOW), upsertAccount(e.DB, { id: 'acc2', name: 'Other' }, NOW), setSettings(e.DB, { config: JSON.stringify(config) })]);
     // The scan sends the digest that is due, with the saved config.
     await runScan(e, NOW, { account: 'acc1' });
-    const client = sent.find((m) => m.subject.startsWith('Ambersight · Client A'));
+    const client = sent.find((m) => m.subject.startsWith('Ambersight · "Client A"'));
     expect(client?.to).toEqual(['client@example.com']);
     expect(sent.some((m) => m.subject.startsWith('Ambersight: '))).toBe(true);
   });

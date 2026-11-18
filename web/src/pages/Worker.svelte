@@ -3,6 +3,7 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { quoted } from '../../../src/shared/findings';
   import type { MetricTotals, Range, WorkerDetail } from '../../../src/shared/types';
   import Chart, { bucketLabel } from '../components/Chart.svelte';
   import FindingRow from '../components/FindingRow.svelte';
@@ -68,7 +69,7 @@
     (data?.deploys ?? []).flatMap((d) => {
       const key = data!.granularity === 'hour' ? `${d.createdOn.slice(0, 13)}:00:00Z` : d.createdOn.slice(0, 10);
       const index = labels.indexOf(key);
-      return index < 0 ? [] : [{ index, label: `Deploy ${d.id.slice(0, 8)}${d.message ? `: ${d.message}` : ''}`, tone: d.correlated.length ? ('critical' as const) : ('muted' as const) }];
+      return index < 0 ? [] : [{ index, label: `Deploy ${d.id.slice(0, 8)}${d.message ? `: ${quoted(d.message)}` : ''}`, tone: d.correlated.length ? ('critical' as const) : ('muted' as const) }];
     }),
   );
   const SEV = { critical: 0, warning: 1, info: 2 } as const;
@@ -214,8 +215,8 @@
                 {@const imp = data.deployImpact.find((x) => x.id === d.id)}
                 <tr class:bad={d.correlated.length > 0}>
                   <td class="num nowrap" title={d.createdOn}>{when(d.createdOn)}</td>
-                  <td>{d.author ?? '–'}{#if d.source}<span class="muted">{' '}· {d.source}</span>{/if}</td>
-                  <td>{d.message ?? ''}{#if d.correlated.length}<span class="flag">Followed by {d.correlated.join(', ')}</span>{/if}</td>
+                  <td>{#if d.author}{d.author}{:else if data.recordsAttribution}–{:else}<span class="muted">Not recorded</span>{/if}{#if d.source}<span class="muted">{' '}· {d.source}</span>{/if}</td>
+                  <td>{d.message ? quoted(d.message, 300) : ''}{#if d.correlated.length}<span class="flag">Followed by {d.correlated.join(', ')}</span>{/if}</td>
                   {#if imp}
                     {@const er = change(rate(imp.after), rate(imp.before))}
                     {@const cp = change(cpuPer(imp.after) ?? 0, cpuPer(imp.before) ?? 0)}
@@ -265,7 +266,7 @@
         {#if data.changes.length}
           <ul class="changes">
             {#each data.changes as c, i (i)}
-              <li><time class="num muted" datetime={c.at}>{when(c.at)}</time><span>{c.detail ?? c.kind}</span></li>
+              <li><time class="num muted" datetime={c.at}>{when(c.at)}</time><span>{c.kind === 'audit' && c.detail ? quoted(c.detail, 300) : (c.detail ?? c.kind)}</span></li>
             {/each}
           </ul>
         {:else}

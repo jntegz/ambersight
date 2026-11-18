@@ -26,10 +26,12 @@ You have a dozen Workers, maybe fifty. One is quietly burning through the free p
 
 The Cloudflare dashboard shows you each Worker on its own. **Ambersight shows you the fleet** and tells you which Workers need attention, and why, in plain sentences.
 
-It runs as **one Worker in your own Cloudflare account**. Every hour it reads your Workers' settings and metrics with a read-only API token, runs 81 checks, and gives you a ranked list of what to fix. One install can watch every account the token can see. Alerts go to e-mail, Slack, Discord, Telegram or any webhook.
+It runs as **one Worker in your own Cloudflare account**. Every hour it reads your Workers' settings and metrics with a read-only API token, runs 83 checks, and gives you a ranked list of what to fix. One install can watch every account the token can see. Alerts go to e-mail, Slack, Discord, Telegram or any webhook.
 
 - **On the Free plan**, the risk is an outage. Past 100,000 requests in a day, every Worker in the account answers with Error 1027 until midnight UTC, and the same goes for 1,000 KV writes, 5 million D1 rows read and the other daily limits. Ambersight warns you at 70% and again at 90% of each one, with the time you will hit it at today's pace.
 - **On Workers Paid**, the risk is the bill. There is no hard spending cap, so a loop, a retry storm or a crawler is billed for every hour it runs. Ambersight compares each Worker's last hour with its usual hour and alerts you at 5x, for requests, CPU time, subrequests and D1, KV, R2, Queues and Durable Object operations. It also catches Durable Object or Queue work that runs while nobody uses the app, and shows the estimated bill in dollars.
+
+> **New in 1.1.3: a security and privacy release.** Tokens limited to chosen accounts, safer sign-in, client digests that hold only that client's data, and tools to stop recording or remove people's names. Read the [upgrade notes](CHANGELOG.md#113-2026-11-18) before you deploy.
 
 > **New in 1.1.2**
 > - **A page for every Worker**: requests, errors, CPU and wall time, limit hits and cron runs over 24 hours to 12 months, with every deploy marked and its before and after.
@@ -88,7 +90,7 @@ This is what a finding looks like (demo fleet):
 
 Every finding comes with the evidence, a suggested fix, a link to the Cloudflare docs and an **Explain in plain words** section with step-by-step instructions. Findings from the same check are grouped, so fourteen Workers with public preview URLs are one row with one fix, not fourteen. Critical and warning come first; info-level housekeeping stays folded away. Acknowledge or snooze one finding or a whole group, or stop a check you don't care about. **Export .md** saves a group as a Markdown checklist.
 
-**Analytics and history.** A page per Worker with traffic, errors, CPU and wall time, limit hits, cron runs and every deploy's before and after, over 24 hours to 12 months. An Analytics page with trends, the bill per month, daily limits and storage growth with the date each cap is reached, time to resolve and which checks are only noise. A findings inbox with each finding's history. Daily history is kept for 13 months, built from the data each scan already reads: no extra API calls. Everything exports as CSV, and a read-only API token serves it as JSON ([docs/api.md](docs/api.md)).
+**Analytics and history.** A page per Worker with traffic, errors, CPU and wall time, limit hits, cron runs and every deploy's before and after, over 24 hours to 12 months. An Analytics page with trends, the bill per month, daily limits and storage growth with the date each cap is reached, time to resolve and which checks are only noise. A findings inbox with each finding's history. Daily history is kept for 13 months, built from the data each scan already reads: no extra API calls. Everything exports as CSV, and a read-only API token serves it as JSON ([docs/api.md](docs/api.md)). Each token reads only the accounts you choose for it, and who deployed or changed something only if you tick that too.
 
 Also included: several accounts in one install with an "All accounts" view, groups and tags, per-Worker thresholds, include and exclude rules, a daily, weekly or monthly digest in your time zone (with a client digest per account), a printable client report, quiet hours, and a **Self-cost** panel that shows exactly what Ambersight itself uses.
 
@@ -120,7 +122,7 @@ Also included: several accounts in one install with an "All accounts" view, grou
     <td width="50%"><img src="docs/screenshots/overview-dark.png" alt="The overview in dark mode"><br><sub><b>Dark mode.</b> Follows your system, or pick one.</sub></td>
   </tr>
   <tr>
-    <td colspan="2" align="center"><img src="docs/screenshots/mobile.png" width="240" alt="The overview on a phone: a client account with a D1 database at 86% of its limit and half of its free requests used"><br><sub><b>On your phone.</b> Install it as an app; it opens offline with the last data.</sub></td>
+    <td colspan="2" align="center"><img src="docs/screenshots/mobile.png" width="240" alt="The overview on a phone: a client account with a D1 database at 86% of its limit and half of its free requests used"><br><sub><b>On your phone.</b> Install it as an app; it opens offline with data up to 7 days old.</sub></td>
   </tr>
 </table>
 
@@ -128,7 +130,7 @@ Also included: several accounts in one install with an "All accounts" view, grou
 
 ## Why you can trust it with your account
 
-- **Read-only, by design.** It only sends `GET` requests and GraphQL queries to the Cloudflare API. The setup wizard checks your token and refuses to continue if it finds a single write permission.
+- **Read-only, by design.** It only sends `GET` requests and GraphQL queries to the Cloudflare API. The setup wizard reads your token's permissions and refuses to continue if it finds a write permission. If the token cannot show its permissions, you check it yourself and confirm. Every day Ambersight reads them again and raises a critical finding for anything it does not expect, or says that it could not check.
 - **Your account, your data.** It runs in your Cloudflare account and stores everything in your own D1 database. Nothing is sent to us. There is no telemetry and no tracking.
 - **No code in your Workers.** No SDK, no tail consumer, no redeploy. It reads what Cloudflare already records.
 - **Free to run.** With 30 Workers it uses well under 1% of the free plan's daily requests and 1 of your 5 Cron Triggers. Its own logs are off.
@@ -149,9 +151,9 @@ Both start with the same step.
 
 ### Step 1: Create a read-only API token
 
-[**Open the pre-filled token form**](https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22account_analytics%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22d1%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_r2%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22queues%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_routes%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22billing%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22page%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22ssl_and_certificates%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22access%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22api_tokens%22%2C%22type%22%3A%22read%22%7D%5D&accountId=*&zoneId=all&name=Ambersight%20read-only). Check that every permission says **Read**, click **Continue to summary**, then **Create Token**. Copy the token now; Cloudflare shows it only once.
+[**Open the pre-filled token form**](https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22account_analytics%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_kv_storage%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22d1%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_r2%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22queues%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22workers_routes%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22billing%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22page%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22ssl_and_certificates%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22api_tokens%22%2C%22type%22%3A%22read%22%7D%5D&accountId=*&zoneId=all&name=Ambersight%20read-only). Check that every permission says **Read**, click **Continue to summary**, then **Create Token**. Copy the token now; Cloudflare shows it only once.
 
-The form opens with the token set to **All accounts** and **All zones**. If you belong to several Cloudflare accounts, the setup wizard asks which ones to watch. You can also narrow the token to those accounts before you create it.
+The form opens with the token set to **All accounts** and **All zones**. If you belong to several Cloudflare accounts, the setup wizard asks which ones to watch. You can also narrow the token to those accounts before you create it, which is worth doing: the token cannot change anything, but it can read a lot, including Worker code and stored data. See [SECURITY.md](SECURITY.md).
 
 <details>
 <summary>Prefer to create the token by hand? These are the permissions.</summary>
@@ -169,8 +171,8 @@ The form opens with the token set to **All accounts** and **All zones**. If you 
 | Zone | SSL and Certificates, DNS | Read | Certificate and dangling-DNS checks |
 | Account | Notifications | Read | Optional: Cloudflare's own notifications on the timeline. Not in the pre-filled link (it has no short key); add it by hand. |
 | Account | Billing | Read | Detecting Free or Paid automatically. Without it, Ambersight uses `PLAN` from `wrangler.jsonc`; you can also set the plan in **Settings › General**. |
-| Account | Access: Apps and Policies | Read | The Access coverage check (off by default) |
-| User | API Tokens | Read | Letting the setup wizard prove the token has no write scopes |
+| Account | Access: Apps and Policies | Read | Optional: the Access coverage check (off by default). Not in the pre-filled link; add it by hand if you turn the check on. |
+| User | API Tokens | Read | Letting the setup wizard and the daily check read the token's own permissions |
 
 Do not add any **Edit** permission. If the token can see several accounts, the setup wizard lets you tick the ones to watch. To fix the choice in config instead, set `CF_ACCOUNT_ID` in `wrangler.jsonc` under `vars` (comma-separated for several).
 </details>
@@ -192,7 +194,7 @@ Do not add any **Edit** permission. If the token can see several accounts, the s
 4. Click **Deploy**. Cloudflare copies the repository into your account, creates the D1 database, applies the migrations and deploys the Worker.
 5. When it finishes, open the link on the deploy page (`https://ambersight.<your-subdomain>.workers.dev`), sign in, and follow the three setup steps. The first scan starts on its own and then runs every hour.
 
-Your copy is connected to **Workers Builds**, so every commit you push to it deploys automatically. To change `wrangler.jsonc` (for example to turn on e-mail), edit the file on GitHub and commit.
+Your copy is connected to **Workers Builds**, so every commit you push to it deploys automatically. To change `wrangler.jsonc` (for example to turn on e-mail), edit the file on GitHub and commit. Whoever can push to that branch can run code with all of Ambersight's secrets, so protect it: see [Updating](#updating).
 
 ### B. Terminal
 
@@ -201,7 +203,7 @@ You need Node.js 22.12 or newer and git.
 ```bash
 git clone https://github.com/jntegz/ambersight.git
 cd ambersight
-npm install
+npm ci
 npx wrangler login
 
 # First deploy: builds the dashboard and creates the D1 database for you
@@ -228,21 +230,26 @@ npm run deploy
 
 Ambersight shows a notice in the dashboard when a new release is out (it asks GitHub for the latest release number and sends nothing about your account; you can turn this off in Settings).
 
-- **Deploy button copy:** in your repository, add this one as a remote and merge the new version. Workers Builds deploys it.
+Update to a release you have looked at, not to whatever a branch holds at that moment. The name below is the release tag from the [releases page](https://github.com/jntegz/ambersight/releases).
+
+- **Deploy button copy:** in your repository, add this one as a remote and merge the release. Workers Builds deploys it.
   ```bash
   git remote add upstream https://github.com/jntegz/ambersight.git
-  git pull upstream main
+  git fetch upstream --tags
+  git merge v1.2.3
   git push
   ```
-- **Terminal install:** `git pull`, then `npm install && npm run deploy`.
+- **Terminal install:** `git fetch --tags && git merge v1.2.3`, then `npm ci && npm run deploy`.
 
 New database migrations are applied by the deploy script in both cases.
+
+Protect the branch you deploy from: require a review and block force pushes (on GitHub, a branch ruleset). A malicious commit or dependency that reaches it runs inside the Worker with every secret and the whole database; [SECURITY.md](SECURITY.md#deploying-safely) lists what that reaches. `npm ci` installs exactly what `package-lock.json` says.
 
 ---
 
 ## Lock it down with Cloudflare Access
 
-The dashboard has its own passphrase login, with hashed sessions, strict cookies and a lockout after wrong attempts ([details in SECURITY.md](SECURITY.md)). That is a good lock. **Cloudflare Access is a better door**: nobody reaches the sign-in page at all unless they first prove who they are with your e-mail, Google, GitHub or another identity provider. It also stops strangers from triggering the sign-in lockout and keeping you out for 15 minutes. Zero Trust is free for small teams.
+The dashboard has its own passphrase login, with hashed sessions, strict cookies and a lockout after wrong attempts ([details in SECURITY.md](SECURITY.md)). That is a good lock. **Cloudflare Access is a better door**: nobody reaches the sign-in page at all unless they first prove who they are with your e-mail, Google, GitHub or another identity provider. It also stops strangers from triggering the sign-in pause, which can keep a browser that has never signed in out for up to 15 minutes. Zero Trust is free for small teams.
 
 Use both. It takes two minutes.
 
@@ -298,7 +305,7 @@ In **Settings › Alerts**, choose per severity whether alerts go to e-mail, the
 
 Nothing, on the Workers Free plan. With 30 Workers:
 
-- **Cron Triggers:** 1 of your 5. It fires every 15 minutes but only scans at the interval you choose (hourly by default); the other runs stop after one D1 read.
+- **Cron Triggers:** 1 of your 5. It fires every 15 minutes but only scans at the interval you choose (hourly by default); the other runs stop after a few small D1 queries.
 - **Requests:** about 100 cron runs plus a few hundred dashboard API calls a day. That is well under 1% of the 100,000 daily requests. Page views are static assets and do not count.
 - **Subrequests:** at most 42 per scan, within the free limit of 50. A typical hourly scan uses fewer than 10.
 - **D1 and CPU:** about 10 D1 calls per scan and a small fraction of the free allowance. Its own logs are off.
@@ -313,7 +320,7 @@ The **Self-cost** panel in Settings shows the measured numbers for your account.
 <details>
 <summary><b>Can Ambersight change or delete anything in my account?</b></summary>
 
-No. It only sends `GET` requests and GraphQL queries, and the token you give it has no write permissions. The setup wizard checks the token's permissions and refuses to continue if it finds any Edit scope. Even if the code had a bug, a read-only token cannot change anything.
+No. It only sends `GET` requests and GraphQL queries, and the token you give it should have no write permissions. The setup wizard checks the token's permissions and refuses to continue if it finds a write permission; if the token cannot show them, you confirm that yourself. A daily check raises a critical finding if the token gains a permission Ambersight does not expect. Even if the code had a bug, a read-only token cannot change anything.
 </details>
 
 <details>
@@ -361,19 +368,27 @@ Probably not. A few Cloudflare analytics datasets (for example scheduled invocat
 <details>
 <summary><b>Can I monitor several Cloudflare accounts?</b></summary>
 
-Yes. If the token can see several accounts, tick the ones to watch in the setup wizard or **Settings › Accounts**. The header gets an account switcher and an **All accounts** view, each account can have its own label and plan, and each can get its own digest by e-mail (handy for clients). Each cron run scans the most overdue account, so with 8 accounts each is scanned about every 2 hours. Add the free scan queue to scan them all on time ([configuration.md](docs/configuration.md#optional-bindings)).
+Yes. If the token can see several accounts, tick the ones to watch in the setup wizard or **Settings › Accounts**. Read-only API tokens can be limited to some of them. Dashboard sessions cannot: there is one shared passphrase, which cannot identify separate people, so everyone signed in sees every watched account. The header gets an account switcher and an **All accounts** view, each account can have its own label and plan, and each can get its own digest by e-mail (handy for clients). Each cron run scans the most overdue account, so with 8 accounts each is scanned about every 2 hours. Add the free scan queue to scan them all on time ([configuration.md](docs/configuration.md#optional-bindings)).
 </details>
 
 <details>
 <summary><b>I forgot my passphrase.</b></summary>
 
-If you never changed it in Settings, set a new one with `npx wrangler secret put ADMIN_PASSPHRASE` (or in the dashboard under **Variables and Secrets**).
+Set a new one with `npx wrangler secret put ADMIN_PASSPHRASE` (or in the dashboard under **Variables and Secrets**). Use a value different from the current secret, then sign in with it.
 
-If you changed it in **Settings › Security**, the new one is stored (hashed) in D1 and takes priority. Remove it, and the `ADMIN_PASSPHRASE` secret applies again:
+This also works if you changed the passphrase in **Settings › Security**: the one stored there (hashed, in D1) counts only while the secret stays the same. The exception is a Settings passphrase that has not been used to sign in since you upgraded to this version, or an install that had no secret. Then remove the stored one, and the `ADMIN_PASSPHRASE` secret applies again:
 
 ```bash
-npx wrangler d1 execute ambersight --remote --command "DELETE FROM settings WHERE key = 'passphrase_hash'"
+npx wrangler d1 execute ambersight --remote --command "DELETE FROM settings WHERE key IN ('passphrase_hash', 'passphrase_binding')"
 ```
+</details>
+
+<details>
+<summary><b>I think someone else has my passphrase or a session.</b></summary>
+
+Replace the secret with a new value, as above. That ends every session, every remembered browser and every read-only API token issued under the old credential, whether or not a passphrase was set in Settings. If you replace it right after upgrading, before anyone has signed in and before the first scheduled run, also revoke tokens created before the upgrade: they cannot be told apart from new ones yet. If a Settings passphrase has not been used since you upgraded, also run the `DELETE` command above, because it has nothing tying it to the secret yet.
+
+Then sign in with the new secret, create new API tokens where you need them and revoke the old ones in **Settings › Security**. If the Cloudflare API token may be exposed too, roll it under **My Profile › API Tokens**.
 </details>
 
 <details>
@@ -398,7 +413,7 @@ No. It is an independent open-source project built on Cloudflare's public APIs. 
 
 ## Documentation
 
-- [Checks](docs/checks.md): all 81 checks, with thresholds, IDs and fixes
+- [Checks](docs/checks.md): all 83 checks, with thresholds, IDs and fixes
 - [How it works](docs/how-it-works.md): what one scan does, what it stores and how it stays inside the free plan
 - [Alerts](docs/alerts.md): channels, defaults, the digest and message formats
 - [Configuration](docs/configuration.md): `wrangler.jsonc`, secrets and every `config.json` field

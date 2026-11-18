@@ -117,7 +117,7 @@ describe('API request checks', () => {
     const { e, cookie } = await signedIn();
     const change = () => worker.fetch(new Request('https://ambersight.me.workers.dev/api/passphrase', {
       method: 'POST',
-      headers: { Cookie: cookie, 'Content-Type': 'application/json', 'CF-Connecting-IP': '6.6.6.6' },
+      headers: { Cookie: cookie, Origin: 'https://ambersight.me.workers.dev', 'Content-Type': 'application/json', 'CF-Connecting-IP': '6.6.6.6' },
       body: JSON.stringify({ current: 'wrong guess', next: 'attacker passphrase' }),
     }), e, ctx);
     const statuses: number[] = [];

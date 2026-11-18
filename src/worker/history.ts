@@ -3,6 +3,8 @@
 // All of it is computed inside D1 from rows the scan already stored: no Cloudflare API calls.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import { isoHour } from './db';
+
 const DAY = 86_400_000;
 
 /** Daily rollups and the finding event log are kept this long (13 months and a bit). */
@@ -82,20 +84,58 @@ export function rollupStatements(db: D1Database, account: string, days: string[]
   ];
 }
 
+/** One account (a scan's own retention) or several (accounts no longer scanned). Always bound as ?1. */
+export type AccountScope = string | string[];
+const whereAccount = (a: AccountScope) => (typeof a === 'string' ? 'account = ?1' : 'account IN (SELECT value FROM json_each(?1))');
+const accountArg = (a: AccountScope) => (typeof a === 'string' ? a : JSON.stringify(a));
+
+/** What Settings calls the history: everything that follows retentionDays. */
+export function accountRetention(db: D1Database, accounts: AccountScope, now: Date, days: number): D1PreparedStatement[] {
+  const cutoff = new Date(now.getTime() - days * DAY);
+  const hour = isoHour(cutoff);
+  const iso = cutoff.toISOString();
+  const del = (table: string, rule: string, value: string) => db.prepare(`DELETE FROM ${table} WHERE ${whereAccount(accounts)} AND ${rule}`).bind(accountArg(accounts), value);
+  return [
+    del('metrics_hourly', 'hour < ?2', hour),
+    del('cron_runs', 'hour < ?2', hour),
+    del('resource_hourly', 'hour < ?2', hour),
+    del('findings', `status = 'resolved' AND last_seen < ?2`, iso),
+    del('deployments', 'created_on < ?2', iso),
+    del('fleet_events', 'at < ?2', iso),
+    del('cf_alerts', 'sent < ?2', iso),
+    del('audit_events', 'at < ?2', iso),
+    // Quota totals stay at least 35 days: the cost estimate needs the whole month so far.
+    del('quota_hourly', 'hour < ?2', isoHour(new Date(now.getTime() - Math.max(days, 35) * DAY))),
+  ];
+}
+
+/** Install-wide tables: any account's refresh may tidy them. */
+export function installRetention(db: D1Database, now: Date, days: number): D1PreparedStatement[] {
+  const iso = new Date(now.getTime() - days * DAY).toISOString();
+  return [
+    db.prepare('DELETE FROM cf_incidents WHERE created_at < ?1').bind(iso),
+    db.prepare('DELETE FROM digest_parts WHERE period < ?1').bind(new Date(now.getTime() - 2 * DAY).toISOString().slice(0, 10)),
+    db.prepare('DELETE FROM usage_daily WHERE day < ?1').bind(iso.slice(0, 10)),
+    db.prepare('DELETE FROM sessions WHERE expires_at < ?1').bind(now.toISOString()),
+  ];
+}
+
 /** Retention for the long-lived tables, run with the daily inventory refresh. */
-export function historyRetention(db: D1Database, account: string, now: Date): D1PreparedStatement[] {
+export function historyRetention(db: D1Database, accounts: AccountScope, now: Date): D1PreparedStatement[] {
   const day = dayOf(new Date(now.getTime() - HISTORY_DAYS * DAY));
   const iso = new Date(now.getTime() - HISTORY_DAYS * DAY).toISOString();
+  const del = (table: string, rule: string, value: string) => db.prepare(`DELETE FROM ${table} WHERE ${whereAccount(accounts)} AND ${rule}`).bind(accountArg(accounts), value);
   return [
-    db.prepare('DELETE FROM metrics_daily WHERE account = ?1 AND day < ?2').bind(account, day),
-    db.prepare('DELETE FROM resource_daily WHERE account = ?1 AND day < ?2').bind(account, day),
-    db.prepare('DELETE FROM quota_daily WHERE account = ?1 AND day < ?2').bind(account, day),
-    db.prepare('DELETE FROM cron_daily WHERE account = ?1 AND day < ?2').bind(account, day),
-    db.prepare('DELETE FROM storage_daily WHERE account = ?1 AND day < ?2').bind(account, day),
-    db.prepare('DELETE FROM finding_events WHERE account = ?1 AND at < ?2').bind(account, iso),
-    // Cached Worker pages pile up one per Worker and range viewed; a day later they are stale anyway.
-    db.prepare(`DELETE FROM view_cache WHERE view LIKE 'worker-%'`),
-    db.prepare('DELETE FROM scan_runs WHERE account = ?1 AND at < ?2').bind(account, new Date(now.getTime() - SCAN_RUN_DAYS * DAY).toISOString()),
+    del('metrics_daily', 'day < ?2', day),
+    del('resource_daily', 'day < ?2', day),
+    del('quota_daily', 'day < ?2', day),
+    del('cron_daily', 'day < ?2', day),
+    del('storage_daily', 'day < ?2', day),
+    del('finding_events', 'at < ?2', iso),
+    // A cached view's ETag holds the hour it was built in, so any older row can never be served
+    // again. Removing them also keeps copies of personal data from outliving the history above.
+    db.prepare('DELETE FROM view_cache WHERE etag NOT LIKE ?1').bind(`%.${now.toISOString().slice(0, 13)}.%`),
+    del('scan_runs', 'at < ?2', new Date(now.getTime() - SCAN_RUN_DAYS * DAY).toISOString()),
   ];
 }
 

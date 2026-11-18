@@ -20,7 +20,11 @@ Ambersight refuses to continue if any permission on the token can change somethi
 
 ### "Permissions could not be read"
 
-The wizard proves the token is read-only by listing its permissions, which needs *User › API Tokens Read*. Without it, you can add the permission, or check the token in the Cloudflare dashboard yourself and tick **I confirm this token is read-only**.
+The wizard proves the token is read-only by listing its permissions, which needs *User › API Tokens Read*. Without it, you can add the permission, or check the token in the Cloudflare dashboard yourself and tick **I confirm this token is read-only**. In that case Ambersight cannot check the token later either, and shows the info finding `health:token-scope-unverified`.
+
+### "Ambersight's API token has permissions it does not need"
+
+The daily check found a permission outside the [list Ambersight expects](checks.md#which-permission-each-group-needs). Remove it under **My Profile › API Tokens**. If it is a read permission you added on purpose, switch this check off from the finding.
 
 ### The plan is wrong
 
@@ -109,6 +113,10 @@ GitHub was unreachable or rate-limited. Nothing else is affected. Turn the updat
 ### "E-mail is not configured"
 
 **Send test** needs all three: `EMAIL_FROM`, `DIGEST_TO` and the `send_email` binding in `wrangler.jsonc`. After changing them, commit or run `npm run deploy`. See [alerts.md](alerts.md#e-mail).
+
+### "No alert or all-account digest was sent by e-mail"
+
+Every address in `DIGEST_TO` is also a client or group recipient, and those get only their own digest. Add your own address to `DIGEST_TO`, or list one in `DIGEST_OPERATORS`. See [who gets what](alerts.md#who-gets-what).
 
 ### E-mail is configured but nothing arrives
 

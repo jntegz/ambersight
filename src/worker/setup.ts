@@ -1,11 +1,14 @@
 // Setup wizard: verify the token, detect account and plan, refuse write scopes.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import { passphraseProblem } from '../shared/passphrase';
 import type { SetupStatus } from '../shared/types';
 import { CfClient } from './cf';
-import { getSettings, listAccounts, pinnedAccounts } from './db';
+import { configFrom, getSettings, listAccounts, pinnedAccounts } from './db';
 import type { Env } from './env';
-import { webhookKind } from './notify';
+import { operatorAddresses, recipients as allowedRecipients, SYSTEM_ALERT_UNDELIVERED, webhookKind } from './notify';
+import { repoAllowlist } from './packages';
+import { safeError } from './redact';
 
 /** Permission groups that can change something. Names look like "Workers Scripts Write" or "... Edit". */
 export function writeScopes(permissions: string[]): string[] {
@@ -17,7 +20,8 @@ export async function setupStatus(env: Env, opts: { accountId?: string; behindAc
   const settings = await getSettings(env.DB);
   const pinned = pinnedAccounts(env.CF_ACCOUNT_ID);
   const watched = pinned ?? (await listAccounts(env.DB)).map((a) => a.id);
-  const recipients = (env.DIGEST_TO ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  const recipients = allowedRecipients(env);
+  const operators = operatorAddresses(env, configFrom(settings), watched);
   const base: SetupStatus = {
     tokenActive: false,
     tokenError: null,
@@ -26,14 +30,16 @@ export async function setupStatus(env: Env, opts: { accountId?: string; behindAc
     detectedPlan: null,
     writeScopes: null,
     readScopes: null,
-    email: { configured: Boolean(env.EMAIL && env.EMAIL_FROM && recipients.length), from: env.EMAIL_FROM || null, to: recipients },
+    email: { configured: Boolean(env.EMAIL && env.EMAIL_FROM && recipients.length), from: env.EMAIL_FROM || null, to: recipients, operators, systemAlertUndelivered: operators.length ? null : (settings[SYSTEM_ALERT_UNDELIVERED] ?? null) },
     webhook: { configured: Boolean(env.WEBHOOK_URL), kind: env.WEBHOOK_URL ? webhookKind(env.WEBHOOK_URL) : null },
     setupDone: settings.setup_done === '1',
     passphraseFromSettings: Boolean(settings.passphrase_hash),
+    passphraseWeak: !settings.passphrase_hash && Boolean(env.ADMIN_PASSPHRASE) && passphraseProblem(env.ADMIN_PASSPHRASE) !== null,
     accounts: [],
     watched,
     accountPinned: Boolean(pinned),
     behindAccess: opts.behindAccess ?? false,
+    githubRepoAllowlist: repoAllowlist(env.GITHUB_REPO_ALLOWLIST),
   };
   if (!env.CF_API_TOKEN || env.CF_API_TOKEN.startsWith('paste-')) return { ...base, tokenError: 'CF_API_TOKEN is not set.' };
   try {
@@ -55,6 +61,6 @@ export async function setupStatus(env: Env, opts: { accountId?: string; behindAc
       readScopes: perms ? perms.filter((p) => !writeScopes([p]).length) : null,
     };
   } catch (e) {
-    return { ...base, tokenError: (e as Error).message };
+    return { ...base, tokenError: safeError((e as Error).message) };
   }
 }

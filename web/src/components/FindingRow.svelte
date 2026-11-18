@@ -1,10 +1,11 @@
 <!-- One finding: severity, sentence, evidence, action, acknowledge and snooze. -->
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <script lang="ts">
-  import { checkOf, cleanupFor, isHiddenEvidence } from '../../../src/shared/findings';
+  import { checkOf, cleanupFor, findingSentence, isHiddenEvidence } from '../../../src/shared/findings';
   import CheckExplain from './CheckExplain.svelte';
   import type { Finding, FindingEvent, FindingListItem } from '../../../src/shared/types';
   import { api, timeAgo, workerHref } from '../lib/api';
+  import { httpUrl } from '../lib/links';
   import Icon, { type IconName } from './Icon.svelte';
   import SnoozeMenu from './SnoozeMenu.svelte';
 
@@ -79,11 +80,11 @@
       {#if finding.status === 'acknowledged'}<span class="pill">Acknowledged{item?.statusAt ? ` ${timeAgo(item.statusAt)}` : ''}</span>{/if}
       {#if item?.reopenCount}<span class="pill recur" title="Resolved and came back">Came back {item.reopenCount}×</span>{/if}
     </p>
-    <p class="message">{finding.message}</p>
+    <p class="message">{findingSentence(finding)}</p>
     {#if !compact}
       <p class="action muted">
         {finding.action}
-        {#if finding.docsUrl}<a href={finding.docsUrl} target="_blank" rel="noopener noreferrer">Docs <Icon name="external" size={12} /></a>{/if}
+        {#if httpUrl(finding.docsUrl)}<a href={httpUrl(finding.docsUrl)} target="_blank" rel="noopener noreferrer">Docs <Icon name="external" size={12} /></a>{/if}
       </p>
       <CheckExplain check={checkOf(finding)} />
     {/if}

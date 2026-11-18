@@ -19,7 +19,10 @@
   import Settings from './pages/Settings.svelte';
   import Setup from './pages/Setup.svelte';
   import Timeline from './pages/Timeline.svelte';
-  import { api, ApiError, num, timeAgo, workerHref } from './lib/api';
+  import { api, ApiError, closeSession, num, onAccountRefused, onSessionEnded, signInCount, timeAgo, UNKNOWN_ACCOUNT, workerHref } from './lib/api';
+  import { forgetFleetData, SIGN_OUT_PENDING } from './lib/browserData';
+  import { httpUrl } from './lib/links';
+  import { clearOfflineCopies } from './lib/offline';
   import { parseHash, safeDecode, type Route } from './lib/route';
   import { currentTheme, setTheme, type Theme } from './lib/theme';
 
@@ -42,13 +45,26 @@
   const multi = $derived((data?.accountCount ?? 1) > 1);
   function remember(id: string | null) {
     selected = id;
-    try { if (id) localStorage.setItem(ACCOUNT_KEY, id); } catch {}
-  }
-  async function loadAccounts() {
     try {
-      accounts = await api.accounts();
+      if (id) localStorage.setItem(ACCOUNT_KEY, id);
+      else localStorage.removeItem(ACCOUNT_KEY);
+    } catch {}
+  }
+  // The remembered account is no longer watched: forget it and load the default one, once.
+  let resettingAccount = false;
+  onAccountRefused(() => {
+    if (resettingAccount) return;
+    resettingAccount = true;
+    remember(null);
+    load().finally(() => (resettingAccount = false));
+  });
+  async function loadAccounts() {
+    const mine = session;
+    try {
+      const list = await api.accounts();
+      if (mine === session) accounts = list;
     } catch {
-      accounts = null;
+      if (mine === session) accounts = null;
     }
   }
   async function selectAccount(id: string) {
@@ -105,16 +121,26 @@
     setTheme(theme);
   }
 
+  /** Refreshes the dashboard. After a sign-out nothing reopens it but signing in. */
   async function load() {
+    if (view !== 'login') await readOverview();
+  }
+
+  async function readOverview() {
+    const mine = session;
     try {
-      data = await api.overview(selected ?? undefined);
-      if (data.account && data.account.id !== selected) remember(data.account.id);
+      const overview = await api.overview(selected ?? undefined);
+      if (mine !== session) return;
+      data = overview;
+      if (overview.account && overview.account.id !== selected) remember(overview.account.id);
       view = 'ready';
-      if (data.accountCount > 1) loadAccounts();
+      if (overview.accountCount > 1) loadAccounts();
       loginMessage = '';
-      if (!config && data.setupDone !== false) api.config().then((c) => (config = c), () => {});
+      if (!config && overview.setupDone !== false) api.config().then((c) => { if (mine === session) config = c; }, () => {});
     } catch (e) {
-      if (e instanceof ApiError && e.status === 401) view = 'login';
+      if (mine !== session) return; // the session ended meanwhile: the sign-in page stays
+      if (e instanceof ApiError && e.code === UNKNOWN_ACCOUNT) return; // the reload above takes over
+      if (e instanceof ApiError && e.status === 401) signedOut();
       else {
         error = (e as Error).message;
         view = 'error';
@@ -123,10 +149,12 @@
   }
 
   async function scanNow() {
+    const mine = session;
     scanning = true;
     notice = null;
     try {
       const r = await api.scan(selected ?? undefined);
+      if (mine !== session) return;
       const parts = r.skipped
         ? ['A scan just ran, so this one was skipped.']
         : [
@@ -137,10 +165,11 @@
       notice = { text: parts.join(' '), tone: r.warnings.length ? 'warn' : 'ok' };
       await load();
     } catch (e) {
-      if (e instanceof ApiError && e.status === 401) view = 'login';
+      if (mine !== session) return;
+      if (e instanceof ApiError && e.status === 401) signedOut();
       else notice = { text: (e as Error).message, tone: 'warn' };
     } finally {
-      scanning = false;
+      if (mine === session) scanning = false;
     }
   }
 
@@ -166,27 +195,82 @@
 
   /** Switch one check off. Its findings disappear now and resolve on the next scan. */
   async function mute(check: string) {
+    const mine = session;
     try {
       const current = config ?? (await api.config());
-      config = await api.saveConfig({ ...current, mutedChecks: [...new Set([...(current.mutedChecks ?? []), check])] });
+      if (mine !== session) return;
+      const saved = await api.saveConfig({ ...current, mutedChecks: [...new Set([...(current.mutedChecks ?? []), check])] });
+      if (mine !== session) return;
+      config = saved;
       notice = { text: 'Check turned off. Turn it back on in Settings › Checks.', tone: 'ok' };
     } catch (e) {
+      if (mine !== session) return;
       notice = { text: (e as Error).message, tone: 'warn' };
     }
   }
 
-  function signedOut(message = '') {
-    // Nothing of the fleet stays in this browser's offline copy after signing out.
-    try { navigator.serviceWorker?.controller?.postMessage('clear'); } catch {}
-    data = null;
-    config = null;
-    loginMessage = message;
-    view = 'login';
+  /** Settings may finish saving after the session ended. */
+  function configSaved(saved: Config) {
+    if (view === 'login') return;
+    config = saved;
+    load();
   }
 
+  // ---- The end of a session, however it ends: nothing of the fleet stays in this browser.
+  /** Counts session ends, so that an answer asked for before one is dropped when it arrives. */
+  let session = 0;
+  function signedOut(message?: string) {
+    session++;
+    closeSession();
+    void clearOfflineCopies();
+    try { forgetFleetData(localStorage); } catch {}
+    selected = null;
+    accounts = null;
+    data = null;
+    config = null;
+    notice = null;
+    query = '';
+    palette = false;
+    scanning = false;
+    // A late refusal reaching the sign-in page leaves what it says about the sign-out alone.
+    if (message !== undefined || view !== 'login') loginMessage = message ?? '';
+    view = 'login';
+  }
+  onSessionEnded(() => signedOut());
+
+  // ---- Signing out. The cookie is HttpOnly, so only the server can end the session: until it has
+  // confirmed, the sign-in page says so, and the attempt is repeated (also after a reload).
+  const SIGN_OUT_UNCONFIRMED = "This browser's copy of your data is gone, but the server did not confirm the sign-out, so your session may still be active. Anyone using this browser could be signed in. Try again, or change the passphrase in Settings to end every session.";
+  let signOutPending = $state((() => { try { return localStorage.getItem(SIGN_OUT_PENDING) === '1'; } catch { return false; } })());
+  let signingOut = $state(false);
+  function markSignOutPending(pending: boolean) {
+    signOutPending = pending;
+    try {
+      if (pending) localStorage.setItem(SIGN_OUT_PENDING, '1');
+      else localStorage.removeItem(SIGN_OUT_PENDING);
+    } catch {}
+  }
+  async function finishSignOut() {
+    if (signingOut) return;
+    const mine = signInCount();
+    signingOut = true;
+    markSignOutPending(true);
+    loginMessage = 'Signing out…';
+    const confirmed = await api.logout().then(() => true, () => false);
+    signingOut = false;
+    if (mine !== signInCount()) return; // signed in again meanwhile
+    markSignOutPending(!confirmed);
+    loginMessage = confirmed ? 'You are signed out.' : SIGN_OUT_UNCONFIRMED;
+  }
   async function signOut() {
-    await api.logout().catch(() => {});
+    // Local data goes first: a slow or failed request must not keep it here.
     signedOut();
+    await finishSignOut();
+  }
+  function signedIn() {
+    session++;
+    markSignOutPending(false);
+    return readOverview();
   }
 
   // ---- Update notice, dismissable per version.
@@ -247,14 +331,21 @@
   let turnstileSiteKey = $state<string | null>(null);
   onMount(async () => {
     const s = await api.session().catch(() => null);
-    // No network: open the last copy the service worker kept, if there is one.
+    turnstileSiteKey = s?.turnstileSiteKey ?? null;
+    // A sign-out the server never confirmed comes first: this browser does not reopen the session.
+    if (signOutPending) {
+      signedOut(SIGN_OUT_UNCONFIRMED);
+      if (navigator.onLine) await finishSignOut();
+      return;
+    }
+    // No network: open the last copy the service worker kept, if there is a recent one.
     if (!s && !navigator.onLine) {
       offline = true;
       await load();
       return;
     }
-    turnstileSiteKey = s?.turnstileSiteKey ?? null;
     if (s?.authenticated) await load();
+    else if (s) signedOut();
     else view = 'login';
   });
 
@@ -268,14 +359,20 @@
   const stale = $derived(!!data?.lastScanAt && Date.now() - new Date(data.lastScanAt).getTime() > 3 * interval * 60_000);
 </script>
 
-<svelte:window onkeydown={onKey} onhashchange={onHash} ononline={() => { offline = false; if (view === 'ready') load(); }} onoffline={() => (offline = true)} />
+<svelte:window onkeydown={onKey} onhashchange={onHash} ononline={() => { offline = false; if (signOutPending) finishSignOut(); else if (view === 'ready') load(); }} onoffline={() => (offline = true)} />
 
 {#if view === 'login'}
-  <Login onSignedIn={load} message={loginMessage} {turnstileSiteKey} />
+  <Login onSignedIn={signedIn} message={loginMessage} {turnstileSiteKey} onRetrySignOut={signOutPending ? finishSignOut : null} retrying={signingOut} />
 {:else if view === 'loading'}
   <main class="center muted"><span class="draw"><Logo size={64} /></span><p>Reading your Workers…</p></main>
+{:else if view === 'error' && route === 'settings'}
+  <!-- Reachable without the overview, so that a setting that breaks it can be changed back. -->
+  <main class="page">
+    <div class="card empty"><p role="alert">The overview could not load: {error}</p><button onclick={load}>Try again</button></div>
+    <Settings workers={[]} groups={[]} account={selected} onAccountsChanged={load} onSaved={configSaved} onSignedOut={signedOut} onUnauthorized={() => signedOut()} />
+  </main>
 {:else if view === 'error'}
-  <main class="center"><p role="alert">{error}</p><button onclick={load}>Try again</button></main>
+  <main class="center"><p role="alert">{error}</p><button onclick={load}>Try again</button><a href="#/settings">Open Settings</a></main>
 {:else if data && data.setupDone === false}
   <Setup onDone={load} onSignedOut={signedOut} onUnauthorized={() => signedOut()} />
 {:else if data}
@@ -341,7 +438,7 @@
     <div class="banner">
       <div class="banner-inner warn" role="status">
         <Icon name="warning" size={18} />
-        <p class="banner-text">You are offline. This is the data from the last time these pages loaded; it updates when you are back online.</p>
+        <p class="banner-text">You are offline. This is the data from the last time these pages loaded, at most 7 days ago; it updates when you are back online. The Timeline and Worker pages need a connection.</p>
       </div>
     </div>
   {/if}
@@ -349,7 +446,7 @@
     <div class="banner">
       <div class="banner-inner update" role="status">
         <Icon name="download" size={18} />
-        <p class="banner-text">Ambersight <strong>{data.update.latest}</strong> is out; you run {data.update.current}. <a href={data.update.url} target="_blank" rel="noopener noreferrer">What's new</a></p>
+        <p class="banner-text">Ambersight <strong>{data.update.latest}</strong> is out; you run {data.update.current}. {#if httpUrl(data.update.url)}<a href={httpUrl(data.update.url)} target="_blank" rel="noopener noreferrer">What's new</a>{/if}</p>
         <button type="button" class="icon-btn" aria-label="Dismiss update notice" onclick={() => dismissUpdate(data!.update!.latest)}><Icon name="close" size={14} /></button>
       </div>
     </div>
@@ -408,7 +505,7 @@
         accountCount={data.accountCount}
         features={data.features ?? null}
         onAccountsChanged={load}
-        onSaved={(c) => { config = c; load(); }}
+        onSaved={configSaved}
         onSignedOut={signedOut}
         onUnauthorized={() => signedOut()}
       />

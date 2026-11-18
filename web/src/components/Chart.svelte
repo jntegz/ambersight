@@ -37,6 +37,7 @@
 </script>
 
 <script lang="ts">
+  import { downloadCsv } from '../lib/download';
   let {
     labels, granularity, series, format, title, height = 200, markers = [], limit = null, stacked = false, partialLast = true, csvName = '',
   }: {
@@ -132,14 +133,7 @@
 
   let showTable = $state(false);
   function csv() {
-    const head = ['time', ...series.map((s) => s.label)];
-    const rows = labels.map((t, i) => [t, ...series.map((s) => s.values[i] ?? '')]);
-    const text = [head, ...rows].map((r) => r.map((c) => (/[",\n]/.test(String(c)) ? `"${String(c).replace(/"/g, '""')}"` : c)).join(',')).join('\n');
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([text], { type: 'text/csv' }));
-    a.download = `${csvName}.csv`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    downloadCsv(`${csvName}.csv`, [['time', ...series.map((s) => s.label)], ...labels.map((t, i) => [t, ...series.map((s) => s.values[i])])]);
   }
 </script>
 

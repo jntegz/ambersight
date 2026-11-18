@@ -11,6 +11,7 @@
   import Sparkline from '../components/Sparkline.svelte';
   import Stat from '../components/Stat.svelte';
   import { api, ApiError, bytes, change, compact, ms, num, pct, usd, workerHref } from '../lib/api';
+  import { downloadCsv } from '../lib/download';
   import { RANGE_LABEL, rangeParam, setParam } from '../lib/route';
 
   type Tab = 'trends' | 'cost' | 'limits' | 'reliability';
@@ -98,14 +99,7 @@
     };
   });
 
-  function csv(name: string, head: string[], body: (string | number | null)[][]) {
-    const esc = (c: string | number | null) => (c == null ? '' : /[",\n]/.test(String(c)) ? `"${String(c).replace(/"/g, '""')}"` : String(c));
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([[head, ...body].map((r) => r.map(esc).join(',')).join('\n')], { type: 'text/csv' }));
-    a.download = `ambersight-${name}-${range}.csv`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  }
+  const csv = (name: string, head: string[], body: (string | number | null)[][]) => downloadCsv(`ambersight-${name}-${range}.csv`, [head, ...body]);
   const workersCsv = () => csv('workers', ['worker', 'requests', 'requests_before', 'errors', 'error_rate', 'cpu_ms_per_request', 'subrequests', 'limit_hits'],
     rows.map((w) => [w.name, w.totals.requests, w.previous.requests, w.totals.errors, rate(w.totals).toFixed(5), cpuPer(w.totals)?.toFixed(3) ?? null, w.totals.subrequests, w.totals.exceeded]));
 

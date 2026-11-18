@@ -1,6 +1,7 @@
 <!-- Deploy timeline: every deploy, newest first, grouped by day; deploys followed by a new finding are flagged. -->
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <script lang="ts">
+  import { quoted } from '../../../src/shared/findings';
   import type { TimelineEntry } from '../../../src/shared/types';
   import GroupFilter from '../components/GroupFilter.svelte';
   import Icon from '../components/Icon.svelte';
@@ -122,6 +123,10 @@
     </div>
   </div>
 
+  {#if entries.some((e) => e.authorNotRecorded)}
+    <p class="hint not-recorded">This install does not record who made each change. You can turn that on under Settings › General.</p>
+  {/if}
+
   {#if !visible.length}
     <div class="card empty">
       <span class="empty-icon"><Icon name="timeline" size={24} /></span>
@@ -145,7 +150,7 @@
                     {#if e.source}<span class="tag-chip">{e.source}</span>{/if}
                     <span class="ago muted">{timeAgo(e.createdOn)}</span>
                   </p>
-                  <p class="msg">{e.message ?? BADGE[e.kind].label}</p>
+                  <p class="msg">{#if !e.message}{BADGE[e.kind].label}{:else if e.kind === 'audit' || e.kind === 'cf-alert'}{quoted(e.message, 300)}{:else}{e.message}{/if}</p>
                   {#if e.author && e.kind === 'audit'}<p class="author muted">by {e.author}</p>{/if}
                 </div>
                 <span></span>
@@ -157,7 +162,7 @@
                     {#each e.groups as g (g)}<span class="tag-chip accent">{g}</span>{/each}
                     <span class="ago muted">{timeAgo(e.createdOn)}</span>
                   </p>
-                  <p class="msg" class:muted={!e.message}>{e.message ?? 'No deploy message'}</p>
+                  <p class="msg" class:muted={!e.message}>{#if e.message}<span class="muted">Deploy message:</span> {quoted(e.message, 300)}{:else}No deploy message{/if}</p>
                   {#if e.author}<p class="author muted">by {e.author}</p>{/if}
                   {#if e.correlated.length}
                     <p class="followed">
@@ -218,6 +223,7 @@
   .ago { font-size: 12px; }
   .msg { margin-top: 2px; font-size: 14px; line-height: 20px; overflow-wrap: anywhere; }
   .author { font-size: 12px; line-height: 16px; margin-top: 2px; }
+  .not-recorded { margin: 10px 2px 0; }
   .followed { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 8px; font-size: 12px; line-height: 16px; color: var(--critical); }
   .followed :global(svg) { flex: none; }
   .problem { padding: 2px 8px; border-radius: 5px; font-weight: 600; background: color-mix(in srgb, var(--critical) 12%, transparent); }

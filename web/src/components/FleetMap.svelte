@@ -1,6 +1,7 @@
 <!-- One cell per Worker, colored by its worst open finding. Cells link to the Worker below. -->
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <script lang="ts">
+  import { findingSentence } from '../../../src/shared/findings';
   import type { WorkerSummary } from '../../../src/shared/types';
   import { num, workerHref, workerId } from '../lib/api';
 
@@ -41,7 +42,7 @@
   {#if tip}
     <div class="tip" class:edge={tip.x < 140} style="left: {tip.x}px; top: {tip.y}px" role="presentation">
       <span class="name mono">{tip.w.name}</span>
-      <span class="row"><span class="swatch {stateOf(tip.w)}"></span>{tip.w.topFinding?.message ?? 'Healthy'}</span>
+      <span class="row"><span class="swatch {stateOf(tip.w)}"></span>{tip.w.topFinding ? findingSentence(tip.w.topFinding) : 'Healthy'}</span>
       <span class="row muted num">{num(tip.w.requests24h)} requests · {num(tip.w.errors24h)} errors · 24 h</span>
     </div>
   {/if}

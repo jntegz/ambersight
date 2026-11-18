@@ -33,6 +33,8 @@ export const CHECK_TITLES: Record<string, string> = {
   'budget:storage-r2-account': 'R2 storage past the free amount',
   'budget:storage-do-account': 'Durable Object storage close to the account limit',
   'health:token-expiry': 'Ambersight\'s API token expires soon',
+  'health:token-scope': 'Ambersight\'s API token has unexpected permissions',
+  'health:token-scope-unverified': 'Ambersight could not verify its API token\'s permissions',
   'runaway:new-worker-burst': 'Traffic burst on a new Worker',
   'usage:new-resource-burst-kv': 'Burst on a new KV namespace',
   'usage:new-resource-burst-d1': 'Burst on a new D1 database',
@@ -170,6 +172,51 @@ function storageCommands(kind: string, ref: string): string[] | null {
 
 /** Evidence keys starting with "_" carry data for the cleanup commands, not for people. */
 export const isHiddenEvidence = (key: string) => key.startsWith('_');
+
+/**
+ * Evidence naming a person: for triage in the dashboard, kept out of e-mail, chat and the AI summary.
+ * Attribution is there to troubleshoot a change, not to assess the people who made it.
+ */
+export const DASHBOARD_ONLY_EVIDENCE = new Set(['actor', 'member', 'changedBy']);
+export const isDashboardOnlyEvidence = (key: string) => DASHBOARD_ONLY_EVIDENCE.has(key);
+
+/**
+ * A name chosen by someone in a Cloudflare account, as quoted data on one line. Quotes, line breaks,
+ * and invisible or direction-changing characters inside it cannot make it look like our own text.
+ */
+export function quoted(name: string, max = 100): string {
+  const flat = name
+    .replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ')
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, '')
+    .replace(/"/g, "'")
+    .trim();
+  return `"${flat.length > max ? `${flat.slice(0, max - 1)}…` : flat}"`;
+}
+
+/** Evidence fields holding a name from Cloudflare, which the finding's sentence may repeat. */
+const NAME_EVIDENCE = ['project', 'pagesDev', 'alsoOn', 'workersDev', 'hosts', 'zone', 'record', 'target', 'binding', 'tailConsumer', 'route', 'worker', 'domain', 'database', 'production', 'other', 'kv', 'd1', 'r2', 'queues', 'do', 'resource'];
+
+/** A span `quoted` made: whole words between quotes. A stray quote inside a name does not open one. */
+const QUOTED_SPAN = '(?<![\\w"])"[^"\\r\\n]*"(?![\\w"])';
+
+/**
+ * A finding's sentence with the names in it quoted, so that text someone chose in Cloudflare reads
+ * as data and not as Ambersight speaking. Done here, for every channel, instead of in each check.
+ * Text already in quotes stays as it is. A known name is tried first, so one that itself contains
+ * quote marks is still quoted whole.
+ */
+export function quoteNames(message: string, evidence: Record<string, unknown>, extra: string[] = []): string {
+  const names = [...new Set([...extra, ...NAME_EVIDENCE.flatMap((k) => (typeof evidence[k] === 'string' ? (evidence[k] as string).split(', ') : []))])]
+    .filter((x) => x.length >= 2 && x.length <= 200)
+    .sort((a, b) => b.length - a.length)
+    .slice(0, 12);
+  if (!names.length) return message;
+  const pattern = names.map((x) => x.replace(/[.*+?^${}()|[\]\\/-]/g, '\\$&')).join('|');
+  return message.replace(new RegExp(`(?<![\\w.-])(?:${pattern})(?![\\w-])|(${QUOTED_SPAN})`, 'g'), (m, span?: string) => (span ? m : quoted(m)));
+}
+
+/** The sentence of a finding as the dashboard shows it. */
+export const findingSentence = (f: Pick<Finding, 'message' | 'evidence' | 'script'>) => quoteNames(f.message, f.evidence, [f.script]);
 
 export function cleanupFor(f: Pick<Finding, 'module' | 'code' | 'script' | 'evidence'>): Cleanup | null {
   if (f.module !== 'zombies') return null;

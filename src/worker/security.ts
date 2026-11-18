@@ -6,6 +6,7 @@
 import type { Config, Thresholds } from '../shared/config';
 import type { Finding } from '../shared/types';
 import { finding, fmt, type WorkerMeta } from './checks';
+import { sqlShape, withoutPerson } from './redact';
 
 export interface ChangeFacts {
   /** Each Worker's latest deployment and its traffic split. */
@@ -71,20 +72,24 @@ export function pagesFindings(c: ChangeFacts): Finding[] {
 
 // ---- Audit log ---------------------------------------------------------------------------
 
-const text = (e: ChangeFacts['audit'][number]) => `${e.product ?? ''} ${e.resourceType ?? ''} ${e.description ?? ''}`.toLowerCase();
+/** What an entry is about. Never the person's name, so a finding does not depend on it being recorded. */
+const text = (e: ChangeFacts['audit'][number]) => `${e.product ?? ''} ${e.resourceType ?? ''} ${withoutPerson(e.description ?? '', e.actor)}`.toLowerCase();
 
-/** New or changed account members, and new API tokens, in the last 7 days. */
+/**
+ * New or changed account members, and new API tokens, in the last 7 days. The sentence names no one:
+ * it travels to e-mail and chat. Who did it stays in the evidence, which only the dashboard shows,
+ * and only while the install records it.
+ */
 export function auditFindings(c: ChangeFacts): Finding[] {
   const out: Finding[] = [];
   for (const e of c.audit) {
     const t = text(e);
-    const who = e.actor ? ` by ${e.actor}` : '';
     const when = e.at.slice(0, 16).replace('T', ' ');
     if (/member/.test(t) && ['create', 'update', 'delete'].includes(e.action)) {
       const verb = e.action === 'create' ? 'added' : e.action === 'delete' ? 'removed' : 'changed';
       out.push(finding(
         'security', '*', `member-change-${e.id}`, e.action === 'delete' ? 'info' : 'warning',
-        `An account member was ${verb}${who} on ${when} UTC.`,
+        `An account member was ${verb} on ${when} UTC.`,
         { action: e.action, ...(e.actor ? { actor: e.actor } : {}), ...(e.resourceId ? { member: e.resourceId } : {}), at: when },
         'If you did not expect this, check Manage Account › Members and the audit log. Acknowledge this finding once you have.',
         DOCS.members,
@@ -93,7 +98,7 @@ export function auditFindings(c: ChangeFacts): Finding[] {
     if (/token/.test(t) && e.action === 'create') {
       out.push(finding(
         'security', '*', `token-created-${e.id}`, 'info',
-        `An API token was created${who} on ${when} UTC.`,
+        `An API token was created on ${when} UTC.`,
         { ...(e.actor ? { actor: e.actor } : {}), at: when },
         'If you did not expect a new token, review it under API Tokens, check its permissions, and roll it if needed.',
         DOCS.audit,
@@ -286,11 +291,12 @@ export function d1QueryFindings(c: ChangeFacts): Finding[] {
     if (q.rowsRead < 1_000_000) continue;
     const ratio = q.rowsRead / Math.max(1, q.rowsReturned);
     if (ratio < 100) continue;
-    const short = q.query.replace(/\s+/g, ' ').trim();
+    // The shape only: what Cloudflare returns could hold literal values from the application.
+    const short = sqlShape(q.query);
     out.push(finding(
       'usage', '*', `d1-inefficient-query-${q.hash}`, q.rowsRead >= 100_000_000 ? 'warning' : 'info',
       `A query on ${q.database} read ${fmt(q.rowsRead)} rows in 24 hours to return ${fmt(q.rowsReturned)} (${fmt(ratio)} read per row returned).`,
-      { database: q.database, query: short.length > 160 ? `${short.slice(0, 157)}...` : short, rowsRead: Math.round(q.rowsRead), runs: q.runs },
+      { database: q.database, ...(short ? { query: short.length > 160 ? `${short.slice(0, 157)}...` : short } : {}), rowsRead: Math.round(q.rowsRead), runs: q.runs },
       'Add an index on the columns in its WHERE or ORDER BY clause. D1 bills rows read, and on the Free plan they count toward 5 million a day.',
       DOCS.d1,
     ));

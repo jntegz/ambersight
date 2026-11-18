@@ -16,7 +16,10 @@ export interface Env {
   CF_ACCOUNT_ID?: string;
   PLAN?: string;
   EMAIL_FROM?: string;
+  /** Every address allowed to get mail. */
   DIGEST_TO?: string;
+  /** Optional: addresses in DIGEST_TO that keep all-account mail even if named as a client or group recipient. */
+  DIGEST_OPERATORS?: string;
   EMAIL?: EmailBinding;
   /** Optional webhook for instant alerts (Worker secret): Slack, Discord, Telegram, ntfy or any JSON endpoint. */
   WEBHOOK_URL?: string;
@@ -29,6 +32,8 @@ export interface Env {
   TURNSTILE_SECRET?: string;
   /** Optional GitHub token for the Packages check (Worker secret): fine-grained, Contents: Read only. */
   GITHUB_TOKEN?: string;
+  /** Optional: owners or owner/name pairs the Packages check may read. Unset: every mapped repository. */
+  GITHUB_REPO_ALLOWLIST?: string;
 }
 
 /** One unit of work on the scan queue. `step` counts continuations of the same account's scan. */

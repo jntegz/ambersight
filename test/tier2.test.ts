@@ -51,7 +51,9 @@ describe('audit log', () => {
       ],
     }));
     expect(f.map((x) => [checkOf(x), x.severity])).toEqual([['security:member-change', 'warning'], ['security:token-created', 'info']]);
-    expect(f[0].message).toContain('boss@example.com');
+    // Who did it is for the dashboard: the sentence goes to e-mail and chat.
+    expect(f[0].message).toBe('An account member was added on 2026-11-09 09:00 UTC.');
+    expect(f[0].evidence).toMatchObject({ actor: 'boss@example.com', member: 'x@example.com' });
   });
 });
 
@@ -252,13 +254,14 @@ describe('Tier 2 end to end', () => {
     );
     const sent: { subject: string; text?: string }[] = [];
     const e = newEnv({ EMAIL_FROM: 'a@example.com', DIGEST_TO: 'me@example.com', EMAIL: { send: async (m) => void sent.push(m) } });
+    await upsertAccount(e.DB, { id: 'acc1' }, NOW).run();
     await e.DB.prepare(`INSERT INTO findings (id, account, script, module, severity, code, message, evidence, action, first_seen, last_seen, status)
       VALUES ('acc1/errors:api:error-rate', 'acc1', 'api', 'errors', 'critical', 'error-rate', '12% of requests failed', '{}', 'a', ?1, ?1, 'open')`).bind(NOW.toISOString()).run();
     const config = defaultConfig();
     await sendAlerts(e, NOW, config);
     expect(calls.some((c) => c.startsWith('www.cloudflarestatus.com'))).toBe(false);
     config.modules.incidents = true;
-    await e.DB.prepare(`UPDATE findings SET notified_at = NULL`).run();
+    await e.DB.prepare(`UPDATE findings SET notified_email_at = NULL, claim_email_until = NULL`).run();
     await sendAlerts(e, NOW, config);
     expect(sent.at(-1)!.text).toContain('Cloudflare reports an active incident: Workers elevated errors');
   });

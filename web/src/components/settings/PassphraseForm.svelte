@@ -1,6 +1,7 @@
 <!-- Change the dashboard passphrase. The parent decides when to apply it (Settings: now; setup: at the end). -->
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <script lang="ts">
+  import { MIN_PASSPHRASE as MIN, passphraseProblem } from '../../../../src/shared/passphrase';
   import Icon from '../Icon.svelte';
 
   let { onSubmit, submitLabel = 'Change passphrase', note = '' }: {
@@ -10,14 +11,15 @@
     note?: string;
   } = $props();
 
-  const MIN = 12;
   let current = $state('');
   let next = $state('');
   let confirm = $state('');
   let error = $state('');
   let busy = $state(false);
 
-  const strength = $derived(next.length === 0 ? 0 : next.length < MIN ? 1 : next.length < 20 ? 2 : 3);
+  /** Set when the new passphrase is long enough but easy to guess. */
+  const weak = $derived(next.length >= MIN ? passphraseProblem(next) : null);
+  const strength = $derived(next.length === 0 ? 0 : next.length < MIN || weak ? 1 : next.length < 20 ? 2 : 3);
   const STRENGTH = ['', 'Too short', 'Good', 'Strong'];
   const matches = $derived(confirm.length > 0 && confirm === next);
   const mismatch = $derived(confirm.length > 0 && confirm !== next);
@@ -25,7 +27,8 @@
   async function submit(e: SubmitEvent) {
     e.preventDefault();
     error = '';
-    if (next.length < MIN) return (error = `The new passphrase needs at least ${MIN} characters.`);
+    const problem = passphraseProblem(next);
+    if (problem) return (error = problem);
     if (next !== confirm) return (error = 'The two new passphrases do not match.');
     if (next === current) return (error = 'The new passphrase is the same as the current one.');
     busy = true;
@@ -55,7 +58,7 @@
         <span class="muted">At least {MIN} characters</span>
       {:else}
         <span class="bars s{strength}" aria-hidden="true"><span></span><span></span><span></span></span>
-        <span class="s-label s{strength}">{STRENGTH[strength]}{#if strength === 1}<span class="muted">&nbsp;· {MIN - next.length} more</span>{/if}</span>
+        <span class="s-label s{strength}">{weak ? 'Too easy to guess' : STRENGTH[strength]}{#if strength === 1 && !weak}<span class="muted">&nbsp;· {MIN - next.length} more</span>{/if}</span>
       {/if}
     </span>
   </label>
@@ -74,6 +77,7 @@
     </span>
   </label>
 
+  {#if weak}<p class="hint full">{weak}</p>{/if}
   {#if error}<p class="error-text full" role="alert">{error}</p>{/if}
 
   <div class="actions full">

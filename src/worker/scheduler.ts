@@ -3,16 +3,38 @@
 // the others: its attempt time counts like a scan when ordering.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import { quoted } from '../shared/findings';
+import { deliverAdminNotices } from './adminNotice';
+import { continueErasure, ERASE_KEY, ERASE_QUERIES } from './attribution';
+import { sweepSignInState } from './auth';
 import { CfClient } from './cf';
 import { bumpRevision } from './history';
+import { runHousekeeping } from './lifecycle';
 import { configFrom, getAccountState, getSettings, listAccounts, pinnedAccounts, setAccountState, upsertAccount, type AccountRow } from './db';
+import { metered } from './meter';
 import { sendSystemAlert } from './notify';
+import { safeError } from './redact';
 import type { Env, ScanMessage } from './env';
 import { runScan, type ScanResult } from './scan';
 
 const MINUTE = 60_000;
 /** Failed scans in a row before Ambersight alerts about itself. */
 export const FAILURE_ALERT_AFTER = 3;
+/**
+ * How long a scan holds its account. Scans take seconds to a few minutes; the limit only matters
+ * when one dies without letting go, and then the next run after it may start.
+ */
+const SCAN_LEASE_MS = 10 * MINUTE;
+const SCAN_LEASE_KEY = 'scan_lease_until';
+/**
+ * D1 queries that follow a scan in the same invocation, which the scan leaves room for. A batch is
+ * one query (see meter.ts). Letting go of the lease is one. Pending notices read the settings, claim
+ * the cooldown, read the rows and the accounts (at most two queries) and write one batch.
+ * Housekeeping reads the accounts and their last scans, and writes one batch.
+ */
+const LEASE_RELEASE_QUERIES = 1;
+const NOTICE_QUERIES = 6;
+const HOUSEKEEPING_QUERIES = 4;
 
 /**
  * Accounts to scan. CF_ACCOUNT_ID (comma-separated) pins the set. Otherwise the accounts chosen
@@ -73,18 +95,42 @@ export function effectiveIntervalMinutes(configured: number, accounts: number, q
   return queue ? configured : Math.max(configured, accounts * 15);
 }
 
-/** Runs one account's scan and records a failure instead of throwing, so the next tick moves on. */
-export async function scanAccount(env: Env, account: string, now = new Date(), force = true, continuation = false): Promise<ScanResult | { error: string }> {
+/** Takes the account's scan lease in one atomic write. Returns its value, or null if another scan holds it. */
+async function takeScanLease(db: D1Database, account: string, now: Date): Promise<string | null> {
+  const until = new Date(now.getTime() + SCAN_LEASE_MS).toISOString();
+  const r = await db
+    .prepare(
+      `INSERT INTO account_state (account, key, value) VALUES (?1, ?2, ?3)
+       ON CONFLICT(account, key) DO UPDATE SET value = excluded.value WHERE account_state.value <= ?4`,
+    )
+    .bind(account, SCAN_LEASE_KEY, until, now.toISOString())
+    .run();
+  return (r.meta.changes ?? r.meta.rows_written ?? 0) > 0 ? until : null;
+}
+
+/**
+ * Runs one account's scan and records a failure instead of throwing, so the next tick moves on.
+ * Two scans of one account never overlap: the second is skipped, as a scan inside its interval is.
+ * `d1` is what the caller already spent of the invocation's D1 queries and still needs afterwards.
+ */
+export async function scanAccount(
+  env: Env, account: string, now = new Date(), force = true, continuation = false, d1: { used?: number; reserve?: number } = {},
+): Promise<ScanResult | { error: string }> {
   const db = env.DB;
+  const { db: counted, meter } = metered(db);
+  let lease: string | null = null;
   try {
-    return await runScan(env, now, { account, force, continuation });
+    lease = await takeScanLease(counted, account, now);
+    if (!lease) return { skipped: true, workers: 0, findings: 0, subrequests: 0, warnings: [] };
+    return await runScan(env, now, { account, force, continuation, d1Used: (d1.used ?? 0) + meter.queries, d1Reserve: (d1.reserve ?? 0) + LEASE_RELEASE_QUERIES });
   } catch (e) {
-    const message = (e as Error).message || 'Unknown error';
+    // The one form of the error that is stored, sent and returned.
+    const message = safeError((e as Error).message || 'Unknown error');
     const state = await getAccountState(db, account);
     const failures = Number(state.scan_failures ?? 0) + 1;
     const update: Record<string, string> = {
       last_attempt_at: now.toISOString(),
-      last_scan_error: message.slice(0, 500),
+      last_scan_error: message,
       scan_failures: String(failures),
     };
     // Three failures in a row: say so, at most once a day, on the critical-alert channel.
@@ -94,7 +140,7 @@ export async function scanAccount(env: Env, account: string, now = new Date(), f
       const name = config.accounts[account]?.label ?? (await db.prepare('SELECT name FROM accounts WHERE id = ?1').bind(account).first<{ name: string | null }>())?.name ?? account;
       const sent = await sendSystemAlert(
         env, now, config,
-        `The last ${failures} scans of ${name} failed: ${message.slice(0, 200)}`,
+        `The last ${failures} scans of ${quoted(name)} failed: ${message}`,
         'Ambersight cannot see this account until this is fixed. Check that the CF_API_TOKEN secret is still valid and has not expired, then press Scan now.',
       ).catch(() => false);
       if (sent) update.failure_alert_at = now.toISOString();
@@ -102,6 +148,9 @@ export async function scanAccount(env: Env, account: string, now = new Date(), f
     // The failed-scan banner is part of the cached overview: mark the change.
     await db.batch([setAccountState(db, account, update), bumpRevision(db)]);
     return { error: message };
+  } finally {
+    // Only our own lease: if it expired, another scan may hold the account by now.
+    if (lease) await db.prepare('DELETE FROM account_state WHERE account = ?1 AND key = ?2 AND value = ?3').bind(account, SCAN_LEASE_KEY, lease).run().catch((e) => console.error(e));
   }
 }
 
@@ -110,19 +159,30 @@ export async function scanAccount(env: Env, account: string, now = new Date(), f
  * due account on the queue, where each scan runs in its own invocation with its own budget.
  */
 export async function scheduledRun(env: Env, now = new Date()): Promise<{ account: string; result: ScanResult | { error: string } } | { queued: string[] } | null> {
-  const settings = await getSettings(env.DB);
+  // What this run spends before the scan comes out of the same 50 D1 queries.
+  const { db, meter } = metered(env.DB);
+  // Runs before setup too: sign-in is open from the first deploy. A failure must not stop the scan.
+  await sweepSignInState(db, now.getTime()).catch((e) => console.error(e));
+  const settings = await getSettings(db);
   if (settings.setup_done !== '1') return null;
-  const due = await dueAccounts(env, now);
-  if (!due.length) return null;
-  if (env.SCAN_QUEUE) {
+  const due = await dueAccounts({ ...env, DB: db }, now);
+  let outcome: { account: string; result: ScanResult | { error: string } } | { queued: string[] } | null = null;
+  if (due.length && env.SCAN_QUEUE) {
     // Marked as attempted now, so the next tick does not queue them again while they wait.
     await env.DB.batch(due.map((a) => setAccountState(env.DB, a.id, { last_attempt_at: now.toISOString() })));
     await env.SCAN_QUEUE.sendBatch(due.map((a) => ({ body: { kind: 'scan', account: a.id } satisfies ScanMessage })));
-    return { queued: due.map((a) => a.id) };
+    outcome = { queued: due.map((a) => a.id) };
+  } else if (due.length) {
+    const account = due[0].id;
+    await setAccountState(db, account, { last_attempt_at: now.toISOString() }).run();
+    const reserve = HOUSEKEEPING_QUERIES + (settings.admin_notice_pending === '1' ? NOTICE_QUERIES : 0) + (settings[ERASE_KEY] ? ERASE_QUERIES : 0);
+    outcome = { account, result: await scanAccount(env, account, now, true, false, { used: meter.queries, reserve }) };
   }
-  const account = due[0].id;
-  await setAccountState(env.DB, account, { last_attempt_at: now.toISOString() }).run();
-  return { account, result: await scanAccount(env, account, now, true) };
+  // After the scan, so they never take its budget, and neither may fail it.
+  if (settings.admin_notice_pending === '1') await deliverAdminNotices(env, now).catch((e) => console.error(e));
+  await continueErasure(env.DB, now, settings).catch((e) => console.error(e));
+  await runHousekeeping(env, now, settings).catch((e) => console.error(e));
+  return outcome;
 }
 
 /** Continuations per account per scan: enough for a few hundred Workers' details or zones. */
@@ -133,9 +193,10 @@ export const MAX_CONTINUATIONS = 20;
  * zones still to read) queues a continuation, which runs as a new invocation with a fresh budget.
  */
 export async function handleQueueMessage(env: Env, msg: ScanMessage, now = new Date()): Promise<ScanResult | { error: string }> {
-  const accounts = await activeAccounts(env, now);
+  const { db, meter } = metered(env.DB);
+  const accounts = await activeAccounts({ ...env, DB: db }, now);
   if (!accounts.some((a) => a.id === msg.account)) return { error: 'Account is no longer watched.' };
-  const result = await scanAccount(env, msg.account, now, true, msg.kind === 'continue');
+  const result = await scanAccount(env, msg.account, now, true, msg.kind === 'continue', { used: meter.queries });
   const step = (msg.step ?? 0) + 1;
   if (!('error' in result) && env.SCAN_QUEUE && step <= MAX_CONTINUATIONS && ((result.detailRemaining ?? 0) > 0 || (result.zonesRemaining ?? 0) > 0)) {
     await env.SCAN_QUEUE.send({ kind: 'continue', account: msg.account, step } satisfies ScanMessage);

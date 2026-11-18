@@ -111,6 +111,8 @@ export interface Config {
   timeZone: string;
   retentionDays: number;
   updateCheck: boolean;
+  /** Store who deployed and who made audit-log changes. Turning it off erases the names already stored. */
+  recordAttribution: boolean;
   /** Per-account settings, keyed by Cloudflare account ID. */
   accounts: Record<string, AccountSettings>;
   /**
@@ -174,6 +176,7 @@ export function defaultConfig(): Config {
     timeZone: 'UTC',
     retentionDays: 30,
     updateCheck: true,
+    recordAttribution: true,
     accounts: {},
     packageRepos: {},
   };
@@ -356,6 +359,7 @@ export function parseConfig(input: unknown): Config {
 
   if (typeof v.timeZone !== 'string' || !isValidTimeZone(v.timeZone)) throw new ConfigError('timeZone must be an IANA time zone such as Europe/Prague.');
   if (typeof v.updateCheck !== 'boolean') throw new ConfigError('updateCheck must be true or false.');
+  if (typeof v.recordAttribution !== 'boolean') throw new ConfigError('recordAttribution must be true or false.');
 
   return {
     version: 1,
@@ -386,6 +390,7 @@ export function parseConfig(input: unknown): Config {
     timeZone: v.timeZone,
     retentionDays: Math.round(num(v.retentionDays, [7, 90], 'retentionDays')),
     updateCheck: v.updateCheck,
+    recordAttribution: v.recordAttribution,
     accounts,
     packageRepos,
   };
@@ -396,11 +401,45 @@ export function repoFor(config: Config, account: string, name: string): PackageR
   return config.packageRepos[`${account}:${name}`] ?? config.packageRepos[name];
 }
 
-/** `*` wildcard match, case-sensitive like Worker names. */
+/** The characters `*` does not match, as `.` in a regular expression does not. */
+const LINE_BREAK = /([\n\r\u2028\u2029])/;
+
+/**
+ * `*` wildcard match on text without line breaks. Each literal piece is looked for once, left to
+ * right, from where the previous one ended: the earliest place always leaves the most room for the
+ * rest, so nothing is retried and the cost does not grow with the number of wildcards.
+ */
+function matchLine(pattern: string, text: string): boolean {
+  const pieces = pattern.split('*');
+  if (pieces.length === 1) return pattern === text;
+  const first = pieces[0];
+  const last = pieces[pieces.length - 1];
+  if (text.length < first.length + last.length || !text.startsWith(first) || !text.endsWith(last)) return false;
+  const end = text.length - last.length;
+  let at = first.length;
+  for (let i = 1; i < pieces.length - 1; i++) {
+    if (!pieces[i]) continue;
+    const hit = text.indexOf(pieces[i], at);
+    if (hit < 0 || hit + pieces[i].length > end) return false;
+    at = hit + pieces[i].length;
+  }
+  return true;
+}
+
+/**
+ * `*` wildcard match over the whole name, case-sensitive like Worker names. `*` matches any run of
+ * characters except line breaks; every other character stands for itself. Patterns come from saved
+ * or imported settings, so this runs in time bounded by their length, unlike a regular expression
+ * built from them, whose backtracking can stop a scan.
+ */
 export function matchPattern(pattern: string, name: string): boolean {
   if (!pattern.includes('*')) return pattern === name;
-  const re = new RegExp(`^${pattern.split('*').map((p) => p.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`);
-  return re.test(name);
+  if (!LINE_BREAK.test(pattern) && !LINE_BREAK.test(name)) return matchLine(pattern, name);
+  // A line break can only be matched by the same line break in the pattern, so the two must have
+  // the same breaks in the same order, and each line is matched on its own.
+  const want = pattern.split(LINE_BREAK);
+  const have = name.split(LINE_BREAK);
+  return want.length === have.length && want.every((p, i) => (i % 2 ? p === have[i] : matchLine(p, have[i])));
 }
 
 /** Groups a Worker belongs to: configured groups whose patterns match, plus its Cloudflare tags. */

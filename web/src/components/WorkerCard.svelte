@@ -1,19 +1,18 @@
 <!-- Worker card: quiet when healthy, colored edge and top finding when not. -->
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <script lang="ts">
+  import { findingSentence } from '../../../src/shared/findings';
   import type { WorkerSummary } from '../../../src/shared/types';
   import { num, pct, timeAgo, workerId } from '../lib/api';
+  import { entryLink } from '../lib/links';
   import Icon from './Icon.svelte';
   import Sparkline from './Sparkline.svelte';
 
   let { worker }: { worker: WorkerSummary } = $props();
   const hot = $derived(worker.score > 0);
   const critical = $derived(worker.topFinding?.severity === 'critical');
-  // Route patterns like "example.com/api/*" link to their base; host wildcards are not linkable.
-  const entryHref = $derived.by(() => {
-    const ep = worker.entryPoints?.[0]?.replace(/\/\*$/, '');
-    return ep && !ep.includes('*') ? `https://${ep}` : null;
-  });
+  const entry = $derived(entryLink(worker.entryPoints?.[0]));
+  const entryTitle = $derived(entry ? [`Opens ${entry.href}`, ...(worker.entryPoints.length > 1 ? ['', 'All routes:', ...worker.entryPoints] : [])].join('\n') : '');
   const status = $derived(critical ? 'Critical' : hot ? 'Needs attention' : 'Healthy');
 </script>
 
@@ -34,13 +33,13 @@
   </div>
   <Sparkline values={worker.spark} {hot} label="Requests per day, last 7 days, for {worker.name}" />
   {#if worker.topFinding}
-    <p class="top"><Icon name={worker.topFinding.severity} size={16} /> {worker.topFinding.message}</p>
+    <p class="top"><Icon name={worker.topFinding.severity} size={16} /> {findingSentence(worker.topFinding)}</p>
   {/if}
   {#if worker.entryPoints?.length}
     <p class="entry muted">
-      {#if entryHref}
-        <a href={entryHref} target="_blank" rel="noopener noreferrer" title={worker.entryPoints.join('\n')}>
-          <Icon name="exposure" size={12} /><span>{worker.entryPoints[0]}</span>
+      {#if entry}
+        <a href={entry.href} target="_blank" rel="noopener noreferrer" title={entryTitle}>
+          <Icon name="exposure" size={12} /><span class="host">{entry.host}</span>{#if entry.path}<span class="path">{entry.path}</span>{/if}
         </a>
       {:else}
         <span class="route" title={worker.entryPoints.join('\n')}><Icon name="exposure" size={12} /><span>{worker.entryPoints[0]}</span></span>
@@ -89,4 +88,9 @@
   .route { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
   .entry a span, .route span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); }
   .entry :global(svg) { flex: none; }
+  /* The destination stays readable: a long path gives way first. */
+  .entry a { gap: 0; }
+  .entry a :global(svg) { margin-right: 5px; }
+  .entry .host { flex: 0 1 auto; color: var(--ink); }
+  .entry .path { flex: 1 100 0; min-width: 0; }
 </style>

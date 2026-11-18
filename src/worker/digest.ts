@@ -4,12 +4,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { groupsFor, inScope, type Config } from '../shared/config';
+import { CHECK_TITLES, checkOf, quoted, SAFE_NAME } from '../shared/findings';
 import { FREE_DAILY, type QuotaMetric, type StorageKind } from '../shared/limits';
-import type { Severity } from '../shared/types';
+import type { Finding } from '../shared/types';
 import { estimate } from './cost';
 import { isoHour, planFrom, utcMidnight } from './db';
 import type { Env } from './env';
-import { esc, evidenceText, FONT, label, n, type Row } from './notify';
+import { esc, findingHtml, findingText, FONT, n, type Row } from './notify';
+import { activeAccounts } from './scheduler';
 
 const DAY = 86_400_000;
 const MAX_ROWS = 25;
@@ -43,13 +45,12 @@ export async function digestData(env: Env, now: Date, config: Config, days: numb
   const before = new Date(since.getTime() - days * DAY);
   const monthStart = isoHour(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)));
   const sevs = (['critical', 'warning', 'info'] as const).filter((s) => config.alerts[s].digest);
-  const accountsR = await db.prepare('SELECT id, name, detected_plan FROM accounts WHERE enabled = 1 ORDER BY added_at, id').all<{ id: string; name: string | null; detected_plan: string | null }>();
-  const accounts = accountsR.results.filter((a) => !only || only.includes(a.id));
+  const accounts = (await activeAccounts(env, now)).filter((a) => !only || only.includes(a.id));
   // Installs from before multi-account support may have findings under "" until the first scan.
   const ids = JSON.stringify(accounts.length ? accounts.map((a) => a.id) : ['']);
   const [findings, totals, events, deploys, workers, quota, movers, month, storage, alerts, hk] = await db.batch([
     db.prepare(
-      `SELECT id, account, script, severity, message, action, evidence FROM findings
+      `SELECT id, account, script, severity, module, code, message, action, evidence FROM findings
        WHERE status = 'open' AND account IN (SELECT value FROM json_each(?1)) AND severity IN (SELECT value FROM json_each(?2))
        ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, first_seen DESC LIMIT 500`,
     ).bind(ids, JSON.stringify(sevs)),
@@ -151,11 +152,13 @@ const ratio = (now: number, before: number) => (now >= before ? `${(now / before
 
 /**
  * HTML and text for a digest or a report. `periodLabel` is "This week", "Today" or "Last 30 days".
- * With several accounts, each gets its own section.
+ * With several accounts, each gets its own section. Names from Cloudflare appear quoted. Deploy
+ * authors are shown only with `authors`, which the operators' digest sets: client digests and
+ * reports go to people outside the team and leave them out.
  */
 export function renderDigest(
   title: string, intro: string, digests: AccountDigest[],
-  opts: { periodLabel: string; summary?: string | null; report?: boolean } ,
+  opts: { periodLabel: string; summary?: string | null; report?: boolean; authors?: boolean },
 ): { html: string; text: string } {
   const multi = digests.length > 1;
   const H = (h: string) => `<tr><td style="font:600 15px/22px ${FONT};color:#2B211B;padding-top:20px">${h}</td></tr>`;
@@ -163,23 +166,21 @@ export function renderDigest(
   const html: string[] = [];
   const text: string[] = [title, intro, ''];
   if (opts.summary) {
-    html.push(`<tr><td style="font:400 15px/23px ${FONT};color:#2B211B;background:#FBF1E6;border-radius:10px;padding:14px 16px">${esc(opts.summary)}<div style="font:400 12px/18px ${FONT};color:#6E6259;padding-top:6px">Summary written by Workers AI from the findings below.</div></td></tr>`);
-    text.push(opts.summary, '');
+    html.push(`<tr><td style="font:400 15px/23px ${FONT};color:#2B211B;background:#FBF1E6;border-radius:10px;padding:14px 16px">${esc(opts.summary)}<div style="font:400 12px/18px ${FONT};color:#6E6259;padding-top:6px">Summary written by Workers AI. The findings below are the record.</div></td></tr>`);
+    text.push(opts.summary, '(Summary written by Workers AI. The findings below are the record.)', '');
   }
   for (const d of digests) {
     if (multi) {
-      html.push(`<tr><td style="font:600 18px/26px ${FONT};color:#2B211B;padding-top:28px;border-bottom:2px solid #EADFD5">${esc(d.label)}</td></tr>`);
-      text.push(`== ${d.label} ==`);
+      html.push(`<tr><td style="font:600 18px/26px ${FONT};color:#2B211B;padding-top:28px;border-bottom:2px solid #EADFD5">${esc(quoted(d.label))}</td></tr>`);
+      text.push(`== ${quoted(d.label)} ==`);
     }
     const rows = d.rows.slice(0, MAX_ROWS);
-    html.push(...rows.map((r) => `<tr><td style="padding:12px 0;border-bottom:1px solid #EADFD5">
-        <div style="font:600 14px/20px ${FONT};color:${r.severity === 'critical' ? '#C2361B' : r.severity === 'warning' ? '#B3440B' : '#6E6259'}">${label(r.severity as Severity)} · ${esc(r.script === '*' ? 'Account' : r.script)}</div>
-        <div style="font:400 15px/22px ${FONT};color:#2B211B">${esc(r.message)}</div>
-        <div style="font:400 13px/20px ${FONT};color:#6E6259">${esc(r.action)}</div>
-        ${r.evidence ? `<div style="font:400 12px/18px ${FONT};color:#6E6259">${esc(evidenceText(r.evidence))}</div>` : ''}</td></tr>`));
+    // The section heading names the account, so the rows do not repeat it.
+    const own = rows.map((r) => ({ ...r, account: undefined }));
+    html.push(...own.map(findingHtml));
     if (!rows.length) html.push(P('No open findings.'));
     if (d.rows.length > rows.length) html.push(P(`<span style="color:#6E6259">And ${n(d.rows.length - rows.length)} more in the dashboard.</span>`));
-    text.push(...(rows.length ? rows.map((r) => `[${r.severity}] ${r.script === '*' ? 'Account' : r.script}: ${r.message}\n  ${r.action}`) : ['No open findings.']));
+    text.push(...(own.length ? own.map(findingText) : ['No open findings.']));
 
     html.push(H(opts.periodLabel), P(`${n(d.requests)} requests · ${n(d.errors)} errors${d.cfAlerts ? ` · ${n(d.cfAlerts)} Cloudflare notification${d.cfAlerts === 1 ? '' : 's'}` : ''}`));
     text.push('', `${opts.periodLabel}: ${n(d.requests)} requests, ${n(d.errors)} errors`);
@@ -192,8 +193,8 @@ export function renderDigest(
       text.push('Free plan limits, busiest day:', ...d.headroom.map((h) => `  ${h.label}: ${pctText(h.peak)}`));
     }
     if (d.movers.length) {
-      html.push(H('Biggest changes in traffic'), P(d.movers.map((m) => `${esc(m.name)}: ${n(m.now)} requests, ${ratio(m.now, m.before)}`).join('<br>')));
-      text.push('Biggest changes in traffic:', ...d.movers.map((m) => `  ${m.name}: ${n(m.now)} requests, ${ratio(m.now, m.before)}`));
+      html.push(H('Biggest changes in traffic'), P(d.movers.map((m) => `${esc(quoted(m.name))}: ${n(m.now)} requests, ${ratio(m.now, m.before)}`).join('<br>')));
+      text.push('Biggest changes in traffic:', ...d.movers.map((m) => `  ${quoted(m.name)}: ${n(m.now)} requests, ${ratio(m.now, m.before)}`));
     }
     if (d.housekeeping.open || d.housekeeping.resolved) {
       const hk = `${n(d.housekeeping.open)} open, ${n(d.housekeeping.resolved)} resolved in this period`;
@@ -201,11 +202,11 @@ export function renderDigest(
       text.push(`Housekeeping: ${hk}`);
     }
     if (d.added.length || d.removed.length) {
-      html.push(H('Fleet changes'), P([...d.added.map((s) => `+ ${esc(s)}`), ...d.removed.map((s) => `− ${esc(s)}`)].join('<br>')));
-      text.push(...d.added.map((s) => `+ ${s}`), ...d.removed.map((s) => `- ${s}`));
+      html.push(H('Fleet changes'), P([...d.added.map((s) => `+ ${esc(quoted(s))}`), ...d.removed.map((s) => `− ${esc(quoted(s))}`)].join('<br>')));
+      text.push(...d.added.map((s) => `+ ${quoted(s)}`), ...d.removed.map((s) => `- ${quoted(s)}`));
     }
     if (d.deploys.length) {
-      html.push(H(`Deploys (${d.deploys.length})`), P(d.deploys.slice(0, 15).map((x) => `${esc(x.created_on.slice(0, 16).replace('T', ' '))} UTC · ${esc(x.script)}${x.author ? ` · ${esc(x.author)}` : ''}`).join('<br>')));
+      html.push(H(`Deploys (${d.deploys.length})`), P(d.deploys.slice(0, 15).map((x) => `${esc(x.created_on.slice(0, 16).replace('T', ' '))} UTC · ${esc(quoted(x.script))}${opts.authors && x.author ? ` · ${esc(x.author)}` : ''}`).join('<br>')));
       text.push(`Deploys: ${d.deploys.length}`);
     }
     text.push('');
@@ -226,19 +227,45 @@ export function renderDigest(
 }
 
 /**
- * A few plain sentences on what to fix first, from Workers AI (optional AI binding). Only the
- * findings' text is sent, and Workers AI runs inside Cloudflare. Any failure skips the summary.
+ * What the AI summary is told: one line per check and severity, with the check's fixed title, how
+ * many findings it has and which Workers. No finding text goes in, so neither a person's name nor
+ * a sentence someone wrote into a resource name or the audit log reaches the model.
+ */
+export function aiFacts(digests: AccountDigest[]): string[] {
+  const groups = new Map<string, { severity: string; title: string; count: number; workers: Set<string> }>();
+  for (const r of digests.flatMap((d) => d.rows)) {
+    const check = r.module && r.code ? checkOf({ module: r.module as Finding['module'], code: r.code }) : 'other';
+    const key = `${r.severity}|${check}`;
+    const g = groups.get(key) ?? { severity: r.severity, title: CHECK_TITLES[check] ?? check, count: 0, workers: new Set<string>() };
+    g.count++;
+    if (SAFE_NAME.test(r.script)) g.workers.add(r.script);
+    groups.set(key, g);
+  }
+  const rank = (s: string) => (s === 'critical' ? 0 : s === 'warning' ? 1 : 2);
+  return [...groups.values()]
+    .sort((a, b) => rank(a.severity) - rank(b.severity) || b.count - a.count)
+    .slice(0, 40)
+    .map((g) => {
+      const names = [...g.workers];
+      const shown = names.length ? `; Workers: ${names.slice(0, 5).join(', ')}${names.length > 5 ? ` and ${names.length - 5} more` : ''}` : '';
+      return `${g.severity}: ${g.title}; ${g.count} ${g.count === 1 ? 'finding' : 'findings'}${shown}`;
+    });
+}
+
+/**
+ * A few plain sentences on what to fix first, from Workers AI (optional AI binding). The model gets
+ * only `aiFacts`, and Workers AI runs inside Cloudflare. Any failure skips the summary.
  */
 export async function aiSummary(env: Env, config: Config, digests: AccountDigest[]): Promise<string | null> {
   if (!config.digest.aiSummary || !env.AI) return null;
-  const rows = digests.flatMap((d) => d.rows.slice(0, 15).map((r) => `${digests.length > 1 ? `${d.label} / ` : ''}${r.severity} / ${r.script === '*' ? 'account' : r.script}: ${r.message}`));
+  const rows = aiFacts(digests);
   if (!rows.length) return null;
   try {
     const out = (await env.AI.run(config.digest.aiModel, {
       max_tokens: 220,
       messages: [
-        { role: 'system', content: 'You summarise monitoring findings for a busy developer. Write 2 to 4 short plain sentences: what is most urgent and what to do first. No lists, no markdown, no greetings, no em dashes. Do not invent facts that are not in the findings.' },
-        { role: 'user', content: rows.slice(0, 40).join('\n') },
+        { role: 'system', content: 'You summarise monitoring results for a busy developer. Each line gives a severity, a check, how many findings it raised and the Workers affected. Write 2 to 4 short plain sentences: what is most urgent and what to look at first. No lists, no markdown, no greetings, no em dashes. Do not invent facts that are not in the lines.' },
+        { role: 'user', content: rows.join('\n') },
       ],
     })) as { response?: string };
     const text = (out.response ?? '').replace(/\s+/g, ' ').replace(/—/g, ',').trim();

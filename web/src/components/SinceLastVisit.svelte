@@ -2,6 +2,7 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { quoteNames } from '../../../src/shared/findings';
   import type { SinceView } from '../../../src/shared/types';
   import { api, timeAgo, workerHref } from '../lib/api';
   import Icon from './Icon.svelte';
@@ -42,7 +43,7 @@
         <li class={i.severity ?? ''}>
           <span class="verb {i.kind}">{VERB[i.kind]}</span>
           {#if i.script && i.script !== '*'}<a class="mono" href={workerHref(i.script)}>{i.script}</a>{/if}
-          <span class="msg">{i.message ?? ''}</span>
+          <span class="msg">{quoteNames(i.message ?? '', {}, i.script ? [i.script] : [])}</span>
           <time class="muted num" datetime={i.at}>{timeAgo(i.at)}</time>
         </li>
       {/each}

@@ -180,23 +180,25 @@ const post = (e: Env, cookie: string, path: string, body: unknown = {}) =>
   }), e, ctx);
 
 describe('cached views', () => {
-  it('answers 304 to a browser that has the current overview, and rebuilds after a change', async () => {
+  it('answers 304 to an API client that has the current overview, and rebuilds after a change', async () => {
     stub();
     const e = env();
     await scan(e, NOW);
     const cookie = await signedIn(e);
-    const first = await get(e, cookie, '/api/overview');
+    const { token } = (await (await post(e, cookie, '/api/tokens', { name: 'poller', passphrase: PASS, accounts: 'all' })).json()) as { token: string };
+    const auth = { Authorization: `Bearer ${token}` };
+    const first = await get(e, '', '/api/overview', auth);
     expect(first.status).toBe(200);
     const etag = first.headers.get('ETag')!;
     expect(etag).toBeTruthy();
     expect(first.headers.get('Cache-Control')).toBe('private, no-cache');
-    const again = await get(e, cookie, '/api/overview', { 'If-None-Match': etag });
+    const again = await get(e, '', '/api/overview', { ...auth, 'If-None-Match': etag });
     expect(again.status).toBe(304);
 
     // Acknowledging a finding changes what the overview shows.
     const body = (await first.json()) as { findings: { id: string }[] };
     expect((await post(e, cookie, `/api/findings/${encodeURIComponent(body.findings[0].id)}/acknowledge`)).status).toBe(200);
-    const after = await get(e, cookie, '/api/overview', { 'If-None-Match': etag });
+    const after = await get(e, '', '/api/overview', { ...auth, 'If-None-Match': etag });
     expect(after.status).toBe(200);
     expect(after.headers.get('ETag')).not.toBe(etag);
     const shown = (await after.json()) as { findings: { id: string }[] };
@@ -372,7 +374,7 @@ describe('smarter detection from the same data', () => {
       pages: null, certs: [], dns: [], d1Queries: [], workerNames: new Set(['api']), workersSubdomain: null,
     };
     const [f] = addChangeContext([base], { now: NOW, plan: 'free', accountRequestsToday: 0, workers: [], crons: [], changes });
-    expect(f.message).toBe('Requests are 9x usual. Shortly before, Updated a secret by ops@example.com (audit log).');
+    expect(f.message).toBe('Requests are 9x usual. Shortly before, "Updated a secret" (audit log).');
     expect(f.evidence.changedAt).toBe('2026-11-09T10:30:00Z');
     // Too long ago, or already explained by a deploy: unchanged.
     const old = addChangeContext([base], { now: new Date('2026-11-10T12:00:00Z'), plan: 'free', accountRequestsToday: 0, workers: [], crons: [], changes });
@@ -432,7 +434,7 @@ describe('monthly budget', () => {
 
 describe('read-only API tokens', () => {
   const del = (e: Env, cookie: string, path: string) =>
-    worker.fetch(new Request(`https://ambersight.example${path}`, { method: 'DELETE', headers: { Cookie: cookie, Origin: 'https://ambersight.example' } }), e, ctx);
+    worker.fetch(new Request(`https://ambersight.example${path}`, { method: 'DELETE', headers: { Cookie: cookie, Origin: 'https://ambersight.example', 'Content-Type': 'application/json' } }), e, ctx);
   const bearer = (e: Env, token: string, path: string, method = 'GET') =>
     worker.fetch(new Request(`https://ambersight.example${path}`, {
       method, headers: { Authorization: `Bearer ${token}`, Origin: 'https://ambersight.example', 'Content-Type': 'application/json' }, ...(method === 'POST' ? { body: '{}' } : {}),
@@ -443,7 +445,7 @@ describe('read-only API tokens', () => {
     const e = env();
     await scan(e, NOW);
     const cookie = await signedIn(e);
-    const r = (await (await post(e, cookie, '/api/tokens', { name: 'Grafana' })).json()) as { token: string; info: { id: string; hint: string } };
+    const r = (await (await post(e, cookie, '/api/tokens', { name: 'Grafana', passphrase: PASS, accounts: 'all' })).json()) as { token: string; info: { id: string; hint: string } };
     expect(r.token).toMatch(/^amb_[A-Za-z0-9_-]{43}$/);
     // Only a digest is stored.
     expect(JSON.stringify((await e.DB.prepare('SELECT * FROM api_tokens').all()).results)).not.toContain(r.token);

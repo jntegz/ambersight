@@ -79,6 +79,16 @@ describe('activity and status', () => {
   });
 });
 
+describe('what points at a Worker', () => {
+  const bound = worker('api', [{ type: 'service', name: 'AUTH', target: 'excluded' }, { type: 'service', name: 'OLD', target: 'gone' }, { type: 'tail_consumer', name: 'excluded', target: 'excluded' }]);
+  const pointers = { routes: [{ id: 'r1', pattern: 'a.example/*', script: 'excluded' }, { id: 'r2', pattern: 'b.example/*', script: 'gone' }], domains: [{ id: 'd1', hostname: 'c.example', script: 'excluded' }, { id: 'd2', hostname: 'd.example', script: 'gone' }] };
+
+  it('does not call a Worker outside the scope missing', () => {
+    const codes = zombieFindings(NOW, [bound], [stats('api', 1)], inv([], { ...pointers, workerNames: new Set(['api', 'excluded']) }), tf).map((f) => f.code);
+    expect(codes.sort()).toEqual(['missing-service-gone', 'orphan-domain-d2', 'orphan-route-r2']);
+  });
+});
+
 describe('not bound to any Worker, with evidence', () => {
   it('says when nothing used it, how big it is, and when it is empty', () => {
     const fs = byCode(zombieFindings(NOW, [worker('api', [])], [stats('api', 1)], inv([

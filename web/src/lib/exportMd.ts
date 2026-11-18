@@ -1,14 +1,15 @@
 // Markdown export of a findings list (Needs attention or Housekeeping), built in the browser.
 // SPDX-License-Identifier: AGPL-3.0-only
-import { cleanupFor, isHiddenEvidence, type FindingGroup } from '../../../src/shared/findings';
+import { cleanupFor, isDashboardOnlyEvidence, isHiddenEvidence, type FindingGroup } from '../../../src/shared/findings';
 import { helpFor } from '../../../src/shared/help';
 import type { Finding } from '../../../src/shared/types';
+import { httpUrl } from './links';
 
 const LABEL = { critical: 'Critical', warning: 'Warning', info: 'Info' } as const;
 
 /** One line of plain text: no line breaks, and Markdown characters that could start markup escaped. */
 const line = (s: string) => s.replace(/[\r\n\u2028\u2029]+/g, ' ').replace(/([\\`*_[\]<>#|])/g, '\\$1').trim();
-const evidence = (f: Finding) => Object.entries(f.evidence).filter(([k]) => !isHiddenEvidence(k)).map(([k, v]) => `${k}: ${typeof v === 'number' ? v.toLocaleString('en-US') : v}`).join(' · ');
+const evidence = (f: Finding) => Object.entries(f.evidence).filter(([k]) => !isHiddenEvidence(k) && !isDashboardOnlyEvidence(k)).map(([k, v]) => `${k}: ${typeof v === 'number' ? v.toLocaleString('en-US') : v}`).join(' · ');
 
 export function findingsMarkdown(opts: {
   title: string;
@@ -44,7 +45,7 @@ export function findingsMarkdown(opts: {
     }
     for (const f of g.findings) {
       out.push(`- [ ] **${f.script === '*' ? 'Account' : line(f.script)}**: ${line(f.message)}`);
-      out.push(`  - Fix: ${line(f.action)}${f.docsUrl ? ` ([docs](${f.docsUrl}))` : ''}`);
+      out.push(`  - Fix: ${line(f.action)}${httpUrl(f.docsUrl) ? ` ([docs](${httpUrl(f.docsUrl)}))` : ''}`);
       const ev = evidence(f);
       if (ev) out.push(`  - Evidence: ${line(ev)}`);
       if (f.firstSeen) out.push(`  - Open since ${f.firstSeen.slice(0, 10)}`);

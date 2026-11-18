@@ -1,6 +1,6 @@
 # Checks
 
-Ambersight runs 81 checks. Each one below lists the ID you see in the dashboard and in `config.json`, how severe it is, exactly when it fires, and what to do about it. The numbers are the defaults. Most of them can be changed globally, per group or per Worker (see [configuration.md](configuration.md)).
+Ambersight runs 83 checks. Each one below lists the ID you see in the dashboard and in `config.json`, how severe it is, exactly when it fires, and what to do about it. The numbers are the defaults. Most of them can be changed globally, per group or per Worker (see [configuration.md](configuration.md)).
 
 Every finding in the dashboard carries the evidence behind it, a suggested fix and a link to the matching Cloudflare docs page. When the problem goes away, the finding resolves on its own at the next scan.
 
@@ -117,7 +117,7 @@ The same 5x rule as runaway usage, applied to storage operations and Durable Obj
 | `usage:ops-spike-do` | Critical | Durable Object requests: same rule. | Look for an alarm or a client that reconnects in a loop. |
 | `usage:logs-full-sampling` | Info | A Worker has logs on at 100% sampling and serves at least 10,000 requests a day. The finding estimates GB a month, and on Paid the cost past the included 50 GB. | From 1 December 2026, logs and traces are billed per GB. Lower `head_sampling_rate` if you do not need every request. |
 | `usage:logs-free-allowance` | Info at 70% of 0.5 GB a day, warning above it | Free plan only. The estimated log volume of all Workers is close to or over the 0.5 GB a day that Free accounts ingest from 1 December 2026. Past it, logs stop being stored until 00:00 UTC; the finding says around what time. | Lower `head_sampling_rate` on the busiest Workers, so the logs you need are kept. The estimate assumes about 1.5 KB per event. |
-| `usage:d1-inefficient-query` | Info, warning at 100 million rows read a day | Once a day: a D1 query read at least 1 million rows in 24 hours, and at least 100 rows for every row it returned. The finding shows the query, with its parameters as `?`. | Add an index on the columns in its `WHERE` or `ORDER BY`. D1 bills rows read. |
+| `usage:d1-inefficient-query` | Info, warning at 100 million rows read a day | Once a day: a D1 query read at least 1 million rows in 24 hours, and at least 100 rows for every row it returned. The finding shows the query's shape: parameters and every literal value appear as `?`, and comments are removed. | Add an index on the columns in its `WHERE` or `ORDER BY`. D1 bills rows read. |
 | `usage:logpush-on` | Info | Logpush is on for a Worker. | Make sure the destination, and what it costs, is still wanted. |
 
 ## Errors and limits
@@ -156,7 +156,7 @@ This is not a separate check. When `errors:error-rate`, `errors:error-baseline` 
 
 Threshold setting: `deployWindowMinutes` (60). Turn the timeline module off to stop it.
 
-The timeline also shows Cloudflare's own notifications (alert history, needs *Notifications Read*), audit log entries for Workers, routes, DNS, certificates, Access, members and tokens, each Pages project's latest deploy, and, if you turn it on, Cloudflare status incidents. A deploy with no author takes it from the audit log.
+The timeline also shows Cloudflare's own notifications (alert history, needs *Notifications Read*), audit log entries for Workers, routes, DNS, certificates, Access, members and tokens, each Pages project's latest deploy, and, if you turn it on, Cloudflare status incidents. A deploy with no author takes it from the audit log. With [recording of who made changes](how-it-works.md#who-made-a-change) off, the timeline shows no authors.
 
 | Check | Severity | Fires when | What to do |
 | --- | --- | --- | --- |
@@ -262,18 +262,24 @@ The audit log is read every 6 hours (it needs *Account Settings Read*, which the
 
 | Check | Severity | Fires when | What to do |
 | --- | --- | --- | --- |
-| `packages:outdated` | Warning if a direct dependency is a major version behind, otherwise Info | One or more direct dependencies are behind the latest npm release. | Run `npm outdated` in the repository and update. Read the changelog of each major version first. |
-| `packages:lockfile-unreadable` | Warning | The lockfile could not be read: no `package-lock.json` at that path, no access, the repository moved, a lockfile older than npm 7 (`lockfileVersion` 1), or a file over 8 MB. | Check the repository, folder and branch in Settings, and that `GITHUB_TOKEN` can read the repository. |
+| `packages:outdated` | Warning if a direct dependency is a major version behind, otherwise Info | One or more direct dependencies whose lockfile entry shows they came from the public npm registry are behind its latest release. | Run `npm outdated` in the repository and update. Read the changelog of each major version first. |
+| `packages:lockfile-unreadable` | Warning | The lockfile could not be read: no `package-lock.json` at that path, no access, the repository moved, a lockfile older than npm 7 (`lockfileVersion` 1), or a file over 8 MB, or a repository outside `GITHUB_REPO_ALLOWLIST`. | Check the repository, folder and branch in Settings, and that `GITHUB_TOKEN` can read the repository. |
+
+**What is compared.** Only a package whose lockfile entry was resolved from `registry.npmjs.org` under its own name is looked up there. A package from a private registry, a Git URL, a local path or an alias, or one with no recorded source, is listed as **not compared**: its name is not sent to npm and it gets no update advice, because a package of the same name on npm is not an update to it. Rows stored by an older version have no source yet: until the lockfile is read again, which the first scans after the upgrade do, they keep their comparison with the version already stored, and nothing new is looked up for them.
+
+**Which repositories.** Anyone signed in can map a Worker to any repository `GITHUB_TOKEN` can read, and the Packages page then shows that repository's dependency names. Give the token only the repositories you mean to map. To enforce it from the deployment, set `GITHUB_REPO_ALLOWLIST` to owners or `owner/name` pairs: anything else is not read, what was stored for it is dropped, and the Worker gets a `packages:lockfile-unreadable` finding. Out-of-scope Workers are never read.
 
 Why this needs a separate token: Cloudflare stores your Worker as bundled code, without `package.json` or the lockfile, so the Cloudflare API cannot tell which versions you use. Workers Builds knows the repository, but its API needs an *Edit* permission, which Ambersight never takes. Only `package-lock.json` v2 and v3 are read (npm 7 and later); pnpm and yarn lockfiles are not supported yet. Lockfile reads and npm lookups count against the scan's subrequest budget, so on the Free plan a large fleet is covered over several scans.
 
 ## Ambersight's own health
 
-These cannot be switched off: a monitor that has gone blind should say so.
+They have no switch in **Settings › Checks**: a monitor that has gone blind should say so.
 
 | Check | Severity | Fires when | What to do |
 | --- | --- | --- | --- |
 | `health:token-expiry` | Warning at 14 days, critical at 3 | Ambersight's API token has an expiry date that is close. | Extend the token or create a new read-only one, then update `CF_API_TOKEN`. |
+| `health:token-scope` | Critical | At an inventory refresh, the token has a permission outside the list of read permissions Ambersight has a use for ([below](#which-permission-each-group-needs)). The comparison is against that list, not against what a name looks like, so an extra read permission counts too. | Remove the permission, or create a new read-only token. If you added a read permission on purpose, switch this check off from the finding. |
+| `health:token-scope-unverified` | Info | The token's permissions could not be read at the last inventory refresh, usually because it lacks *API Tokens Read*. A grant found earlier stays reported as `health:token-scope`. | Add *API Tokens Read*, or check the token yourself under **My Profile › API Tokens**. |
 
 After 3 failed scans in a row, Ambersight also sends one alert a day on the channel set for critical alerts, and the overview shows the last error. A scan that fails cannot store a finding, so this alert has none behind it.
 
@@ -297,7 +303,8 @@ When you switch a check off, its open findings resolve, the same as if you had f
 | Free plan budget | Billing, to detect the plan. Without it, set the plan in **Settings › General**. |
 | Storage and log costs, unbound storage | Workers KV Storage, D1, Workers R2 Storage, Queues |
 | Exposure, orphaned routes and domains | Workers Routes, Zone |
-| Access coverage | Access: Apps and Policies |
+| Access coverage | Access: Apps and Policies. Off by default and not in the pre-filled token link; add it by hand when you turn the check on. |
+| Checking the token's own permissions (setup wizard and daily) | API Tokens Read |
 | Pages | Pages Read (key `page`) |
 | Certificates | SSL and Certificates Read |
 | Dangling DNS | DNS Read |

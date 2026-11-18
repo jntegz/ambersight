@@ -4,7 +4,7 @@
 // (fine-grained, Contents: Read). Only GET requests, never with redirects followed.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { repoFor, type Config, type PackageRepo } from '../shared/config';
+import { groupsFor, inScope, repoFor, type Config, type PackageRepo } from '../shared/config';
 import type { Finding, Gap, PackagesView } from '../shared/types';
 import { finding } from './checks';
 import { allowedFetch, OPTIONAL_HOSTS } from './net';
@@ -18,10 +18,37 @@ export const NPM_NAME = /^(@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]{0,213}
 const VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]{1,100})?$/;
 const DOCS = 'https://docs.npmjs.com/cli/commands/npm-outdated';
 
+/** Where a locked package came from: the public npm registry, or anywhere else (or not recorded). */
+export type PackageSource = 'registry' | 'other';
+
 export interface LockedDep {
   name: string;
   locked: string;
   dev: boolean;
+  source: PackageSource;
+}
+
+/** The refusal stored for a Worker mapped to a repository outside GITHUB_REPO_ALLOWLIST. */
+export const REPO_NOT_ALLOWED = 'This repository is not in GITHUB_REPO_ALLOWLIST, so Ambersight did not read it.';
+
+/** GITHUB_REPO_ALLOWLIST as lower-case owners and owner/name pairs; null when it is not set. */
+export function repoAllowlist(value: string | undefined): string[] | null {
+  if (!value?.trim()) return null;
+  return value.split(/[\s,]+/).filter(Boolean).map((e) => e.toLowerCase());
+}
+
+/** GitHub names are case-insensitive. No list means every mapped repository may be read. */
+export function repoAllowed(list: string[] | null, repo: string): boolean {
+  if (!list) return true;
+  const full = repo.toLowerCase();
+  return list.includes(full) || list.includes(full.split('/')[0]);
+}
+
+/** True only for this package's own tarball on the public registry. An alias or a mirror is not that. */
+function fromPublicRegistry(name: string, resolved: unknown): boolean {
+  if (typeof resolved !== 'string') return false;
+  const base = `https://${OPTIONAL_HOSTS.packages}/`;
+  return [name, name.replace('/', '%2f'), name.replace('/', '%2F')].some((n) => resolved.startsWith(`${base}${n}/-/`));
 }
 
 /** "1.2.3" parts, or null for anything that is not plain semver. Prerelease tags are ignored. */
@@ -60,8 +87,8 @@ export function parseLockfile(text: string): LockedDep[] {
   for (const [name, isDev] of [...Object.keys(deps).map((n) => [n, false] as const), ...Object.keys(dev).filter((n) => !(n in deps)).map((n) => [n, true] as const)]) {
     if (out.length >= MAX_DEPS) break;
     if (!NPM_NAME.test(name)) continue;
-    const locked = lockedVersion(text, name);
-    if (locked) out.push({ name, locked, dev: isDev });
+    const entry = lockedEntry(text, name);
+    if (entry) out.push({ name, locked: entry.version, dev: isDev, source: fromPublicRegistry(name, entry.resolved) ? 'registry' : 'other' });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -96,8 +123,8 @@ function objectEnd(text: string, start: number): number {
   return -1;
 }
 
-/** The "version" of the top-level "node_modules/<name>" entry. Nested copies have a longer key. */
-function lockedVersion(text: string, name: string): string | null {
+/** The version and source of the top-level "node_modules/<name>" entry. Nested copies have a longer key. */
+function lockedEntry(text: string, name: string): { version: string; resolved: unknown } | null {
   const key = `"node_modules/${name}"`;
   let at = text.indexOf(key);
   while (at >= 0) {
@@ -105,8 +132,12 @@ function lockedVersion(text: string, name: string): string | null {
     if (brace >= 0 && /^\s*:\s*$/.test(text.slice(at + key.length, brace))) {
       const end = objectEnd(text, brace);
       if (end < 0) return null;
-      const v = /"version"\s*:\s*"([^"]{1,120})"/.exec(text.slice(brace, end))?.[1];
-      return v && VERSION.test(v) ? v : null;
+      try {
+        const e = JSON.parse(text.slice(brace, end + 1)) as { version?: unknown; resolved?: unknown };
+        return typeof e.version === 'string' && e.version.length <= 120 && VERSION.test(e.version) ? { version: e.version, resolved: e.resolved } : null;
+      } catch {
+        return null;
+      }
     }
     at = text.indexOf(key, at + key.length);
   }
@@ -163,58 +194,79 @@ export interface PackageRow {
   script: string;
   name: string;
   locked: string;
+  /** Null for a package from elsewhere: nothing else is compared with the registry. */
   latest: string | null;
   dev: boolean;
+  /** Null for a row stored before sources were recorded, until its lockfile is read again. */
+  source: string | null;
 }
 
-/** One finding per Worker: outdated direct dependencies, or a lockfile that could not be read. */
-export function packageFindings(config: Config, account: string, rows: PackageRow[], errors: Map<string, string>): Finding[] {
+/**
+ * Only a lockfile that shows another source ends the comparison. Rows from before sources were
+ * recorded keep theirs, or their findings would resolve and reopen (losing acknowledgements) while
+ * the lockfiles are read again over several scans. They use the version already stored: the scan
+ * looks up only names the lockfile shows came from the registry, so no private name is sent.
+ */
+const isCompared = (source: string | null) => source !== 'other';
+export const COMPARED_LATEST = `CASE WHEN p.source IS NOT 'other' THEN n.latest END AS latest`;
+
+/**
+ * One finding per Worker: outdated direct dependencies, or a lockfile that could not be read.
+ * Packages from elsewhere get no advice: a newer public package of the same name is not an update.
+ */
+export function packageFindings(config: Config, account: string, rows: PackageRow[], errors: Map<string, string>, visible?: Set<string>): Finding[] {
   if (!config.modules.packages) return [];
   const out: Finding[] = [];
   for (const [script, error] of errors) {
     const repo = repoFor(config, account, script);
-    if (!repo) continue;
+    if (!repo || (visible && !visible.has(script))) continue;
     out.push(finding('packages', script, 'lockfile-unreadable', 'warning', `Ambersight could not read this Worker's packages: ${error}`,
       { repo: repo.repo }, 'Check the repository, folder and branch in Settings › Packages, and that GITHUB_TOKEN can read the repository.', DOCS));
   }
   const byScript = new Map<string, PackageRow[]>();
   for (const r of rows) byScript.set(r.script, [...(byScript.get(r.script) ?? []), r]);
   for (const [script, list] of byScript) {
-    if (!repoFor(config, account, script) || errors.has(script)) continue;
-    const behind = list.map((r) => ({ ...r, gap: semverGap(r.locked, r.latest) })).filter((r) => r.gap === 'major' || r.gap === 'minor' || r.gap === 'patch');
+    if (!repoFor(config, account, script) || errors.has(script) || (visible && !visible.has(script))) continue;
+    const compared = list.filter((r) => isCompared(r.source));
+    const behind = compared.map((r) => ({ ...r, gap: semverGap(r.locked, r.latest) })).filter((r) => r.gap === 'major' || r.gap === 'minor' || r.gap === 'patch');
     if (!behind.length) continue;
     const majors = behind.filter((r) => r.gap === 'major');
     const worst = [...majors, ...behind.filter((r) => r.gap !== 'major')].slice(0, 3).map((r) => `${r.name} ${r.locked} → ${r.latest}`);
     out.push(finding('packages', script, 'outdated', majors.length ? 'warning' : 'info',
-      `${behind.length} of ${list.length} direct dependencies are behind the latest release${majors.length ? `, ${majors.length} by a major version` : ''}: ${worst.join(', ')}.`,
-      { outdated: behind.length, major: majors.length, total: list.length },
+      `${behind.length} of ${compared.length} direct dependencies from the npm registry are behind the latest release${majors.length ? `, ${majors.length} by a major version` : ''}: ${worst.join(', ')}.`,
+      { outdated: behind.length, major: majors.length, total: compared.length },
       'Run npm outdated in the repository and update, reading the changelog of each major version first. See the full list on the Packages page.', DOCS));
   }
   return out;
 }
 
-/** The Packages page: every mapped Worker of one account with its direct dependencies. */
-export async function buildPackages(db: D1Database, account: string, config: Config, github: boolean): Promise<PackagesView> {
+/** The Packages page: every mapped Worker in scope in one account, with its direct dependencies. */
+export async function buildPackages(db: D1Database, account: string, config: Config, github: boolean, allowlist: string[] | null = null): Promise<PackagesView> {
   const view: PackagesView = { enabled: config.modules.packages, github, workers: [] };
   if (!config.modules.packages) return view;
   const [workersR, rowsR] = await db.batch([
-    db.prepare('SELECT name, packages_checked_at, packages_error FROM workers WHERE account = ?1').bind(account),
+    db.prepare('SELECT name, tags, packages_checked_at, packages_error FROM workers WHERE account = ?1').bind(account),
     db.prepare(
-      `SELECT p.script, p.name, p.locked, p.dev, n.latest FROM worker_packages p LEFT JOIN npm_latest n ON n.name = p.name
+      `SELECT p.script, p.name, p.locked, p.dev, p.source, ${COMPARED_LATEST} FROM worker_packages p LEFT JOIN npm_latest n ON n.name = p.name
        WHERE p.account = ?1 ORDER BY p.script, p.name`,
     ).bind(account),
   ]);
-  const rows = rowsR.results as { script: string; name: string; locked: string; dev: number; latest: string | null }[];
-  for (const w of workersR.results as { name: string; packages_checked_at: string | null; packages_error: string | null }[]) {
+  const rows = rowsR.results as { script: string; name: string; locked: string; dev: number; latest: string | null; source: string | null }[];
+  for (const w of workersR.results as { name: string; tags: string | null; packages_checked_at: string | null; packages_error: string | null }[]) {
     const repo = repoFor(config, account, w.name);
-    if (!repo) continue;
+    if (!repo || !inScope(config, w.name, groupsFor(config, w.name, w.tags ? (JSON.parse(w.tags) as string[]) : []))) continue;
+    const allowed = repoAllowed(allowlist, repo.repo);
     view.workers.push({
       name: w.name,
       repo: repo.repo,
       dir: repo.dir ?? null,
       checkedAt: w.packages_checked_at,
-      error: w.packages_error,
-      packages: rows.filter((r) => r.script === w.name).map((r) => ({ name: r.name, locked: r.locked, latest: r.latest, gap: semverGap(r.locked, r.latest), dev: r.dev === 1 })),
+      error: allowed ? w.packages_error : REPO_NOT_ALLOWED,
+      packages: allowed
+        ? rows.filter((r) => r.script === w.name).map((r) => ({
+            name: r.name, locked: r.locked, latest: r.latest, gap: semverGap(r.locked, r.latest), dev: r.dev === 1, compared: isCompared(r.source),
+          }))
+        : [],
     });
   }
   view.workers.sort((a, b) => a.name.localeCompare(b.name));

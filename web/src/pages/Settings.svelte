@@ -9,8 +9,10 @@
   import MapEditor from '../components/settings/MapEditor.svelte';
   import NotifyChannels from '../components/settings/NotifyChannels.svelte';
   import OverridesEditor from '../components/settings/OverridesEditor.svelte';
+  import AdminLog from '../components/settings/AdminLog.svelte';
   import ApiTokens from '../components/settings/ApiTokens.svelte';
   import PassphraseForm from '../components/settings/PassphraseForm.svelte';
+  import PersonalData from '../components/settings/PersonalData.svelte';
   import SelfCost from '../components/settings/SelfCost.svelte';
   import Switch from '../components/Switch.svelte';
   import { api, ApiError } from '../lib/api';
@@ -44,6 +46,14 @@
   let toastTimer: ReturnType<typeof setTimeout>;
 
   const dirty = $derived(!!saved && !!draft && JSON.stringify(saved) !== JSON.stringify(draft));
+  /** This save turns off recording who made changes, which erases the stored names. */
+  const erasesNames = $derived(!!saved?.recordAttribution && draft?.recordAttribution === false);
+  /** The switch was turned on here, from the off this page read from the server. */
+  const resumesNames = $derived(saved?.recordAttribution === false && draft?.recordAttribution === true);
+  let confirmErase = $state(false);
+  $effect(() => {
+    if (!erasesNames) confirmErase = false;
+  });
 
   onMount(async () => {
     try {
@@ -76,13 +86,22 @@
       saveError = e instanceof ConfigError ? e.message : 'The settings are not valid.';
       return;
     }
+    // Erasing cannot be undone: the save bar asks first.
+    if (erasesNames && !confirmErase) {
+      confirmErase = true;
+      return;
+    }
     saving = true;
     try {
-      saved = await api.saveConfig(valid);
-      draft = clone(saved);
+      const { attributionErasure, ...stored } = await api.saveConfig(valid, erasesNames ? 'erase' : resumesNames ? 'resume' : 'keep');
+      saved = stored;
+      draft = clone(stored);
       version++;
-      onSaved(saved);
-      flash('Settings saved. They apply from the next scan.');
+      onSaved(stored);
+      flash(attributionErasure === 'done' ? 'Settings saved. The stored names are erased.'
+        : attributionErasure ? 'Settings saved. The remaining names are being erased in the background.'
+        : stored.recordAttribution !== valid.recordAttribution ? `Settings saved. Recording who made changes stays ${stored.recordAttribution ? 'on' : 'off'}: it was changed elsewhere.`
+        : 'Settings saved. They apply from the next scan.');
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) onUnauthorized();
       else saveError = (e as Error).message;
@@ -114,9 +133,14 @@
     if (!file) return;
     importError = '';
     try {
-      draft = parseConfig(JSON.parse(await file.text()));
+      const imported = JSON.parse(await file.text());
+      const next = parseConfig(imported);
+      // A backup from before this setting says nothing about it, and no backup turns recording on.
+      const staysOff = saved?.recordAttribution === false && next.recordAttribution && Object.hasOwn(imported, 'recordAttribution');
+      if (saved && (staysOff || !Object.hasOwn(imported, 'recordAttribution'))) next.recordAttribution = saved.recordAttribution;
+      draft = next;
       version++;
-      flash(`Loaded ${file.name}. Review the changes, then save.`);
+      flash(`Loaded ${file.name}. Review the changes, then save.${staysOff ? ' Recording who made changes stays off unless you turn it on.' : ''}`);
     } catch (err) {
       importError = err instanceof SyntaxError ? `${file.name} is not valid JSON.` : (err as Error).message;
     }
@@ -298,7 +322,7 @@
             </div>
           </div>
           <div class="row">
-            <div class="row-text"><p class="label">Keep history for</p><p class="hint">Metrics, findings and deploys older than this are deleted.</p></div>
+            <div class="row-text"><p class="label">Keep history for</p><p class="hint">Hourly metrics, cron runs, storage operations, deploys and their authors, the audit log, Cloudflare notifications and resolved findings older than this are deleted. Kept longer: daily totals and each finding's event history, which hold counts and check names (400 days); scan records and the admin log (90 days); hourly account totals (at least 35 days). Open findings stay until they resolve.</p></div>
             <div class="range">
               <input type="range" min="7" max="90" step="1" aria-label="Retention in days" bind:value={draft.retentionDays} />
               <span class="range-value">{draft.retentionDays} days</span>
@@ -307,6 +331,14 @@
           <div class="row">
             <div class="row-text"><p class="label">Check for updates</p><p class="hint">Shows a notice when a new Ambersight release is out. Sends no data about your account.</p></div>
             <Switch label="Check for updates" bind:checked={draft.updateCheck} />
+          </div>
+          <div class="row">
+            <div class="row-text">
+              <p class="label">Record who made changes</p>
+              <p class="hint">Stores the e-mail address or token name Cloudflare gives for each deploy and audit-log change, so you know who to ask when a change breaks something. It is shown in this dashboard and to API tokens allowed to read person-linked data, and the main digest e-mail lists deploy authors. Client digests, reports, alerts and webhooks leave it out. Off: new scans leave it out, and the checks work the same.</p>
+              {#if erasesNames}<p class="hint erase-note">Saving this erases the names already stored. This cannot be undone. Turning it back on only affects future scans.</p>{/if}
+            </div>
+            <Switch label="Record who made changes" bind:checked={draft.recordAttribution} />
           </div>
           <details class="advanced">
             <summary><Icon name="chevron" size={14} /> Advanced</summary>
@@ -334,7 +366,7 @@
             <div class="row"><div class="row-text"><p class="hint">Ambersight cannot list the accounts this token can see: {status.tokenError ?? 'the token does not work'}.</p></div></div>
           {:else if status && status.accounts.length > 1}
             <div class="row">
-              <div class="row-text"><p class="label">Accounts to watch <span class="now">Applies right away</span></p><p class="hint">The token can see {status.accounts.length} accounts. History of an account you untick is kept until it ages out.</p></div>
+              <div class="row-text"><p class="label">Accounts to watch <span class="now">Applies right away</span></p><p class="hint">The token can see {status.accounts.length} accounts. An account you untick is no longer scanned or alerted on. A daily cleanup deletes its history on the schedule under <strong>Keep history for</strong>, and once its last scan is older than that, its findings and inventory too. Its daily totals go after 400 days.</p></div>
               <fieldset class="acct-pick" disabled={accountsBusy}>
                 <legend class="sr-only">Accounts to watch</legend>
                 {#each status.accounts as a (a.id)}
@@ -387,7 +419,7 @@
             <div class="row"><div class="row-text"><p class="hint">With {watchedCount} accounts and one scan per 15-minute cron run, each account is scanned about every <strong>{intervalLabel(Math.max(draft.scanIntervalMinutes, watchedCount * 15)).replace('Every ', '').replace('Once a day', 'day')}</strong>. Add the scan queue in <span class="mono">wrangler.jsonc</span> to scan them all on time.</p></div></div>
           {/if}
           {#if (status?.watched.length ?? 0) > 0}
-            <div class="row"><div class="row-text"><p class="hint">A client digest sends that account's own digest to the addresses given, on the digest schedule. Each address must also be in <span class="mono">DIGEST_TO</span>.</p></div></div>
+            <div class="row"><div class="row-text"><p class="hint">A client digest sends that account's own digest to each address given, on the digest schedule. Each address must also be in <span class="mono">DIGEST_TO</span>. From then on it gets only that digest, not your alerts or the all-account digest, unless it is also in <span class="mono">DIGEST_OPERATORS</span> or has the digest of every watched account.</p></div></div>
           {/if}
         </div>
       </section>
@@ -412,6 +444,11 @@
                 <div>
                   <p class="label">Workers and their repositories</p>
                   <p class="hint">GitHub repository as <span class="mono">owner/name</span>, the folder that holds <span class="mono">package-lock.json</span> (empty = the root), and the branch (empty = the default one).</p>
+                  {#if status?.githubRepoAllowlist}
+                    <p class="hint"><span class="mono">GITHUB_REPO_ALLOWLIST</span> limits this to: <span class="mono">{status.githubRepoAllowlist.join(', ')}</span>. Other repositories are not read.</p>
+                  {:else}
+                    <p class="hint">Anyone signed in can map any repository <span class="mono">GITHUB_TOKEN</span> can read, so give that token only the repositories you mean to map, or set <span class="mono">GITHUB_REPO_ALLOWLIST</span>.</p>
+                  {/if}
                   {#each repoKeys as name (name)}
                     <div class="inline pkg-row">
                       <span class="mono pkg-name">{workerOf(name)}{#if !name.includes(':') && accountCount > 1} <span class="hint">(every account)</span>{/if}</span>
@@ -437,7 +474,7 @@
             {#if m.key === 'exposure'}
               <div class="module sub" class:off={!draft.modules.access || !draft.modules.exposure}>
                 <span></span>
-                <div><p class="label">Cloudflare Access coverage</p><p class="hint">Also flag public URLs that are not behind Access. Needs the token permission <span class="mono">Access: Apps and Policies Read</span>.</p></div>
+                <div><p class="label">Cloudflare Access coverage</p><p class="hint">Also flag public URLs that are not behind Access. Needs the token permission <span class="mono">Access: Apps and Policies Read</span>, which the pre-filled token link leaves out: add it to the token by hand.</p></div>
                 <Switch label="Cloudflare Access coverage" disabled={!draft.modules.exposure} bind:checked={draft.modules.access} />
               </div>
             {/if}
@@ -492,12 +529,12 @@
           <label class="field">
             <span class="label">Only watch</span>
             <input class="input mono-input" placeholder="Everything" value={listText(draft.scope.include)} oninput={(e) => (draft!.scope.include = splitList(e.currentTarget.value))} />
-            <span class="hint">Patterns or <span class="mono">group:name</span>, comma separated. Empty watches every Worker.</span>
+            <span class="hint">Patterns or <span class="mono">group:name</span>, comma separated. Empty watches every Worker. Patterns match the whole name; <span class="mono">*</span> stands for any characters.</span>
           </label>
           <label class="field">
             <span class="label">Ignore</span>
             <input class="input mono-input" placeholder="Nothing" value={listText(draft.scope.exclude)} oninput={(e) => (draft!.scope.exclude = splitList(e.currentTarget.value))} />
-            <span class="hint">Ignored Workers are not scanned or shown.</span>
+            <span class="hint">Ignored Workers get no findings or Worker page, and their deploys, deploy authors and package files are not collected. Ambersight still reads their name, tags, traffic totals, schedule and storage bindings, because account limits and the unused-storage checks count them.</span>
           </label>
         </div>
       </section>
@@ -582,7 +619,7 @@
               <div class="row-text">
                 <p class="label">Plain-language summary</p>
                 <p class="hint">
-                  {#if features?.ai}A few sentences at the top on what to fix first, written by Workers AI from the findings. Uses a little of the account's free 10,000 neurons a day.
+                  {#if features?.ai}A few sentences at the top on what to fix first, written by Workers AI from each check's name, severity, count and Worker names. Uses a little of the account's free 10,000 neurons a day.
                   {:else}Needs the <span class="mono">AI</span> binding in <span class="mono">wrangler.jsonc</span> (Workers AI, free allocation of 10,000 neurons a day).{/if}
                 </p>
               </div>
@@ -596,7 +633,7 @@
             {/if}
             <div class="field">
               <p class="label">Extra digest per group</p>
-              <p class="hint">Sends a group-only digest to these addresses. Each address must also be in <span class="mono">DIGEST_TO</span>.</p>
+              <p class="hint">Sends a group-only digest to each of these addresses. Each must also be in <span class="mono">DIGEST_TO</span>, and then gets only this digest unless it is also in <span class="mono">DIGEST_OPERATORS</span>.</p>
               {#key version}
                 <MapEditor bind:value={draft.digest.groupRecipients} keyLabel="Group" listLabel="Email addresses" keyPlaceholder="api" listPlaceholder="team@example.com" addLabel="Add group digest" keyOptions={groups} />
               {/key}
@@ -617,11 +654,15 @@
           {/if}
         </div>
         {#if status?.passphraseFromSettings === false}
-          <p class="hint">The passphrase currently comes from the <span class="mono">ADMIN_PASSPHRASE</span> secret. Changing it here stores a new one that takes over.</p>
+          <p class="hint">The passphrase currently comes from the <span class="mono">ADMIN_PASSPHRASE</span> secret. Changing it here stores a new one that takes over until that secret is replaced.</p>
         {/if}
-        <PassphraseForm onSubmit={changePassphrase} note="Signs out every session, including this one." />
+        <PassphraseForm onSubmit={changePassphrase} note="Signs out every session, including this one, and stops every API token." />
         <h3 class="sub-h">Read-only API tokens</h3>
         <ApiTokens />
+        <h3 class="sub-h">Admin activity</h3>
+        <AdminLog />
+        <h3 class="sub-h">Remove one person from stored data</h3>
+        <PersonalData />
       </section>
 
       <!-- Self-cost -->
@@ -649,11 +690,17 @@
 
   {#if dirty || saveError}
     <div class="savebar" role="region" aria-label="Unsaved changes">
-      <div class="savebar-inner">
-        <span class="sb-dot" class:bad={!!saveError}></span>
-        <p class="sb-text">{#if saveError}<span class="error-text">{saveError}</span>{:else}You have unsaved changes.{/if}</p>
-        <button type="button" class="ghost" onclick={discard} disabled={saving}>Discard</button>
-        <button type="button" class="primary" onclick={save} disabled={saving || !dirty}>{saving ? 'Saving…' : 'Save changes'}</button>
+      <div class="savebar-inner" class:confirming={confirmErase}>
+        <span class="sb-dot" class:bad={!!saveError || confirmErase}></span>
+        {#if confirmErase}
+          <p class="sb-text">{#if saveError}<span class="error-text">{saveError}</span>{:else}This erases every stored name of who deployed or changed something. It cannot be undone.{/if}</p>
+          <button type="button" class="ghost" onclick={() => (confirmErase = false)} disabled={saving}>Cancel</button>
+          <button type="button" class="danger" onclick={save} disabled={saving}>{saving ? 'Erasing…' : 'Erase names and save'}</button>
+        {:else}
+          <p class="sb-text">{#if saveError}<span class="error-text">{saveError}</span>{:else}You have unsaved changes.{/if}</p>
+          <button type="button" class="ghost" onclick={discard} disabled={saving}>Discard</button>
+          <button type="button" class="primary" onclick={save} disabled={saving || !dirty}>{saving ? 'Saving…' : 'Save changes'}</button>
+        {/if}
       </div>
     </div>
   {/if}
@@ -753,6 +800,9 @@
   .sb-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
   .sb-dot.bad { background: var(--critical); }
   .sb-text { flex: 1; font-size: 14px; line-height: 20px; }
+  .savebar-inner.confirming { flex-wrap: wrap; justify-content: flex-end; }
+  .confirming .sb-text { flex: 1 1 calc(100% - 20px); }
+  .erase-note { margin-top: 6px; color: var(--warning-text); }
 
   .toast {
     position: fixed; left: 50%; bottom: 24px; z-index: 40; transform: translateX(-50%);

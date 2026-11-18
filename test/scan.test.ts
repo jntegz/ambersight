@@ -161,15 +161,16 @@ describe('runaway and deploy correlation', () => {
 describe('notifications', () => {
   it('sends instant criticals once and the digest when due', async () => {
     stub();
-    const { env: e, sent } = env();
+    const { env: e, sent } = env({ DIGEST_TO: 'me@example.com, client@example.com' });
     const config = defaultConfig();
-    config.digest = { ...config.digest, frequency: 'daily', weekday: 1, hour: 0, groupRecipients: { 'client-a': ['me@example.com', 'stranger@example.com'] } };
+    config.digest = { ...config.digest, frequency: 'daily', weekday: 1, hour: 0, groupRecipients: { 'client-a': ['client@example.com', 'stranger@example.com'] } };
     await setSettings(e.DB, { config: JSON.stringify(config) }).run();
     await scan(e, NOW);
     const subjects = sent.map((s) => s.subject);
     expect(subjects[0]).toMatch(/^Ambersight: 2 critical findings/);
-    expect(subjects).toContain('Ambersight · client-a: 1 Worker needs attention');
-    expect(sent.find((s) => s.subject.includes('client-a'))?.to).toEqual(['me@example.com']); // stranger is not in DIGEST_TO
+    expect(sent[0].to).toEqual(['me@example.com']); // the group recipient gets no all-account mail
+    expect(subjects).toContain('Ambersight · "client-a": 1 Worker needs attention');
+    expect(sent.find((s) => s.subject.includes('client-a'))?.to).toEqual(['client@example.com']); // stranger is not in DIGEST_TO
     expect(subjects.some((s) => /Workers need attention$/.test(s))).toBe(true);
 
     sent.length = 0;
@@ -229,6 +230,7 @@ describe('alert hardening', () => {
     const config = defaultConfig(); // critical -> email, which this deployment does not have
     config.alerts.warning.instant = 'webhook';
     config.alerts.quietHours = null;
+    await upsertAccount(e.DB, { id: 'acc1' }, NOW).run();
     const ins = (id: string, severity: string) =>
       e.DB.prepare(`INSERT INTO findings (id, account, script, module, severity, code, message, evidence, action, first_seen, last_seen, status)
         VALUES (?1, 'acc1', 'w', 'exposure', ?2, 'c', 'm', '{}', 'a', ?3, ?3, 'open')`).bind(id, severity, NOW.toISOString()).run();

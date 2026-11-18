@@ -1,0 +1,8 @@
+# Headers for the dashboard shell and its assets. Cloudflare serves these files without running the
+# Worker, so this is the only place to set them; /api/* sets its own in src/worker/index.ts.
+# frame-ancestors has no effect in the page's <meta> policy, which stays for everything else.
+/*
+  Content-Security-Policy: frame-ancestors 'none'
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer

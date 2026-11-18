@@ -5,8 +5,10 @@
 
 import { DEFAULT_THRESHOLDS, defaultConfig, type Config, type Thresholds } from '../shared/config';
 import { FREE_DAILY, FREE_DAILY_REQUESTS, LOGS, STORAGE_LIMITS, unitPrice, type QuotaMetric, type StorageKind } from '../shared/limits';
+import { quoted } from '../shared/findings';
 import type { Finding, Severity } from '../shared/types';
 import { hygieneFindings, type InventoryFacts } from './hygiene';
+import { withoutPerson } from './redact';
 import { changeFindings, type ChangeFacts } from './security';
 
 export { DEFAULT_THRESHOLDS };
@@ -131,6 +133,8 @@ export interface CheckInput {
   storage?: { kind: StorageKind; id: string; bytes: number; label: string }[];
   /** When the API token expires; null when it does not or is unknown. */
   tokenExpiresOn?: string | null;
+  /** The token's permissions at the last inventory refresh, when something is wrong with them. */
+  tokenScope?: { state: 'unexpected'; permissions: string[] } | { state: 'unverified' } | null;
   /** Deploys, audit log, Pages, certificates, DNS and D1 queries (security.ts). */
   changes?: ChangeFacts;
 }
@@ -275,19 +279,41 @@ export function storageFindings(input: CheckInput): Finding[] {
   return out;
 }
 
-/** Ambersight's own health: a token that expires soon leaves it blind. */
+const TOKEN_DOCS = 'https://developers.cloudflare.com/fundamentals/api/get-started/create-token/';
+
+/** Ambersight's own health: a token that expires soon leaves it blind, and one that can do more than read should not exist. */
 export function healthFindings(input: CheckInput): Finding[] {
-  if (!input.tokenExpiresOn) return [];
+  const out: Finding[] = [];
+  const scope = input.tokenScope;
+  if (scope?.state === 'unexpected') {
+    out.push(finding(
+      'health', '*', 'token-scope', 'critical',
+      `Ambersight's API token has permissions it does not need: ${scope.permissions.slice(0, 10).join(', ')}.`,
+      { permissions: scope.permissions.join(', ') },
+      'Remove them from the token under My Profile › API Tokens, or create a new read-only token and update the CF_API_TOKEN secret. If you added a read permission on purpose, you can turn this check off.',
+      TOKEN_DOCS,
+    ));
+  } else if (scope?.state === 'unverified') {
+    out.push(finding(
+      'health', '*', 'token-scope-unverified', 'info',
+      'Ambersight could not read its API token\'s permissions, so it cannot confirm that the token is still read-only.',
+      {},
+      'Add API Tokens Read to the token, or check its permissions yourself under My Profile › API Tokens.',
+      TOKEN_DOCS,
+    ));
+  }
+  if (!input.tokenExpiresOn) return out;
   const days = (new Date(input.tokenExpiresOn).getTime() - input.now.getTime()) / 86_400_000;
-  if (!Number.isFinite(days) || days > 14) return [];
+  if (!Number.isFinite(days) || days > 14) return out;
   const when = input.tokenExpiresOn.slice(0, 10);
-  return [finding(
+  out.push(finding(
     'health', '*', 'token-expiry', days <= 3 ? 'critical' : 'warning',
     days <= 0 ? `Ambersight's API token expired on ${when}. Scans stop working.` : `Ambersight's API token expires on ${when}, in ${Math.max(1, Math.round(days))} day${Math.round(days) === 1 ? '' : 's'}.`,
     { expiresOn: when },
     'Create a new read-only token (or extend this one under My Profile › API Tokens), then update the CF_API_TOKEN secret.',
-    'https://developers.cloudflare.com/fundamentals/api/get-started/create-token/',
-  )];
+    TOKEN_DOCS,
+  ));
+  return out;
 }
 
 /**
@@ -670,12 +696,13 @@ export function addChangeContext(findings: Finding[], input: CheckInput): Findin
     const audit = changes.audit.filter((a) => a.resourceId === f.script && recent(a.at)).sort((a, b) => b.at.localeCompare(a.at))[0];
     const change = removed && (!audit || removed.at >= audit.at)
       ? { at: removed.at, text: `binding ${removed.name} was removed` }
-      : audit ? { at: audit.at, text: `${audit.description || audit.action || 'a change'}${audit.actor ? ` by ${audit.actor}` : ''} (audit log)` } : null;
+      // The sentence goes to e-mail and chat, so it names no one. The actor stays in dashboard-only evidence.
+      : audit ? { at: audit.at, text: `${audit.description || audit.action ? quoted(withoutPerson(audit.description || audit.action!, audit.actor)) : 'a change'} (audit log)`, actor: audit.actor } : null;
     if (!change) return f;
     return {
       ...f,
       message: `${f.message} Shortly before, ${change.text.replace(/\.$/, '')}.`,
-      evidence: { ...f.evidence, changedAt: change.at, change: change.text },
+      evidence: { ...f.evidence, changedAt: change.at, change: change.text, ...('actor' in change && change.actor ? { changedBy: change.actor } : {}) },
       action: `Check the change of ${when(change.at)} first. ${f.action}`,
     };
   });

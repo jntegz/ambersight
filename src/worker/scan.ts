@@ -6,10 +6,11 @@
 
 import { groupsFor, inScope, repoFor, thresholdsFor, type Config } from '../shared/config';
 import { checkOf } from '../shared/findings';
+import { unexpectedPermissions } from '../shared/token';
 import type { Finding } from '../shared/types';
 import type { QuotaMetric, StorageKind } from '../shared/limits';
 import { CfClient, CronRunsTruncated, type ExceededRow, type HourlyRow, type ApiScript, type ApiWorker, type AuditEvent, type CfAlert, type CronRunRow, type D1Query, type Deployment, type InventoryItem, type QuotaRow, type ResourceOps, type ScriptSettings, type StorageSize, type Zone } from './cf';
-import { median, runChecks, type CronStats, type HourPoint, type ResourceStats, type WorkerMeta, type WorkerStats } from './checks';
+import { median, runChecks, type CheckInput, type CronStats, type HourPoint, type ResourceStats, type WorkerMeta, type WorkerStats } from './checks';
 import { countRuns } from './cron';
 import { configFrom, getAccountState, getSettings, hourFloor, isoHour, planFrom, recordUsage, setAccountState, setSettings, upsertAccount, utcMidnight, type Settings } from './db';
 import type { Env } from './env';
@@ -17,22 +18,33 @@ import { boundByMap, type InventoryFacts, type StorageKind4 } from './hygiene';
 import type { ChangeFacts } from './security';
 import { metered } from './meter';
 import { budgetFinding } from './cost';
-import { bumpRevision, historyRetention, rollupDays, rollupStatements, scanRunStatement } from './history';
+import { accountRetention, bumpRevision, historyRetention, installRetention, rollupDays, rollupStatements, scanRunStatement } from './history';
+import { anonymousAlert, anonymousAuditEvent, anonymousDeployment, anonymousFinding, markIfSwitchedOff, RESUMED_KEY } from './attribution';
 import { fetchIncidents, type Incident } from './incidents';
 import { allowedFetch } from './net';
 import { sendAlerts } from './notify';
+import { safeError, sqlShape } from './redact';
 import { isNewer, REPO, VERSION } from './version';
-import { fetchLockfile, LockfileError, npmLatest, packageFindings, type LockedDep, type PackageRow } from './packages';
+import { COMPARED_LATEST, fetchLockfile, LockfileError, npmLatest, packageFindings, REPO_NOT_ALLOWED, repoAllowed, repoAllowlist, type LockedDep, type PackageRow } from './packages';
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 /** Subrequests per run, leaving room for alerts and the update check. */
 const BUDGET = { free: 42, paid: 900 };
+/** What one invocation may use in all, to work out the room left for alert sends. */
+const SUBREQUEST_LIMIT = { free: 50, paid: 1000 };
+const D1_QUERY_LIMIT = { free: 50, paid: 1000 };
+/** The update check and the status page are fetched outside the API client's count. */
+const UNCOUNTED_FETCHES = 2;
+/** D1 queries the alert code and the end of the scan need besides one per send. */
+const ALERT_QUERIES = 12;
 const DETAIL_MAX_AGE = 6 * HOUR;
 /** Per-zone tasks (routes, certificates, DNS) are refreshed this often, a few zones per scan. */
 const ZONE_TASK_MAX_AGE = DAY - HOUR;
 /** Lockfiles and npm latest versions are read once a day. */
 const PACKAGES_MAX_AGE = DAY - HOUR;
+/** What is kept of an out-of-scope Worker's bindings: only what account-wide checks read. */
+const ACCOUNT_WIDE_BINDINGS = new Set(['kv_namespace', 'd1', 'r2_bucket', 'queue', 'durable_object_namespace', 'workflow', 'ai']);
 
 export interface ScanResult {
   skipped?: boolean;
@@ -52,7 +64,14 @@ export interface ScanResult {
  * (from the scan queue) only carries on with what the last scan could not finish, per-Worker
  * detail and zones, and skips the reads and alerts that scan already did.
  */
-export async function runScan(rawEnv: Env, now = new Date(), opts: { account: string; force?: boolean; continuation?: boolean }): Promise<ScanResult> {
+export async function runScan(
+  rawEnv: Env, now = new Date(),
+  opts: {
+    account: string; force?: boolean; continuation?: boolean;
+    /** D1 queries this invocation made before the scan, and those it still needs after it. */
+    d1Used?: number; d1Reserve?: number;
+  },
+): Promise<ScanResult> {
   const started = Date.now();
   const { db, meter } = metered(rawEnv.DB);
   const env = { ...rawEnv, DB: db };
@@ -91,12 +110,20 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
   const inventory = mergeInventory(scripts, apiWorkers ?? [], stamp);
   const { results: known } = await db
     .prepare(
-      `SELECT name, detail_checked_at, packages_checked_at, bindings, bindings LIKE '%durable_object_namespace%' AS has_do,
+      `SELECT name, tags, detail_checked_at, packages_checked_at, packages_error, bindings, bindings LIKE '%durable_object_namespace%' AS has_do,
          bindings LIKE '%"type":"workflow"%' AS has_workflow, bindings LIKE '%"type":"ai"%' AS has_ai
        FROM workers WHERE account = ?1`,
     )
     .bind(accountId)
-    .all<{ name: string; detail_checked_at: string | null; packages_checked_at: string | null; bindings: string | null; has_do: number | null; has_workflow: number | null; has_ai: number | null }>();
+    .all<{ name: string; tags: string | null; detail_checked_at: string | null; packages_checked_at: string | null; packages_error: string | null; bindings: string | null; has_do: number | null; has_workflow: number | null; has_ai: number | null }>();
+  // Tags come from the Workers list. Without it this scan keeps the last ones known, so a Worker
+  // scoped by a tag does not change sides because one call failed.
+  if (!apiWorkers) {
+    const stored = new Map(known.map((k) => [k.name, k.tags]));
+    for (const w of inventory) w.tags = parse<string[]>(stored.get(w.name) ?? null, []);
+  }
+  // Scope is worked out from the name and tags alone, so nothing else is needed to apply it.
+  const scoped = new Set(inventory.filter((w) => inScope(config, w.name, groupsFor(config, w.name, w.tags))).map((w) => w.name));
   const knownNames = new Set(known.map((k) => k.name));
   const currentNames = new Set(inventory.map((w) => w.name));
   const fleetEvents: { at: string; kind: string; script: string; detail?: string }[] = knownNames.size
@@ -319,10 +346,14 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
       detectedPlan = (await cf.detectPlan()) ?? detectedPlan;
     }
     // The token's own expiry, so Ambersight can warn before it goes blind.
-    await cf.verifyToken().then((t) => {
+    // Its permissions too, against the list of what Ambersight expects: one more call a day.
+    let granted: string[] | null = null;
+    await cf.verifyToken().then(async (t) => {
       settings.token_expires_on = t.expiresOn ?? '';
       settings.token_status = t.status;
+      granted = await cf.tokenPermissions(t.id, t.owner);
     }).catch(() => {});
+    Object.assign(settings, tokenScopeState(granted, settings));
     // The update check is install-wide: one account's inventory run does it for all.
     if (config.updateCheck && now.getTime() - new Date(global.update_checked_at ?? 0).getTime() > 20 * HOUR) {
       await checkForUpdate(global).catch((e: Error) => warnings.push(`Update check failed: ${e.message}`));
@@ -368,6 +399,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
     const from = new Date(Math.max(now.getTime() - 7 * DAY, new Date(settings.cf_alerts_at ?? 0).getTime() - HOUR));
     try {
       cfAlerts = await cf.alertHistory(from);
+      if (!config.recordAttribution) cfAlerts = cfAlerts.map(anonymousAlert);
       settings.cf_alerts_at = stamp;
     } catch (e) {
       // Usually the Notifications Read permission is missing: say so once a day, not every scan.
@@ -425,7 +457,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
     const from = new Date(settings.audit_at || now.getTime() - DAY);
     try {
       const r = await cf.auditLogs(from, now, settings.audit_cursor || undefined);
-      auditEvents = r.events;
+      auditEvents = config.recordAttribution ? r.events : r.events.map(anonymousAuditEvent);
       settings.audit_cursor = r.cursor ?? '';
       // With more pages to read, keep the same window and continue from the cursor next scan.
       if (!r.cursor) settings.audit_at = stamp;
@@ -437,17 +469,25 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
   }
 
   // 6. Per-Worker detail on a rotating cursor: settings (bindings), deployments, schedules.
-  const checkedAt = new Map(known.map((k) => [k.name, k.detail_checked_at]));
+  const wantSettings = config.modules.deprecation || config.modules.zombies || config.modules.drift;
+  const wantDeploys = config.modules.timeline;
+  // A Worker back in scope holds only the bindings kept while it was out: it goes first, however
+  // recently it was read.
+  const trimmedBefore = new Set(parseJson<string[]>(settings.trimmed_bindings, []));
+  const checkedAt = new Map(known.map((k) => [k.name, wantSettings && trimmedBefore.has(k.name) && scoped.has(k.name) ? null : k.detail_checked_at]));
   const due = inventory
     .filter((w) => !checkedAt.get(w.name) || now.getTime() - new Date(checkedAt.get(w.name)!).getTime() > DETAIL_MAX_AGE)
     .sort((a, b) => (checkedAt.get(a.name) ?? '').localeCompare(checkedAt.get(b.name) ?? ''));
-  const wantSettings = config.modules.deprecation || config.modules.zombies || config.modules.drift;
-  const wantDeploys = config.modules.timeline;
   const details: { name: string; settings: ScriptSettings | null; deployments: Deployment[] | null; crons: string[] | null }[] = [];
   let detailRemaining = 0;
+  // An out-of-scope Worker gets no deployment history, so no author is collected for it. Its
+  // bindings are still read: the unused-storage checks and the Resources page must know what every
+  // Worker binds, or storage it uses would be reported as safe to delete. Its schedule counts
+  // toward the account's Cron Trigger limit.
   for (const w of due) {
     const isCron = w.handlers.includes('scheduled');
-    const cost = (wantSettings ? 1 : 0) + (wantDeploys ? 1 : 0) + (isCron ? 1 : 0);
+    const inScopeNow = scoped.has(w.name);
+    const cost = (wantSettings ? 1 : 0) + (wantDeploys && inScopeNow ? 1 : 0) + (isCron ? 1 : 0);
     if (cost > left()) {
       detailRemaining = due.length - details.length;
       break;
@@ -458,14 +498,21 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
         d.settings = await cf.scriptSettings(w.name);
         // Config drift: a binding (or secret) that was there at the last read and is gone now.
         const before = known.find((k) => k.name === w.name)?.bindings;
-        if (before && config.modules.drift) {
+        if (before && config.modules.drift && inScopeNow) {
           const now_ = new Set(d.settings.bindings.map((b) => b.name));
           for (const b of parse<{ name: string; type: string }[]>(before, [])) {
             if (b.type !== 'tail_consumer' && !now_.has(b.name)) fleetEvents.push({ at: stamp, kind: 'binding-removed', script: w.name, detail: b.name });
           }
         }
       }
-      if (wantDeploys) d.deployments = await cf.deployments(w.name);
+      if (wantDeploys && inScopeNow) {
+        const deployments = await cf.deployments(w.name);
+        // Cloudflare keeps listing old deploys, so one past the retention period is stored again until
+        // the next daily clean-up. It comes back without a name, so an erased name cannot return. The
+        // same goes for a deploy from before recording was last turned on, whose row may be gone.
+        const namesFrom = Math.max(now.getTime() - config.retentionDays * DAY, Date.parse(global[RESUMED_KEY] ?? '') || 0);
+        d.deployments = deployments.map((x) => (config.recordAttribution && Date.parse(x.created_on) >= namesFrom ? x : anonymousDeployment(x)));
+      }
       if (isCron) d.crons = await cf.schedules(w.name);
     } catch (e) {
       warnings.push(`Details for ${w.name} unavailable: ${(e as Error).message}`);
@@ -483,15 +530,23 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
       warnings.push('The Packages check is on, but GITHUB_TOKEN is not set (wrangler secret put GITHUB_TOKEN).');
     } else {
       const pkgAt = new Map(known.map((k) => [k.name, k.packages_checked_at]));
-      const pkgDue = inventory
-        .filter((w) => repoFor(config, accountId, w.name))
-        .filter((w) => !pkgAt.get(w.name) || now.getTime() - new Date(pkgAt.get(w.name)!).getTime() > PACKAGES_MAX_AGE)
+      const pkgError = new Map(known.map((k) => [k.name, k.packages_error]));
+      const allowlist = repoAllowlist(env.GITHUB_REPO_ALLOWLIST);
+      const mapped = inventory.filter((w) => scoped.has(w.name) && repoFor(config, accountId, w.name));
+      const allowed = mapped.filter((w) => repoAllowed(allowlist, repoFor(config, accountId, w.name)!.repo));
+      // Outside the allowlist: not read, and what was read before is dropped. Costs no request.
+      for (const w of mapped) {
+        if (!allowed.includes(w) && pkgError.get(w.name) !== REPO_NOT_ALLOWED) lockfiles.push({ script: w.name, deps: [], error: REPO_NOT_ALLOWED });
+      }
+      const refusedNow = lockfiles.length;
+      const pkgDue = allowed
+        .filter((w) => !pkgAt.get(w.name) || pkgError.get(w.name) === REPO_NOT_ALLOWED || now.getTime() - new Date(pkgAt.get(w.name)!).getTime() > PACKAGES_MAX_AGE)
         .sort((a, b) => (pkgAt.get(a.name) ?? '').localeCompare(pkgAt.get(b.name) ?? ''));
       let pkgRemaining = 0;
       for (const w of pkgDue) {
         // Keep a couple of calls for npm, so new packages get their latest version soon.
         if (left() < 3) {
-          pkgRemaining = pkgDue.length - lockfiles.length;
+          pkgRemaining = pkgDue.length - (lockfiles.length - refusedNow);
           break;
         }
         pkgCalls++;
@@ -505,11 +560,13 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
         }
       }
       if (pkgRemaining) warnings.push(`${pkgRemaining} Workers will get their packages read on the next scans.`);
-      const fresh = [...new Set(lockfiles.flatMap((l) => (l.deps ?? []).map((d) => d.name)))];
+      // Only packages whose lockfile entry shows they came from the public registry are looked up
+      // there. Any other name may be private, and must not leave the install.
+      const fresh = [...new Set(lockfiles.flatMap((l) => (l.deps ?? []).filter((d) => d.source === 'registry').map((d) => d.name)))];
       if (left() > 0) {
         const { results: stale } = await db
           .prepare(
-            `SELECT p.name FROM (SELECT name FROM worker_packages WHERE account = ?1 UNION SELECT value FROM json_each(?2)) AS p
+            `SELECT p.name FROM (SELECT name FROM worker_packages WHERE account = ?1 AND source = 'registry' UNION SELECT value FROM json_each(?2)) AS p
              LEFT JOIN npm_latest n ON n.name = p.name WHERE n.checked_at IS NULL OR n.checked_at < ?3
              ORDER BY n.checked_at IS NOT NULL, n.checked_at LIMIT ?4`,
           )
@@ -532,6 +589,21 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
   // 7. Write everything in one batch. ?1 is always the account.
   const j = JSON.stringify;
   const A = accountId;
+  // Which Workers hold only part of their bindings, for the next scans and for loadFacts below.
+  const trimmedNow = new Set([...trimmedBefore].filter((n) => currentNames.has(n)));
+  const detailRows = details.map((d) => {
+    const inScopeNow = scoped.has(d.name);
+    const all = d.settings ? [...d.settings.bindings, ...d.settings.tail_consumers.map((t) => ({ type: 'tail_consumer', name: t, target: t }))] : null;
+    // Also trims what an earlier scan stored, for a Worker that has since left the scope.
+    const stored = !all && !inScopeNow ? known.find((k) => k.name === d.name)?.bindings : null;
+    const kept = inScopeNow ? all : (all ?? parse<{ type: string }[] | null>(stored ?? null, null))?.filter((b) => ACCOUNT_WIDE_BINDINGS.has(b.type));
+    if (kept && !inScopeNow) trimmedNow.add(d.name);
+    if (kept && inScopeNow) trimmedNow.delete(d.name);
+    return { name: d.name, bindings: kept ? j(kept) : null, flags: d.settings && inScopeNow ? j(d.settings.compatibility_flags) : null };
+  });
+  const trimmedJson = j([...trimmedNow].sort());
+  const trimmedChanged = trimmedJson !== (settings.trimmed_bindings ?? '[]');
+  settings.trimmed_bindings = trimmedJson;
   const writes: D1PreparedStatement[] = [
     db.prepare(
       `INSERT INTO workers (account, name, has_modules, compatibility_date, compat_flags, handlers, usage_model, created_on, modified_on,
@@ -601,11 +673,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
        FROM json_each(?2) AS d WHERE workers.account = ?1 AND workers.name = json_extract(d.value,'$.name')`,
     ).bind(
       A,
-      j(details.map((d) => ({
-        name: d.name,
-        bindings: d.settings ? j([...d.settings.bindings, ...d.settings.tail_consumers.map((t) => ({ type: 'tail_consumer', name: t, target: t }))]) : null,
-        flags: d.settings ? j(d.settings.compatibility_flags) : null,
-      }))),
+      j(detailRows),
       stamp,
     ),
     db.prepare(
@@ -628,7 +696,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
   ];
   if (lockfiles.length) {
     const read = lockfiles.filter((l) => l.deps);
-    const rows = read.flatMap((l) => l.deps!.map((d) => ({ script: l.script, name: d.name, locked: d.locked, dev: d.dev ? 1 : 0 })));
+    const rows = read.flatMap((l) => l.deps!.map((d) => ({ script: l.script, name: d.name, locked: d.locked, dev: d.dev ? 1 : 0, source: d.source })));
     writes.push(
       // Dependencies removed from a lockfile that was read again.
       db.prepare(
@@ -636,10 +704,10 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
            AND NOT EXISTS (SELECT 1 FROM json_each(?3) AS n WHERE json_extract(n.value,'$.script') = worker_packages.script AND json_extract(n.value,'$.name') = worker_packages.name)`,
       ).bind(A, j(read.map((l) => l.script)), j(rows)),
       db.prepare(
-        `INSERT INTO worker_packages (account, script, name, locked, dev)
-         SELECT ?1, json_extract(value,'$.script'), json_extract(value,'$.name'), json_extract(value,'$.locked'), json_extract(value,'$.dev') FROM json_each(?2) WHERE true
-         ON CONFLICT(account, script, name) DO UPDATE SET locked = excluded.locked, dev = excluded.dev
-         WHERE worker_packages.locked IS NOT excluded.locked OR worker_packages.dev IS NOT excluded.dev`,
+        `INSERT INTO worker_packages (account, script, name, locked, dev, source)
+         SELECT ?1, json_extract(value,'$.script'), json_extract(value,'$.name'), json_extract(value,'$.locked'), json_extract(value,'$.dev'), json_extract(value,'$.source') FROM json_each(?2) WHERE true
+         ON CONFLICT(account, script, name) DO UPDATE SET locked = excluded.locked, dev = excluded.dev, source = excluded.source
+         WHERE worker_packages.locked IS NOT excluded.locked OR worker_packages.dev IS NOT excluded.dev OR worker_packages.source IS NOT excluded.source`,
       ).bind(A, j(rows)),
       db.prepare(
         `UPDATE workers SET packages_checked_at = ?3, packages_error = json_extract(d.value,'$.error')
@@ -780,7 +848,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
         `INSERT INTO d1_queries (account, hash, database_id, query, rows_read, rows_returned, runs, at)
          SELECT ?1, json_extract(value,'$.hash'), json_extract(value,'$.databaseId'), json_extract(value,'$.query'), json_extract(value,'$.rowsRead'),
            json_extract(value,'$.rowsReturned'), json_extract(value,'$.runs'), ?3 FROM json_each(?2) WHERE true ON CONFLICT(account, hash) DO NOTHING`,
-      ).bind(A, j(d1Queries.map((q) => ({ ...q, query: q.query.slice(0, 2000), hash: hashText(`${q.databaseId}|${q.query}`) }))), stamp),
+      ).bind(A, j(d1Queries.map((q) => ({ ...q, query: sqlShape(q.query).slice(0, 2000), hash: hashText(`${q.databaseId}|${q.query}`) }))), stamp),
     );
   }
   if (incidents?.length) {
@@ -803,8 +871,11 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
          FROM json_each(?2) WHERE true ON CONFLICT(account, kind, id) DO NOTHING`,
       ).bind(A, j(refreshed.filter((r) => refreshedKinds.has(r.kind)).map((r) => ({ ...r, extra: r.extra ? j(r.extra) : null })))),
       // Retention, once per inventory refresh.
-      ...retentionDeletes(db, A, now, config.retentionDays),
+      ...accountRetention(db, A, now, config.retentionDays),
+      ...installRetention(db, now, config.retentionDays),
       ...historyRetention(db, A, now),
+      // What an earlier scan kept about Workers that are out of scope now.
+      db.prepare('DELETE FROM deployments WHERE account = ?1 AND script IN (SELECT value FROM json_each(?2))').bind(A, j(inventory.map((w) => w.name).filter((n) => !scoped.has(n)))),
       // Housekeeping progress for the overview, counted once a day instead of on every page load.
       db.prepare(
         `INSERT INTO account_state (account, key, value)
@@ -817,9 +888,15 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
         `DELETE FROM resource_activity WHERE account = ?1 AND NOT EXISTS
            (SELECT 1 FROM resources r WHERE r.account = ?1 AND r.kind = resource_activity.kind AND r.id = resource_activity.resource)`,
       ).bind(A),
-      // Packages of Workers that are gone or no longer mapped.
+      // Packages of Workers that are gone, out of scope or no longer mapped.
       db.prepare('DELETE FROM worker_packages WHERE account = ?1 AND script NOT IN (SELECT value FROM json_each(?2))')
-        .bind(A, j(inventory.map((w) => w.name).filter((n) => repoFor(config, A, n)))),
+        .bind(A, j(inventory.map((w) => w.name).filter((n) => scoped.has(n) && repoFor(config, A, n)))),
+      // With its packages gone, such a Worker is read again as soon as it is back.
+      db.prepare('UPDATE workers SET packages_checked_at = NULL WHERE account = ?1 AND packages_checked_at IS NOT NULL AND name NOT IN (SELECT value FROM json_each(?2))')
+        .bind(A, j(inventory.map((w) => w.name).filter((n) => scoped.has(n) && repoFor(config, A, n)))),
+      // Registry answers no package row can use any more, such as a private name looked up by an
+      // older version once its lockfile shows where it comes from. Rows with no source yet still use theirs.
+      db.prepare(`DELETE FROM npm_latest WHERE name NOT IN (SELECT name FROM worker_packages WHERE source IS NOT 'other')`),
       upsertAccount(db, { id: A, detectedPlan }, now),
     );
   }
@@ -829,6 +906,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
   writes.push(
     setAccountState(db, A, {
       ...(rolled.length ? { rollup_day: rolled.at(-1)! } : {}),
+      ...(trimmedChanged ? { trimmed_bindings: trimmedJson } : {}),
       ...Object.fromEntries((['gql_merge', 'gql_merge_ops', 'gql_merge_sizes'] as const).flatMap((k) =>
         settings[k] ? [[k, settings[k]], [`${k}_checked`, settings[`${k}_checked`] ?? stamp]] : [])),
       ...(settings.cpu_sum ? { cpu_sum: settings.cpu_sum } : {}),
@@ -838,6 +916,7 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
       ...(settings.quota_unavailable != null ? { quota_unavailable: settings.quota_unavailable } : {}),
       ...(settings.ops_since != null ? { ops_since: settings.ops_since } : {}),
       ...(settings.token_status ? { token_expires_on: settings.token_expires_on ?? '', token_status: settings.token_status } : {}),
+      ...(settings.token_scope ? { token_scope: settings.token_scope, token_scope_unexpected: settings.token_scope_unexpected ?? '[]' } : {}),
       ...(settings.cf_alerts_at ? { cf_alerts_at: settings.cf_alerts_at } : {}),
       ...(settings.audit_at != null ? { audit_at: settings.audit_at } : {}),
       ...(settings.audit_cursor != null ? { audit_cursor: settings.audit_cursor } : {}),
@@ -857,7 +936,9 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
       ...(global.latest_version ? { latest_version: global.latest_version, latest_url: global.latest_url ?? '' } : {}),
     }));
   }
-  await db.batch(writes);
+  // This scan read its settings a while ago: recording may have been turned off since.
+  const lateSwitch = config.recordAttribution ? [markIfSwitchedOff(db, stamp)] : [];
+  await db.batch([...writes, ...lateSwitch]);
 
   // 8. Checks.
   // Judge crons only on runs fetched in this scan: stored rows from an earlier scan lack the recent hours.
@@ -881,9 +962,10 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
     quotaToday: facts.quotaToday,
     storage: facts.storage,
     tokenExpiresOn: facts.tokenExpiresOn,
+    tokenScope: facts.tokenScope,
     changes: facts.changes,
   });
-  if (config.modules.packages) findings.push(...(await loadPackageFindings(db, accountId, config)));
+  if (config.modules.packages) findings.push(...(await loadPackageFindings(db, accountId, config, scoped)));
   // Monthly budget (Workers Paid, when set): one read of this month's daily totals.
   const monthlyBudget = config.accounts[accountId]?.budgetUsd;
   if (monthlyBudget && plan === 'paid' && config.modules.cost) {
@@ -896,16 +978,27 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
   // findings as they are rather than resolving them as if every cron had recovered.
   // Cron findings stay as they are when this scan did not read cron runs (paused, or a continuation).
   const keepModules = cronTruncated || cronDataEmpty || light ? ['cron'] : [];
-  const changed = await saveFindings(db, accountId, muted.size ? findings.filter((f) => !muted.has(checkOf(f))) : findings, stamp, keepModules, inventory.map((w) => w.name));
+  const kept = muted.size ? findings.filter((f) => !muted.has(checkOf(f))) : findings;
+  const changed = await saveFindings(db, accountId, config.recordAttribution ? kept : kept.map(anonymousFinding), stamp, keepModules, inventory.map((w) => w.name));
 
   // 9. Alerts and digest, then the run's own cost.
-  if (!light) await sendAlerts(env, now, config).catch((e: Error) => warnings.push(`Alerts failed: ${e.message}`));
+  // Every message counts as one subrequest, the safe reading of the Free limit, and one D1 write.
+  // The D1 limit is per invocation, so what ran before this scan and what must run after it count too.
+  if (!light) {
+    const d1Left = D1_QUERY_LIMIT[plan] - (opts.d1Used ?? 0) - meter.queries - ALERT_QUERIES - (opts.d1Reserve ?? 0);
+    const sends = Math.max(0, Math.min(SUBREQUEST_LIMIT[plan] - calls() - UNCOUNTED_FETCHES, d1Left));
+    await sendAlerts(env, now, config, { left: sends })
+      .then((w) => warnings.push(...w))
+      .catch((e: Error) => warnings.push(`Alerts failed: ${e.message}`));
+  }
+  // Warnings carry upstream error text: they are stored, and shown to whoever pressed Scan now.
+  const safeWarnings = warnings.map((w) => safeError(w));
   await db.batch([
     setAccountState(db, A, {
       last_scan_at: stamp,
       last_scan_calls: String(calls()),
       last_scan_ms: String(Date.now() - started),
-      last_scan_warnings: j(warnings),
+      last_scan_warnings: j(safeWarnings),
       scan_failures: '0',
     }),
     recordUsage(db, now, { cronRuns: 1, subrequests: calls(), rowsRead: meter.rowsRead, rowsWritten: meter.rowsWritten }),
@@ -914,9 +1007,10 @@ export async function runScan(rawEnv: Env, now = new Date(), opts: { account: st
       warnings: warnings.length, findings: findings.length, opened: changed.opened, resolved: changed.resolved,
     }),
     bumpRevision(db),
+    ...(config.recordAttribution ? [markIfSwitchedOff(db, stamp)] : []),
   ]);
 
-  return { workers: inventory.length, findings: findings.length, subrequests: calls(), d1Queries: meter.queries, warnings, detailRemaining, zonesRemaining: zonesLeft };
+  return { workers: inventory.length, findings: findings.length, subrequests: calls(), d1Queries: meter.queries, warnings: safeWarnings, detailRemaining, zonesRemaining: zonesLeft };
 }
 
 async function monthBudget(db: D1Database, account: string, now: Date, storage: { kind: string; bytes: number }[], budget: number): Promise<Finding | null> {
@@ -931,16 +1025,26 @@ async function monthBudget(db: D1Database, account: string, now: Date, storage: 
   return budgetFinding(now, Object.fromEntries(results.map((r) => [r.metric, r.v])), totals, first, budget);
 }
 
-async function loadPackageFindings(db: D1Database, account: string, config: Config): Promise<Finding[]> {
+async function loadPackageFindings(db: D1Database, account: string, config: Config, scoped: Set<string>): Promise<Finding[]> {
   const [rowsR, errR] = await db.batch([
     db.prepare(
-      `SELECT p.script, p.name, p.locked, p.dev, n.latest FROM worker_packages p LEFT JOIN npm_latest n ON n.name = p.name WHERE p.account = ?1`,
+      `SELECT p.script, p.name, p.locked, p.dev, p.source, ${COMPARED_LATEST} FROM worker_packages p LEFT JOIN npm_latest n ON n.name = p.name WHERE p.account = ?1`,
     ).bind(account),
     db.prepare('SELECT name, packages_error FROM workers WHERE account = ?1 AND packages_error IS NOT NULL').bind(account),
   ]);
-  const rows = (rowsR.results as { script: string; name: string; locked: string; dev: number; latest: string | null }[]).map((r) => ({ ...r, dev: r.dev === 1 }));
+  const rows = (rowsR.results as { script: string; name: string; locked: string; dev: number; latest: string | null; source: string | null }[]).map((r) => ({ ...r, dev: r.dev === 1 }));
   const errors = new Map((errR.results as { name: string; packages_error: string }[]).map((r) => [r.name, r.packages_error]));
-  return packageFindings(config, account, rows as PackageRow[], errors);
+  return packageFindings(config, account, rows as PackageRow[], errors, scoped);
+}
+
+/**
+ * The account state that records the token's permissions. Permissions that cannot be read are not a
+ * pass: they show as unverified, and they do not clear what an earlier read found.
+ */
+export function tokenScopeState(granted: string[] | null, previous: Settings): Settings {
+  if (!granted?.length) return previous.token_scope === 'unexpected' ? {} : { token_scope: 'unverified', token_scope_unexpected: '[]' };
+  const unexpected = unexpectedPermissions(granted);
+  return { token_scope: unexpected.length ? 'unexpected' : 'ok', token_scope_unexpected: JSON.stringify(unexpected) };
 }
 
 export function inventoryDue(now: Date, last: string | null, config: Config): boolean {
@@ -950,28 +1054,6 @@ export function inventoryDue(now: Date, last: string | null, config: Config): bo
   if (age >= interval + 2 * HOUR) return true; // missed the preferred hour: catch up
   if (age < interval - HOUR) return false;
   return config.inventoryIntervalHours % 24 !== 0 || now.getUTCHours() === config.inventoryHourUtc;
-}
-
-function retentionDeletes(db: D1Database, account: string, now: Date, days: number): D1PreparedStatement[] {
-  const cutoff = new Date(now.getTime() - days * DAY);
-  const hour = isoHour(cutoff);
-  const iso = cutoff.toISOString();
-  return [
-    db.prepare('DELETE FROM metrics_hourly WHERE account = ?1 AND hour < ?2').bind(account, hour),
-    db.prepare('DELETE FROM cron_runs WHERE account = ?1 AND hour < ?2').bind(account, hour),
-    db.prepare('DELETE FROM resource_hourly WHERE account = ?1 AND hour < ?2').bind(account, hour),
-    db.prepare(`DELETE FROM findings WHERE account = ?1 AND status = 'resolved' AND last_seen < ?2`).bind(account, iso),
-    db.prepare('DELETE FROM deployments WHERE account = ?1 AND created_on < ?2').bind(account, iso),
-    db.prepare('DELETE FROM fleet_events WHERE account = ?1 AND at < ?2').bind(account, iso),
-    db.prepare('DELETE FROM cf_alerts WHERE account = ?1 AND sent < ?2').bind(account, iso),
-    db.prepare('DELETE FROM audit_events WHERE account = ?1 AND at < ?2').bind(account, iso),
-    db.prepare('DELETE FROM cf_incidents WHERE created_at < ?1').bind(iso),
-    // Quota totals stay at least 35 days: the cost estimate needs the whole month so far.
-    db.prepare('DELETE FROM quota_hourly WHERE account = ?1 AND hour < ?2').bind(account, isoHour(new Date(now.getTime() - Math.max(days, 35) * DAY))),
-    // Install-wide tables: any account's refresh may tidy them.
-    db.prepare('DELETE FROM usage_daily WHERE day < ?1').bind(iso.slice(0, 10)),
-    db.prepare('DELETE FROM sessions WHERE expires_at < ?1').bind(now.toISOString()),
-  ];
 }
 
 /** The newest hour in this scan's metrics, if it is newer than the stored one. */
@@ -1089,6 +1171,7 @@ export interface Facts {
   quotaToday: Partial<Record<QuotaMetric, number>>;
   storage: (StorageSize & { label: string })[];
   tokenExpiresOn: string | null;
+  tokenScope: CheckInput['tokenScope'];
   changes: ChangeFacts;
 }
 
@@ -1219,6 +1302,10 @@ export async function loadFacts(
     list.push({ id: d.id, createdOn: d.created_on });
     deps.set(d.script, list);
   }
+  const storedBindings = new Map(rows.map((w) => [w.name, w.detail_checked_at ? parse<NonNullable<WorkerMeta['bindings']>>(w.bindings, []) : null]));
+  // Back in scope but not read again yet: the stored list is only the account-wide part, so per-Worker
+  // checks treat its bindings as unknown. What it binds still counts for storage, below.
+  const trimmed = new Set(parseJson<string[]>(settings.trimmed_bindings, []));
   const meta: WorkerMeta[] = rows.map((w) => ({
     name: w.name,
     groups: groupsOf.get(w.name)!,
@@ -1227,7 +1314,7 @@ export async function loadFacts(
     compatibilityDate: w.compatibility_date,
     compatibilityFlags: parse<string[]>(w.compat_flags, []),
     usageModel: w.usage_model,
-    bindings: w.detail_checked_at ? parse(w.bindings, []) : null,
+    bindings: trimmed.has(w.name) ? null : storedBindings.get(w.name)!,
     workersDev: bool(w.workers_dev),
     previewsEnabled: bool(w.previews_enabled),
     logsEnabled: bool(w.logs_enabled),
@@ -1270,11 +1357,11 @@ export async function loadFacts(
   const bindingOwner = new Map<string, string>();
   // Every Worker bound to a resource, for the idle-loop check. Queues are bound by name, not ID.
   const boundBy = new Map<string, string[]>();
-  for (const m of meta) {
-    for (const b of m.bindings ?? []) {
+  for (const [name, bindings] of storedBindings) {
+    for (const b of bindings ?? []) {
       if (!b.target) continue;
-      if (!bindingOwner.has(b.target)) bindingOwner.set(b.target, m.name);
-      boundBy.set(b.target, [...(boundBy.get(b.target) ?? []), m.name]);
+      if (!bindingOwner.has(b.target)) bindingOwner.set(b.target, name);
+      boundBy.set(b.target, [...(boundBy.get(b.target) ?? []), name]);
     }
   }
   const recentHours = [3, 2, 1].map((n) => isoHour(new Date(hourFloor(now).getTime() - n * HOUR)));
@@ -1313,10 +1400,9 @@ export async function loadFacts(
   const firstMetrics = settings.first_metrics_at ? new Date(settings.first_metrics_at).getTime() : now.getTime();
   const storageRes = res.filter((r) => ['kv', 'd1', 'r2', 'queues'].includes(r.kind)).map((r) => ({ kind: r.kind as StorageKind4, id: r.id, name: r.name, extra: r.extra }));
   // Bound by any Worker, in scope or not: a resource another team's Worker uses is not a leftover.
-  // In-scope Workers' bindings are already parsed in meta; only the others are parsed here.
-  const parsedBindings = new Map(meta.map((m) => [m.name, m.bindings]));
+  // In-scope Workers' bindings are already parsed; only the others are parsed here.
   const storageOwners = boundByMap(
-    allRows.map((w) => ({ name: w.name, bindings: parsedBindings.has(w.name) ? parsedBindings.get(w.name)! : w.detail_checked_at ? parse<{ type: string; target?: string }[]>(w.bindings, []) : null })),
+    allRows.map((w) => ({ name: w.name, bindings: storedBindings.has(w.name) ? storedBindings.get(w.name)! : w.detail_checked_at ? parse<{ type: string; target?: string }[]>(w.bindings, []) : null })),
     storageRes,
   );
   const lastOps = new Map((activityR.results as { kind: string; resource: string; last_active_hour: string }[]).map((a) => [`${a.kind}|${a.resource}`, a.last_active_hour]));
@@ -1334,6 +1420,7 @@ export async function loadFacts(
     activitySince: parse<InventoryFacts['activitySince']>(settings.ops_since ?? null, {}),
     routes: res.filter((r) => r.kind === 'route').map((r) => ({ id: r.id, pattern: r.name ?? '', script: r.script })),
     domains: res.filter((r) => r.kind === 'domain').map((r) => ({ id: r.id, hostname: r.name ?? '', script: r.script })),
+    workerNames: new Set(allRows.map((w) => w.name)),
     // A successful listing with zero apps means nothing is covered, not that the check is off.
     accessDomains: config.modules.access && (res.some((r) => r.kind === 'access') || Boolean(settings.access_listed_at))
       ? res.filter((r) => r.kind === 'access').flatMap((r) => parse<{ domains?: string[] }>(r.extra, {}).domains ?? [])
@@ -1371,6 +1458,9 @@ export async function loadFacts(
     quotaToday: Object.fromEntries((quotaR.results as { metric: QuotaMetric; v: number }[]).map((r) => [r.metric, r.v])),
     storage,
     tokenExpiresOn: settings.token_expires_on || null,
+    tokenScope: settings.token_scope === 'unexpected'
+      ? { state: 'unexpected', permissions: parse<string[]>(settings.token_scope_unexpected ?? null, []) }
+      : settings.token_scope === 'unverified' ? { state: 'unverified' } : null,
     changes,
     accountToday: (todayR.results[0] as { n: number }).n,
     stats,
@@ -1488,6 +1578,10 @@ async function saveFindings(
          last_seen=excluded.last_seen,
          first_seen = CASE WHEN findings.status = 'resolved' THEN excluded.first_seen ELSE findings.first_seen END,
          notified_at = CASE WHEN findings.status = 'resolved' THEN NULL ELSE findings.notified_at END,
+         notified_email_at = CASE WHEN findings.status = 'resolved' THEN NULL ELSE findings.notified_email_at END,
+         notified_webhook_at = CASE WHEN findings.status = 'resolved' THEN NULL ELSE findings.notified_webhook_at END,
+         claim_email_until = CASE WHEN findings.status = 'resolved' THEN NULL ELSE findings.claim_email_until END,
+         claim_webhook_until = CASE WHEN findings.status = 'resolved' THEN NULL ELSE findings.claim_webhook_until END,
          reopen_count = findings.reopen_count + (findings.status = 'resolved'),
          status_at = CASE WHEN findings.status = 'resolved'
            OR (findings.status = 'acknowledged' AND findings.severity <> excluded.severity)

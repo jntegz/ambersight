@@ -285,15 +285,25 @@ export function reliability(events: Ev[], start: number, end: number, days: stri
   type C = { check: string; opened: number; alerted: number; acknowledged: number; snoozed: number; resolved: number; open: number[]; reopened: number };
   const checks = new Map<string, C>();
   let openedAt: string | null = null;
+  let countedAlert = -Infinity;
   let current = '';
   for (const e of events) {
     if (e.finding_id !== current) {
       current = e.finding_id;
       openedAt = null;
+      countedAlert = -Infinity;
     }
     const t = Date.parse(e.at);
     const inRange = t >= start && t < end;
-    if (e.kind === 'opened' || e.kind === 'reopened') openedAt = e.at;
+    if (e.kind === 'opened' || e.kind === 'reopened') {
+      openedAt = e.at;
+      countedAlert = -Infinity;
+    }
+    // Each channel logs its own delivery, and an open finding is alerted again after a day: deliveries
+    // within a day of the one counted are the same alert. Worked out before the range check, so an
+    // alert just before the window still covers its other channel inside it.
+    const newAlert = e.kind === 'alerted' && t - countedAlert > DAY;
+    if (newAlert) countedAlert = t;
     if (!inRange) continue;
     const day = perDay.get(e.at.slice(0, 10));
     // One row per check, not per resource: "zombies:unbound-kv-<id>" counts as zombies:unbound-kv.
@@ -305,7 +315,7 @@ export function reliability(events: Ev[], start: number, end: number, days: stri
       c.opened++;
       if (e.kind === 'reopened') c.reopened++;
     }
-    if (e.kind === 'alerted') c.alerted++;
+    if (newAlert) c.alerted++;
     if (e.kind === 'acknowledged') c.acknowledged++;
     if (e.kind === 'snoozed') c.snoozed++;
     if (e.kind === 'resolved') {
@@ -343,6 +353,16 @@ export async function buildWorkerDetail(env: Env, requested: string | undefined,
   const w = windowOf(range, now);
   const hourly = w.granularity === 'hour';
   const { rolled, start: historyStart } = await historyBounds(db, A);
+  // Out of scope means not shown: the page answers as it does for a Worker that does not exist.
+  const row = await db.prepare('SELECT tags FROM workers WHERE account = ?1 AND name = ?2').bind(A, name).first<{ tags: string | null }>();
+  if (row && !inScope(config, name, groupsFor(config, name, row.tags ? (JSON.parse(row.tags) as string[]) : []))) {
+    return {
+      name, exists: false, range, granularity: w.granularity, from: new Date(w.start).toISOString(), to: new Date(w.end).toISOString(), historyStart,
+      groups: [], handlers: [], deployedOn: null, createdOn: null, compatibilityDate: null, usageModel: null, workersDev: null, previewsEnabled: null, logsEnabled: null,
+      entryPoints: [], bindings: null, crons: [], series: fill(w.buckets, []), totals: { ...ZERO }, previous: { ...ZERO },
+      cron: [], deploys: [], recordsAttribution: config.recordAttribution, deployImpact: [], findings: [], changes: [], cost: null,
+    };
+  }
   const cronHourly = w.granularity === 'hour';
   const [series, totals, previous, workerR, schedR, entriesR, cronR, depR, findR, eventsR, auditR, impactR] = await db.batch([
     metricsQuery(db, A, w.start, w.end, rolled, w.granularity, name),
@@ -434,7 +454,7 @@ export async function buildWorkerDetail(env: Env, requested: string | undefined,
       at: e.at, kind: e.kind, detail: e.kind === 'binding-removed' ? `Binding ${e.detail} removed` : e.detail,
     })),
     ...(auditR.results as { at: string; action: string | null; description: string | null; actor: string | null }[]).map((a) => ({
-      at: a.at, kind: 'audit', detail: `${a.description || a.action || 'Change'}${a.actor ? ` (${a.actor})` : ''}`,
+      at: a.at, kind: 'audit', detail: `${a.description || a.action || 'Change'}${a.actor && config.recordAttribution ? ` (${a.actor})` : ''}`,
     })),
   ].sort((a, b) => b.at.localeCompare(a.at));
 
@@ -458,7 +478,8 @@ export async function buildWorkerDetail(env: Env, requested: string | undefined,
     totals: total,
     previous: toTotals((previous.results as Agg[])[0]),
     cron: (cronR.results as { t: string; runs: number; failures: number; cpu_max_ms: number | null }[]).map((r) => ({ t: r.t, runs: r.runs, failures: r.failures, cpuMaxMs: r.cpu_max_ms })),
-    deploys: deploys.map((d) => ({ id: d.id, createdOn: d.created_on, author: d.author, message: d.message, source: d.source, correlated: correlated.get(d.id) ?? [] })),
+    deploys: deploys.map((d) => ({ id: d.id, createdOn: d.created_on, author: config.recordAttribution ? d.author : null, message: d.message, source: d.source, correlated: correlated.get(d.id) ?? [] })),
+    recordsAttribution: config.recordAttribution,
     deployImpact,
     findings,
     changes,

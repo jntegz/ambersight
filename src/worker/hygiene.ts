@@ -36,6 +36,8 @@ export interface InventoryFacts {
   activitySince?: Partial<Record<StorageKind4, string>>;
   routes: { id: string; pattern: string; script: string | null }[];
   domains: { id: string; hostname: string; script: string | null }[];
+  /** Every Worker in the account, in scope or not. Undefined when not worked out (older callers). */
+  workerNames?: Set<string>;
   /** null = Access check off or not readable. */
   accessDomains: string[] | null;
   workersSubdomain: string | null;
@@ -307,7 +309,8 @@ function leavesBehind(only: StorageFact[] | undefined, activity: (s: StorageFact
 export function zombieFindings(now: Date, meta: WorkerMeta[], stats: WorkerStats[], inv: InventoryFacts, tf: (n: string) => Thresholds): Finding[] {
   const out: Finding[] = [];
   const byName = new Map(stats.map((s) => [s.name, s]));
-  const names = new Set(meta.map((m) => m.name));
+  // What exists, not what is watched: a Worker left out of scope is still there to point at.
+  const names = inv.workerNames ?? new Set(meta.map((m) => m.name));
   // Storage facts are only trusted once every Worker's bindings and the inventory are in.
   const storageKnown = inv.refreshed && inv.bindingsComplete;
   // Callers that do not work out boundBy (from every Worker) fall back to the in-scope Workers.

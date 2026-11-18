@@ -3,6 +3,7 @@
 // Format: https://developers.cloudflare.com/fundamentals/api/how-to/account-owned-token-template/
 // SPDX-License-Identifier: AGPL-3.0-only
 
+/** What the features that are on by default read. The same list is in the link in package.json and the README. */
 export const TOKEN_PERMISSION_KEYS = [
   'workers_scripts',
   'account_analytics',
@@ -18,8 +19,7 @@ export const TOKEN_PERMISSION_KEYS = [
   'page',
   'ssl_and_certificates',
   'dns',
-  // Optional checks: the Access coverage check, and the setup wizard proving the token has no write scopes.
-  'access',
+  // Lets the setup wizard and the daily recheck read this token's own permissions.
   'api_tokens',
 ] as const;
 
@@ -28,3 +28,37 @@ export const TOKEN_TEMPLATE_URL =
   encodeURIComponent(JSON.stringify(TOKEN_PERMISSION_KEYS.map((key) => ({ key, type: 'read' })))) +
   '&accountId=*&zoneId=all&name=' +
   encodeURIComponent('Ambersight read-only');
+
+/**
+ * Every permission Ambersight has a use for, by the name Cloudflare reports. Two are not in the link
+ * because the features that use them are optional: Access (the Access coverage check, off by
+ * default) and Notifications (it has no key for the link). A name not listed here is unexpected,
+ * whatever it is called: this is a list of what is allowed, not a guess at what looks dangerous.
+ */
+export const EXPECTED_TOKEN_PERMISSIONS = [
+  'Workers Scripts Read',
+  'Account Analytics Read',
+  'Account Settings Read',
+  'Workers KV Storage Read',
+  'D1 Read',
+  'Workers R2 Storage Read',
+  'Queues Read',
+  'Zone Read',
+  'Workers Routes Read',
+  'Billing Read',
+  'Pages Read',
+  'Cloudflare Pages Read',
+  'SSL and Certificates Read',
+  'DNS Read',
+  'API Tokens Read',
+  'Account API Tokens Read',
+  'Access: Apps and Policies Read',
+  'Notifications Read',
+] as const;
+
+const EXPECTED = new Set(EXPECTED_TOKEN_PERMISSIONS.map((p) => p.toLowerCase()));
+
+/** The granted permissions that are not on the expected list, once each. */
+export function unexpectedPermissions(granted: string[]): string[] {
+  return [...new Set(granted.filter((p) => !EXPECTED.has(p.trim().toLowerCase())))];
+}

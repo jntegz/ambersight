@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { groupsFor, inScope } from '../shared/config';
+import { quoted } from '../shared/findings';
 import { SEVERITY_WEIGHT, type AccountSummary, type Finding, type Overview, type SelfCost, type Severity, type TimelineEntry, type WorkerSummary } from '../shared/types';
 import { FREE_DAILY, STORAGE_LIMITS, type QuotaMetric, type StorageKind } from '../shared/limits';
 import type { CostEstimate, PagesSummary, QuotaStatus, StorageStatus } from '../shared/types';
@@ -48,11 +49,21 @@ export const toFinding = (r: FindingRow): Finding => ({
 /** Display name: the label from Settings, then the Cloudflare account name, then the ID. */
 export const accountLabel = (a: Pick<AccountRow, 'id' | 'name'>, config: ReturnType<typeof configFrom>) => config.accounts[a.id]?.label ?? a.name ?? a.id;
 
-/** The account a request asks for, or the first watched one. Null before setup. */
+/**
+ * The watched account a request names, never a different one: null when it is not watched. With no
+ * name, the first watched account. Null before setup. A failed read throws: it says nothing about
+ * which accounts are watched, and an empty answer would be taken for "unknown" and could be cached.
+ */
 export async function pickAccount(env: Env, requested?: string | null): Promise<{ account: AccountRow | null; accounts: AccountRow[] }> {
-  const accounts = await activeAccounts(env).catch(() => [] as AccountRow[]);
-  return { account: accounts.find((a) => a.id === requested) ?? accounts[0] ?? null, accounts };
+  const accounts = await activeAccounts(env);
+  return { account: (requested ? accounts.find((a) => a.id === requested) : accounts[0]) ?? null, accounts };
 }
+
+/** What an API token sees instead of the scan error text: that a scan failed, not why. */
+const SCAN_FAILED = 'The last scan failed.';
+export const coarseOverview = (o: Overview): Overview => ({ ...o, scanHealth: { ...o.scanHealth, lastError: o.scanHealth.lastError ? SCAN_FAILED : null } });
+export const coarseAccounts = (list: AccountSummary[]): AccountSummary[] => list.map((a) => ({ ...a, lastError: a.lastError ? SCAN_FAILED : null }));
+export const coarseSelfCost = (c: SelfCost): SelfCost => ({ ...c, lastScan: { ...c.lastScan, warnings: c.lastScan.warnings.length ? ['The last scan reported warnings.'] : [] } });
 
 export async function buildOverview(env: Env, requested?: string | null, now = new Date()): Promise<Overview> {
   const db = env.DB;
@@ -297,6 +308,8 @@ export async function buildTimeline(env: Env, account: string, days = 14): Promi
   ]);
   type Audit = { id: string; at: string; actor: string | null; action: string | null; description: string | null; product: string | null; resource_type: string | null; resource_id: string | null };
   const auditRows = audit.results as Audit[];
+  // With recording off nothing is shown, even while the stored names are still being erased.
+  const recorded = config.recordAttribution;
   const tags = new Map((workers.results as { name: string; tags: string | null }[]).map((w) => [w.name, w.tags ? (JSON.parse(w.tags) as string[]) : []]));
   const correlated = new Map<string, string[]>();
   for (const f of findings.results as { code: string; evidence: string }[]) {
@@ -312,7 +325,8 @@ export async function buildTimeline(env: Env, account: string, days = 14): Promi
       id: d.id,
       createdOn: d.created_on,
       // A deploy from CI or the dashboard may carry no author: take it from the audit log.
-      author: d.author ?? auditActor(auditRows, d.script, d.created_on),
+      author: recorded ? d.author ?? auditActor(auditRows, d.script, d.created_on) : null,
+      ...(recorded ? {} : { authorNotRecorded: true as const }),
       message: d.message,
       source: d.source,
       groups,
@@ -340,7 +354,8 @@ export async function buildTimeline(env: Env, account: string, days = 14): Promi
       script: a.resource_id && tags.has(a.resource_id) ? a.resource_id : '*',
       id: `audit-${a.id}`,
       createdOn: a.at,
-      author: a.actor,
+      author: recorded ? a.actor : null,
+      ...(recorded ? {} : { authorNotRecorded: true as const }),
       message: a.description || `${a.action ?? 'change'} ${a.resource_type ?? ''}`.trim(),
       source: a.product ?? a.resource_type,
       groups: [],
@@ -368,7 +383,7 @@ export async function buildTimeline(env: Env, account: string, days = 14): Promi
       id: `pages-${latest.id}`,
       createdOn: latest.createdOn,
       author: null,
-      message: `${latest.environment || 'Pages'} deploy${latest.branch ? ` of ${latest.branch}` : ''}: ${latest.status === 'failure' ? `failed at ${latest.stage}` : latest.status || 'in progress'}`,
+      message: `${latest.environment || 'Pages'} deploy${latest.branch ? ` of ${quoted(latest.branch)}` : ''}: ${latest.status === 'failure' ? `failed at ${latest.stage}` : latest.status || 'in progress'}`,
       source: 'Pages',
       groups: [],
       correlated: latest.status === 'failure' ? ['deploy-failed'] : [],
