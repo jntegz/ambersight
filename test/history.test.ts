@@ -23,6 +23,7 @@ const ctx = { waitUntil: () => {}, passThroughOnException: () => {} } as unknown
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
   usageBuffer.reset();
 });
 
@@ -328,6 +329,9 @@ describe('analytics and the Worker page', () => {
   });
 
   it('shows one Worker with its series, deploys, before and after, and findings', async () => {
+    // The Worker page request uses the current time; pin it to the fixture date.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
     const hourly = [
       ...HOURLY,
       { scriptName: 'api', datetimeHour: '2026-11-09T10:00:00Z', requests: 80, errors: 8 },

@@ -59,6 +59,8 @@
   .what { flex: 1 1 280px; min-width: 0; overflow-wrap: anywhere; }
   .what strong { font-weight: 500; }
   .target { display: block; font-size: 13px; color: var(--ink-muted); }
-  .meta { font-size: 13px; white-space: nowrap; }
+  /* The line can carry a delivery notice, so it wraps on a phone; the session code and time stay whole. */
+  .meta { font-size: 13px; min-width: 0; }
+  .meta .mono, .meta time { white-space: nowrap; }
   .warn { color: var(--critical); }
 </style>

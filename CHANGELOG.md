@@ -52,6 +52,7 @@ A security and privacy release, from a full threat model of Ambersight. Nothing 
 - Ambersight rechecks the API token's permissions and raises a critical finding if it gained more than expected. The token template no longer asks for Access by default.
 - The Packages check compares only packages that came from the public npm registry, so private package names are not sent there. `GITHUB_REPO_ALLOWLIST` can limit which repositories it reads.
 - Wildcard patterns run in linear time, CSV exports neutralize spreadsheet formulas, and scans get a lease and cooldown so they do not overlap or pile up.
+- The Admin activity list no longer makes the Settings page scroll sideways on a phone.
 
 ## 1.1.2 (2026-11-12)
 

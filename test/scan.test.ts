@@ -39,7 +39,10 @@ async function openFindings(db: D1Database) {
   return results;
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 
 /** Scans the test account, registering it first like the setup wizard does. */
 async function scan(e: Env, now: Date, opts: { force?: boolean } = {}) {
@@ -78,6 +81,9 @@ describe('first scan of a small fleet', () => {
   });
 
   it('builds the overview, timeline and self-cost views', async () => {
+    // The self-cost view reads the clock itself; pin it to the fixture date.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
     stub();
     const { env: e } = env();
     await scan(e, NOW);
