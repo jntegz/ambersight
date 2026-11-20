@@ -106,24 +106,30 @@ describe('stuck rollouts', () => {
 describe('config drift', () => {
   it('flags a binding that disappeared and is still missing', () => {
     const removed = [{ script: 'api', name: 'STRIPE_KEY', at: '2026-11-08T10:00:00Z' }];
-    const [f] = driftFindings([meta({ bindings: [{ type: 'kv_namespace', name: 'CACHE' }] })], facts({ removedBindings: removed }));
+    const [f] = driftFindings([meta({ bindings: [{ type: 'kv_namespace', name: 'CACHE' }] })], facts({ removedBindings: removed }), 'free');
     expect(f).toMatchObject({ code: 'binding-removed-STRIPE_KEY', severity: 'warning' });
     expect(checkOf(f)).toBe('drift:binding-removed');
-    expect(driftFindings([meta({ bindings: [{ type: 'secret_text', name: 'STRIPE_KEY' }] })], facts({ removedBindings: removed }))).toEqual([]);
+    expect(driftFindings([meta({ bindings: [{ type: 'secret_text', name: 'STRIPE_KEY' }] })], facts({ removedBindings: removed }), 'free')).toEqual([]);
   });
   it('compares staging and production binding names', () => {
     const f = driftFindings([
       meta({ name: 'api', bindings: [{ type: 'kv_namespace', name: 'CACHE' }] }),
       meta({ name: 'api-staging', bindings: [{ type: 'kv_namespace', name: 'CACHE' }, { type: 'secret_text', name: 'NEW_FLAG' }] }),
-    ], facts());
+    ], facts(), 'free');
     expect(f).toMatchObject([{ script: 'api', code: 'env-mismatch-api-staging', severity: 'info' }]);
     expect(f[0].message).toContain('NEW_FLAG');
   });
-  it('warns close to 64 variables and secrets', () => {
-    const vars = (n: number) => Array.from({ length: n }, (_, i) => ({ type: i % 2 ? 'secret_text' : 'plain_text', name: `V${i}` }));
-    expect(driftFindings([meta({ bindings: vars(57) })], facts())).toEqual([]);
-    expect(driftFindings([meta({ bindings: vars(60) })], facts())[0]).toMatchObject({ code: 'vars-near-limit', severity: 'info' });
-    expect(driftFindings([meta({ bindings: vars(64) })], facts())[0].severity).toBe('warning');
+  const vars = (n: number) => Array.from({ length: n }, (_, i) => ({ type: i % 2 ? 'secret_text' : 'plain_text', name: `V${i}` }));
+  it('warns close to 64 variables and secrets on Free', () => {
+    expect(driftFindings([meta({ bindings: vars(57) })], facts(), 'free')).toEqual([]);
+    expect(driftFindings([meta({ bindings: vars(60) })], facts(), 'free')[0]).toMatchObject({ code: 'vars-near-limit', severity: 'info' });
+    expect(driftFindings([meta({ bindings: vars(64) })], facts(), 'free')[0].severity).toBe('warning');
+  });
+  it('warns close to 128 variables and secrets on Paid', () => {
+    expect(driftFindings([meta({ bindings: vars(64) })], facts(), 'paid')).toEqual([]);
+    expect(driftFindings([meta({ bindings: vars(115) })], facts(), 'paid')).toEqual([]);
+    expect(driftFindings([meta({ bindings: vars(116) })], facts(), 'paid')[0]).toMatchObject({ severity: 'info', evidence: { variables: 116, limit: 128 } });
+    expect(driftFindings([meta({ bindings: vars(128) })], facts(), 'paid')[0].severity).toBe('warning');
   });
 });
 
@@ -244,6 +250,19 @@ describe('Tier 2 end to end', () => {
     await runScan(e, new Date(NOW.getTime() + 7 * 3_600_000), { account: 'acc1' });
     const f = await e.DB.prepare(`SELECT severity FROM findings WHERE account = 'acc1' AND code = 'binding-removed-STRIPE_KEY' AND status = 'open'`).first<{ severity: string }>();
     expect(f?.severity).toBe('warning');
+  });
+
+  it('stores the Worker\'s own CPU limit and clears it when the setting goes', async () => {
+    let settings: Record<string, unknown> = { bindings: [], limits: { cpu_ms: 300_000 } };
+    stubWith((url) => (url.pathname.endsWith('/workers/scripts/api/settings') ? ok(settings) : null));
+    const e = newEnv();
+    await upsertAccount(e.DB, { id: 'acc1' }, NOW).run();
+    await runScan(e, NOW, { account: 'acc1' });
+    const limit = () => e.DB.prepare(`SELECT cpu_limit_ms FROM workers WHERE account = 'acc1' AND name = 'api'`).first<{ cpu_limit_ms: number | null }>();
+    expect((await limit())?.cpu_limit_ms).toBe(300_000);
+    settings = { bindings: [] };
+    await runScan(e, new Date(NOW.getTime() + 7 * 3_600_000), { account: 'acc1' });
+    expect((await limit())?.cpu_limit_ms).toBeNull();
   });
 
   it('names an active Cloudflare incident on alerts only when the check is on', async () => {

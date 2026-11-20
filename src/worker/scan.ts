@@ -599,7 +599,7 @@ export async function runScan(
     const kept = inScopeNow ? all : (all ?? parse<{ type: string }[] | null>(stored ?? null, null))?.filter((b) => ACCOUNT_WIDE_BINDINGS.has(b.type));
     if (kept && !inScopeNow) trimmedNow.add(d.name);
     if (kept && inScopeNow) trimmedNow.delete(d.name);
-    return { name: d.name, bindings: kept ? j(kept) : null, flags: d.settings && inScopeNow ? j(d.settings.compatibility_flags) : null };
+    return { name: d.name, bindings: kept ? j(kept) : null, flags: d.settings && inScopeNow ? j(d.settings.compatibility_flags) : null, cpuMs: d.settings && inScopeNow ? d.settings.cpu_ms : null };
   });
   const trimmedJson = j([...trimmedNow].sort());
   const trimmedChanged = trimmedJson !== (settings.trimmed_bindings ?? '[]');
@@ -664,11 +664,13 @@ export async function runScan(
        WHERE metrics_hourly.exceeded IS NOT excluded.exceeded OR metrics_hourly.exceeded_cpu IS NOT excluded.exceeded_cpu
          OR metrics_hourly.exceeded_memory IS NOT excluded.exceeded_memory`,
     ).bind(A, j(exceeded)),
-    // Detail: bindings, flags, schedules, deployments.
+    // Detail: bindings, flags, CPU limit, schedules, deployments.
     db.prepare(
       `UPDATE workers SET
          bindings = COALESCE(json_extract(d.value,'$.bindings'), workers.bindings),
          compat_flags = COALESCE(json_extract(d.value,'$.flags'), workers.compat_flags),
+         -- Read with the flags: a Worker whose settings were read without a CPU limit goes back to the default.
+         cpu_limit_ms = CASE WHEN json_extract(d.value,'$.flags') IS NOT NULL THEN json_extract(d.value,'$.cpuMs') ELSE workers.cpu_limit_ms END,
          detail_checked_at = ?3
        FROM json_each(?2) AS d WHERE workers.account = ?1 AND workers.name = json_extract(d.value,'$.name')`,
     ).bind(
@@ -1143,6 +1145,7 @@ interface WorkerRow {
   compat_flags: string | null;
   handlers: string | null;
   usage_model: string | null;
+  cpu_limit_ms: number | null;
   deployed_on: string | null;
   workers_dev: number | null;
   previews_enabled: number | null;
@@ -1314,6 +1317,7 @@ export async function loadFacts(
     compatibilityDate: w.compatibility_date,
     compatibilityFlags: parse<string[]>(w.compat_flags, []),
     usageModel: w.usage_model,
+    cpuLimitMs: w.cpu_limit_ms ?? null,
     bindings: trimmed.has(w.name) ? null : storedBindings.get(w.name)!,
     workersDev: bool(w.workers_dev),
     previewsEnabled: bool(w.previews_enabled),

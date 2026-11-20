@@ -26,10 +26,10 @@ You have a dozen Workers, maybe fifty. One is quietly burning through the free p
 
 The Cloudflare dashboard shows you each Worker on its own. **Ambersight shows you the fleet** and tells you which Workers need attention, and why, in plain sentences.
 
-It runs as **one Worker in your own Cloudflare account**. Every hour it reads your Workers' settings and metrics with a read-only API token, runs 83 checks, and gives you a ranked list of what to fix. One install can watch every account the token can see. Alerts go to e-mail, Slack, Discord, Telegram or any webhook.
+It runs as **one Worker in your own Cloudflare account**. Every hour it reads your Workers' settings and metrics with a read-only API token, runs 91 checks, and gives you a ranked list of what to fix. One install can watch every account the token can see. Alerts go to e-mail, Slack, Discord, Telegram or any webhook.
 
-- **On the Free plan**, the risk is an outage. Past 100,000 requests in a day, every Worker in the account answers with Error 1027 until midnight UTC, and the same goes for 1,000 KV writes, 5 million D1 rows read and the other daily limits. Ambersight warns you at 70% and again at 90% of each one, with the time you will hit it at today's pace.
-- **On Workers Paid**, the risk is the bill. There is no hard spending cap, so a loop, a retry storm or a crawler is billed for every hour it runs. Ambersight compares each Worker's last hour with its usual hour and alerts you at 5x, for requests, CPU time, subrequests and D1, KV, R2, Queues and Durable Object operations. It also catches Durable Object or Queue work that runs while nobody uses the app, and shows the estimated bill in dollars.
+- **On the Free plan**, the risk is an outage. Past 100,000 requests in a day, your Workers answer with Error 1027 until midnight UTC (only a route set to fail open skips its Worker instead), and the same goes for 1,000 KV writes, 5 million D1 rows read and the other daily limits. Ambersight warns you at 70% and again at 90% of each one, with the time you will hit it at today's pace.
+- **On Workers Paid**, the risk is the bill. Cloudflare's spending limit covers only requests and CPU time, and it is not an exact maximum: usage goes on while the block catches up, and when it lands, every Worker in the account stops. Until then, a loop, a retry storm or a crawler is billed for every hour it runs. Ambersight compares each Worker's last hour with its usual hour and alerts you at 5x, for requests, CPU time, subrequests and D1, KV, R2, Queues and Durable Object operations. It also catches Durable Object or Queue work that runs while nobody uses the app, and shows the estimated bill in dollars.
 
 > **New in 1.1.3: a security and privacy release.** Tokens limited to chosen accounts, safer sign-in, client digests that hold only that client's data, and tools to stop recording or remove people's names. Read the [upgrade notes](CHANGELOG.md#113-2026-11-18) before you deploy.
 
@@ -38,7 +38,7 @@ It runs as **one Worker in your own Cloudflare account**. Every hour it reads yo
 > - **Analytics**: trends against the period before, the bill per month, daily limits and storage growth with the date each cap is reached, time to resolve and which checks are only noise. Compare up to four Workers.
 > - **13 months of history**, kept as daily rollups. Every finding keeps its history: opened, alerted, acknowledged, resolved. A **Findings** inbox lists them by status, and acknowledge or snooze can be undone.
 > - **Smarter alerts**: a nightly batch or a daily peak is judged against its own hour, and a spike no deploy explains names the change made just before it.
-> - **Monthly budget** on Workers Paid, alerted within the hour, not a day later.
+> - **Monthly budget** on Workers Paid, checked after every hourly scan.
 > - **Read-only API tokens** for Grafana or scripts ([docs/api.md](docs/api.md)), CSV export on every chart and table, Ctrl+K to jump to any Worker, and an installable app that opens offline.
 > - **Fewer API calls**: an hourly scan makes at most 3 GraphQL requests instead of up to 8, and pages are served from one cached row.
 > - **Explain in plain words** on every finding: what it means, why it matters, and numbered steps with where to click, for people new to Cloudflare.
@@ -64,13 +64,13 @@ It runs as **one Worker in your own Cloudflare account**. Every hour it reads yo
 | --- | --- |
 | **Free plan limits** | you are on track to hit today's 100,000-request limit (Error 1027), or any other daily limit: D1 rows, KV reads and writes, Durable Objects, Queues, Workflows, Workers AI. And roughly when. |
 | **Storage caps** | a D1 database nears 500 MB (Free) or its 10 GB hard cap (Paid), or KV, R2 or Durable Object storage nears the account limit. |
-| **Runaway usage** | requests, CPU time, subrequests, D1, KV, R2, Queues or Durable Objects jump to 5x their usual hourly level, or a brand-new Worker bursts. On Workers Paid there is no spending cap, so this is the alert that saves money. |
+| **Runaway usage** | requests, CPU time, subrequests, D1, KV, R2, Queues or Durable Objects jump to 5x their usual hourly level, or a brand-new Worker bursts. On Workers Paid this is the alert that saves money: Cloudflare's spending limit covers only requests and CPU time and is not an exact maximum. |
 | **Idle loops** | Durable Objects, a queue or a database stay busy for hours while the Workers using them get almost no requests: an alarm or retry loop. |
 | **Cost** | on Workers Paid: the estimated bill so far this month, the month-end forecast, the costliest Workers, and dollars on every runaway alert. |
 | **Errors and limits** | error rates pass 2% or 10%, or triple a Worker's own baseline; invocations hit CPU or memory limits; p99 CPU gets close to the free plan's 10 ms. |
 | **Cron health** | scheduled runs are missed or fail, a cron gets close to its CPU limit, or you are running out of Cron Triggers. |
 | **Bad deploys** | a problem starts right after a deploy, or a gradual rollout is left split for days. The timeline marks the deploy, and also shows audit log changes and Cloudflare's own notifications. |
-| **Config drift** | a binding or secret disappears after a deploy, staging and production differ, or a Worker nears 64 variables. |
+| **Config drift** | a binding or secret disappears after a deploy, staging and production differ, or a Worker nears its limit on variables and secrets (64 on Free, 128 on Paid). |
 | **Pages** | a Pages deploy fails, or a project's `pages.dev` address skips the WAF of its custom domain. |
 | **Security** | a member or API token is added, a certificate is about to expire or stuck, or a DNS record points at a deleted Pages project anyone could claim. |
 | **Deprecations** | a Worker still uses Service Worker syntax, an old compatibility date, the legacy usage model, Workers Sites or redundant flags. |
@@ -350,7 +350,7 @@ The dashboard and Observability are great at showing **one Worker in depth**. Am
 <details>
 <summary><b>I'm on Workers Paid. Is it still useful?</b></summary>
 
-Yes, maybe more so. Workers Paid has no hard spending cap, so a loop, a retry storm or a crawler can run up a bill. The runaway checks compare every Worker's last hour with its usual level and alert you when requests, CPU time, subrequests or storage operations jump. The plan is detected automatically, and the setup wizard tells you if it could not be. The free-budget meter is hidden on Paid.
+Yes, maybe more so. Cloudflare's spending limit for Workers Paid covers only requests and CPU time, is not an exact maximum, and stops every Worker in the account when it is reached, so a loop, a retry storm or a crawler can still run up a bill. The runaway checks compare every Worker's last hour with its usual level and alert you when requests, CPU time, subrequests or storage operations jump. The plan is detected automatically, and the setup wizard tells you if it could not be. The free-budget meter is hidden on Paid.
 </details>
 
 <details>
@@ -413,7 +413,7 @@ No. It is an independent open-source project built on Cloudflare's public APIs. 
 
 ## Documentation
 
-- [Checks](docs/checks.md): all 83 checks, with thresholds, IDs and fixes
+- [Checks](docs/checks.md): all 91 checks, with thresholds, IDs and fixes
 - [How it works](docs/how-it-works.md): what one scan does, what it stores and how it stays inside the free plan
 - [Alerts](docs/alerts.md): channels, defaults, the digest and message formats
 - [Configuration](docs/configuration.md): `wrangler.jsonc`, secrets and every `config.json` field

@@ -54,6 +54,8 @@ export interface ScriptSettings {
   bindings: Binding[];
   compatibility_flags: string[];
   tail_consumers: string[];
+  /** limits.cpu_ms, when the Worker sets its own CPU limit. */
+  cpu_ms: number | null;
 }
 
 export interface Deployment {
@@ -334,12 +336,14 @@ export class CfClient {
       bindings?: Record<string, unknown>[];
       compatibility_flags?: string[];
       tail_consumers?: { service?: string }[] | null;
+      limits?: { cpu_ms?: number } | null;
     };
     const r = await this.get<Raw>(`/accounts/${this.accountId}/workers/scripts/${enc(script)}/settings`);
     return {
       bindings: (r.bindings ?? []).map(toBinding),
       compatibility_flags: r.compatibility_flags ?? [],
       tail_consumers: (r.tail_consumers ?? []).map((t) => t.service ?? '').filter(Boolean),
+      cpu_ms: typeof r.limits?.cpu_ms === 'number' && r.limits.cpu_ms > 0 ? r.limits.cpu_ms : null,
     };
   }
 

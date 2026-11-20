@@ -107,7 +107,7 @@ export const CHECK_HELP: Record<string, CheckHelp> = {
   // ---- Free plan budget and daily limits
   'budget:free-daily-requests': {
     what: 'On the Free plan, all Workers in your account together can answer 100,000 requests a day. Today you have used most of them.',
-    why: `When the 100,000 are used up, every Worker in the account shows Error 1027 to visitors until midnight UTC. Your whole site or API is down for the rest of the day. ${RESET}`,
+    why: `When the 100,000 are used up, your Workers show Error 1027 to visitors until midnight UTC, and your site or API is down for the rest of the day. Only a route set to fail open behaves differently: it skips its Worker and sends requests straight on to your origin. ${RESET}`,
     steps: [
       'Look at the Workers list on the overview, sorted by requests, to see which Worker gets the most traffic.',
       'Check whether the traffic is real: a bot or crawler, or a loop where your app calls itself, can use thousands of requests an hour.',
@@ -117,7 +117,7 @@ export const CHECK_HELP: Record<string, CheckHelp> = {
   },
   'budget:monthly-budget': {
     what: 'You set a monthly budget for this account in Settings › Accounts, and the estimated Workers Paid bill is close to it, past it, or on track to pass it by the end of the month.',
-    why: 'Workers Paid has no spending cap: a loop, a retry storm or a crawler keeps running and is billed for every request. Cloudflare\'s own budget alerts arrive a day late; this one comes within the hour.',
+    why: 'Cloudflare\'s spending limit for Workers Paid covers only requests and CPU time and is not an exact maximum, so a loop, a retry storm or a crawler can keep running and be billed. Ambersight checks this budget after every hourly scan.',
     steps: [
       'Open Analytics › Cost to see the bill per month, the usage per day and the Workers that cost most.',
       'Look in Needs attention for runaway or idle-loop findings: they name the Worker or the storage behind a sudden rise.',
@@ -206,7 +206,7 @@ export const CHECK_HELP: Record<string, CheckHelp> = {
   // ---- Runaway usage
   'runaway:traffic-spike': {
     what: 'This Worker got about 5 times more requests in the last hour than in a normal hour.',
-    why: 'If it is not real visitors, it is usually a bot or a loop. On Workers Paid every request is billed with no spending cap; on Free it uses up the 100,000 daily requests.',
+    why: 'If it is not real visitors, it is usually a bot or a loop. On Workers Paid every request is billed, and Cloudflare\'s spending limit is not an exact maximum; on Free it uses up the 100,000 daily requests.',
     steps: [
       `${DASH} ${OBS}`,
       'Check where the requests come from: many from the same IP or user agent usually means a bot. Block it with a WAF or rate limiting rule on your domain.',
@@ -309,7 +309,7 @@ export const CHECK_HELP: Record<string, CheckHelp> = {
     why: 'Nothing fails yet, but a little more work per request, or a slower code path, will push requests over the limit (Error 1102).',
     steps: [
       'Look for work you can skip, cache or do once at start-up instead of on every request.',
-      'If the Worker simply needs more time, Workers Paid allows up to 30 seconds of CPU per request.',
+      'If the Worker simply needs more time, Workers Paid allows 30 seconds of CPU per request by default, and up to 5 minutes with limits.cpu_ms.',
     ],
   },
   'errors:subrequests-near-limit': {
@@ -341,15 +341,16 @@ export const CHECK_HELP: Record<string, CheckHelp> = {
     ],
   },
   'cron:cron-cpu-near-limit': {
-    what: 'A scheduled job uses close to its CPU time limit: 10 ms on Free, 30 seconds on Paid.',
+    what: 'A scheduled job uses close to its CPU time limit: 10 ms on Free. On Paid it is 30 seconds by default, or the limit the Worker sets with limits.cpu_ms.',
     why: 'A run that goes over the limit is cancelled half-way, so the job may be left unfinished.',
     steps: [
       'Split the job into smaller parts that each do less.',
       'Or let the cron put work on a Queue, and process the queue in small batches.',
+      'On Workers Paid, if the job needs the time, raise limits.cpu_ms in its Wrangler config (up to 5 minutes).',
     ],
   },
   'cron:cron-count': {
-    what: 'Your account is close to the maximum number of scheduled jobs (Cron Triggers): 5 on Free, 250 on Paid.',
+    what: 'Your account is close to the maximum number of scheduled jobs (Cron Triggers): 5 on Free, 1,000 on Paid.',
     why: 'At the limit, a deploy that adds a schedule is rejected.',
     steps: [
       'Remove schedules you no longer need.',
@@ -597,8 +598,8 @@ export const CHECK_HELP: Record<string, CheckHelp> = {
     ],
   },
   'drift:vars-near-limit': {
-    what: 'This Worker has close to the maximum of 64 variables and secrets.',
-    why: 'At 64, you cannot add another one.',
+    what: 'This Worker has close to the maximum number of variables and secrets: 64 on Free, 128 on Paid.',
+    why: 'At the limit, you cannot add another one.',
     steps: [
       'Combine related settings into one variable that holds JSON.',
       'Or move configuration that rarely changes into KV.',

@@ -62,8 +62,8 @@ const FORECAST_AFTER_MS = 3 * 86_400_000;
 
 /**
  * Workers Paid budget: a warning when the month-end forecast passes the budget or the month so far
- * reaches 80% of it, critical once the month so far passes it. Cloudflare's own budget alerts are
- * account-wide, a day late and informational; this one comes with the scan, within the hour.
+ * reaches 80% of it, critical once the month so far passes it. It is checked after every scan, so
+ * it comes within the hour.
  */
 export function budgetFinding(
   now: Date, monthToDate: Partial<Record<QuotaMetric, number>>, storage: Partial<Record<StorageKind, number>>, trackedSince: string | null, budgetUsd: number,
@@ -89,7 +89,7 @@ export function budgetFinding(
     id: 'budget:*:monthly-budget', module: 'budget', script: '*', code: 'monthly-budget', severity, message,
     // Rounded to whole dollars so the finding is not rewritten on every scan.
     evidence: { monthToDate: usd(e.monthToDate), ...(tracked >= FORECAST_AFTER_MS ? { forecast: usd(e.forecast) } : {}), budget: usd(budgetUsd) },
-    action: 'Open Analytics › Cost to see which Workers and products drive the spend, and look for runaway findings. Workers Paid has no hard spending cap.',
+    action: 'Open Analytics › Cost to see which Workers and products drive the spend, and look for runaway findings. Cloudflare\'s spending limit covers only requests and CPU time.',
     docsUrl: PRICES.docs,
   };
 }

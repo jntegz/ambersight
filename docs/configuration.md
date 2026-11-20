@@ -94,7 +94,7 @@ One install can watch every account its token can see. Choose them in the setup 
 | `modules.cfAlerts` | `true` | Notifications Cloudflare sent to the account, on the timeline. Needs *Notifications Read*. |
 | `modules.pages` | `true` | Pages projects: failed deploys and public `pages.dev` addresses. Needs *Pages Read*. |
 | `modules.security` | `true` | Audit log (members, tokens), certificates and dangling DNS. Needs *SSL and Certificates Read* and *DNS Read*. |
-| `modules.drift` | `true` | Bindings that disappeared, staging and production that differ, the 64-variable limit |
+| `modules.drift` | `true` | Bindings that disappeared, staging and production that differ, the limit on variables and secrets (64 on Free, 128 on Paid) |
 | `modules.incidents` | `false` | Active incidents from the public status page `www.cloudflarestatus.com`, on alerts and the timeline. The request carries nothing about your account. |
 | `modules.packages` | `false` | The [Packages check](checks.md#packages): direct npm dependencies of mapped Workers, locked version against the latest on npm. Needs the `GITHUB_TOKEN` secret. Contacts `api.github.com` and `registry.npmjs.org`, and is the only check that reads source code (`package-lock.json` only). |
 | `packageRepos` | `{}` | `"<account id>:<Worker name>"` → `{ "repo": "owner/name", "dir": "workers/api", "ref": "main" }`. `dir` and `ref` are optional (root folder, default branch). A key with only the Worker name applies in every account. Settings adds the account id for you. |

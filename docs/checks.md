@@ -1,6 +1,6 @@
 # Checks
 
-Ambersight runs 83 checks. Each one below lists the ID you see in the dashboard and in `config.json`, how severe it is, exactly when it fires, and what to do about it. The numbers are the defaults. Most of them can be changed globally, per group or per Worker (see [configuration.md](configuration.md)).
+Ambersight runs 91 checks. A row that lists several IDs, one per resource kind, counts as one check per ID. Each one below lists the ID you see in the dashboard and in `config.json`, how severe it is, exactly when it fires, and what to do about it. The numbers are the defaults. Most of them can be changed globally, per group or per Worker (see [configuration.md](configuration.md)).
 
 Every finding in the dashboard carries the evidence behind it, a suggested fix and a link to the matching Cloudflare docs page. When the problem goes away, the finding resolves on its own at the next scan.
 
@@ -31,7 +31,7 @@ Every finding in the dashboard carries the evidence behind it, a suggested fix a
 
 ## Free plan budget
 
-On the Workers Free plan, an account gets 100,000 requests per UTC day across all its Workers. Past that, every Worker answers with **Error 1027** until midnight UTC. This check is hidden on Workers Paid.
+On the Workers Free plan, an account gets 100,000 requests per UTC day across all its Workers. Past that, Workers answer with **Error 1027** until midnight UTC. A route set to fail open is the exception: it skips its Worker and sends requests on to the origin. This check is hidden on Workers Paid.
 
 | Check | Severity | Fires when | What to do |
 | --- | --- | --- | --- |
@@ -41,11 +41,11 @@ Threshold settings: `budgetWarn` (0.7), `budgetCritical` (0.9).
 
 ## Monthly budget (Workers Paid)
 
-Workers Paid has no hard spending cap. Set a monthly budget per account in **Settings › Accounts** and Ambersight compares the estimated bill with it after every scan. Cloudflare's own budget alerts arrive a day late.
+Cloudflare's spending limit for Workers Paid covers only requests and CPU time and is not an exact maximum. Durable Objects have a spending limit of their own, and KV, R2 and other products are billed outside both. Set a monthly budget per account in **Settings › Accounts** and Ambersight compares the estimated bill with it after every scan.
 
 | Check | Severity | Fires when | What to do |
 | --- | --- | --- | --- |
-| `budget:monthly-budget` | Warning at 80% of the budget, or when the month-end forecast passes it (after 3 days of usage); critical past it | Workers Paid, with a monthly budget set for the account in **Settings › Accounts**. The estimate uses list prices and comes within the hour; Cloudflare's own budget alerts arrive a day late. | Open **Analytics › Cost** to see which Workers and products drive the spend, and look for runaway findings. |
+| `budget:monthly-budget` | Warning at 80% of the budget, or when the month-end forecast passes it (after 3 days of usage); critical past it | Workers Paid, with a monthly budget set for the account in **Settings › Accounts**. The estimate uses list prices and comes within the hour. | Open **Analytics › Cost** to see which Workers and products drive the spend, and look for runaway findings. |
 
 ## Free plan daily limits
 
@@ -82,7 +82,7 @@ Read once a day with the inventory: the size of each D1 database, KV namespace a
 
 These compare a Worker's **last full hour** with its **median hour over the past 7 days**, or with the median of the **same hour of day** over those days when that is higher, so a nightly batch or a daily peak is judged against its own hour. A spike that no deploy explains names the binding removal or audit log change in the 6 hours before it. A Worker needs 72 hours of history before they apply, so a new install stays quiet for its first three days. Each one also has a floor, so a Worker that goes from 3 requests to 30 does not raise an alarm.
 
-Workers Paid has no hard spending cap. A loop, a retry storm or a crawler is billed for every hour it runs, which makes these the checks that save money.
+Cloudflare's spending limit for Workers Paid covers only requests and CPU time and is not an exact maximum. Until it lands, a loop, a retry storm or a crawler is billed for every hour it runs, which makes these the checks that save money.
 
 | Check | Severity | Fires when | What to do |
 | --- | --- | --- | --- |
@@ -100,7 +100,7 @@ The 5x baseline needs three days of history and cannot see a loop that starts on
 | --- | --- | --- | --- |
 | `usage:idle-loop-do`, `-queues`, `-d1`, `-kv`, `-r2` | Critical on Paid, warning on Free | For each of the last 3 full hours, a Durable Object namespace, queue, database, namespace or bucket did at least 2,000 operations while the Workers bound to it served fewer than 1 request per 100 operations. On Paid the finding gives the cost per hour. | This is the shape of an alarm that always sets the next alarm, a queue consumer that fails and retries every message, or a cron that never finishes. Find it before it runs all night. |
 | `runaway:new-worker-burst` | Critical on Paid, warning on Free | A Worker with under 72 hours of history served at least 50,000 requests in the last hour. | If the traffic is not expected, look for a loop or a crawler. |
-| `usage:new-resource-burst-<kind>` | Same | A resource with under 72 hours of history had at least 100,000 operations in the last hour. | Look for a loop reading or writing in a hot path. |
+| `usage:new-resource-burst-kv`, `-d1`, `-r2`, `-queues`, `-do` | Same | A resource with under 72 hours of history had at least 100,000 operations in the last hour. | Look for a loop reading or writing in a hot path. |
 
 Threshold settings: `newWorkerHourlyRequests` (50,000), `newResourceHourlyOps` (100,000).
 
@@ -140,8 +140,8 @@ Ambersight reads each Worker's cron expressions and counts how many runs should 
 | --- | --- | --- | --- |
 | `cron:missed-runs` | Warning. Critical when 2 or more runs were missed and the last 2 slots both went wrong. | Fewer runs happened than the schedule expects. | Check that the Cron Trigger is still attached and the `scheduled()` handler is deployed. |
 | `cron:failed-runs` | Warning. Critical when 2 or more runs failed and the last 2 slots both went wrong. | One or more scheduled runs ended in an error. | Look at the scheduled invocations in Workers Observability for the exception. |
-| `cron:cron-cpu-near-limit` | Warning | A scheduled run used at least 80% of its CPU limit: 10 ms on Free, 30 seconds on Paid. | Runs over the limit are cancelled. Split the job into smaller steps or move it to a Queue. |
-| `cron:cron-count` | Info at 80% of the plan limit, warning at the limit | The account uses 4 of 5 Cron Triggers (Free) or 200 of 250 (Paid). | At the limit, new schedules are rejected. Combine schedules into one Worker or remove unused ones. |
+| `cron:cron-cpu-near-limit` | Warning | A scheduled run used at least 80% of its CPU limit: 10 ms on Free. On Paid, the limit the Worker sets with `limits.cpu_ms`, or 30 seconds by default. | Runs over the limit are cancelled. Split the job into smaller steps or move it to a Queue. On Paid you can raise `limits.cpu_ms` to 5 minutes. |
+| `cron:cron-count` | Info at 80% of the plan limit, warning at the limit | The account uses 4 of 5 Cron Triggers (Free) or 800 of 1,000 (Paid). | At the limit, new schedules are rejected. Combine schedules into one Worker or remove unused ones. |
 
 If Cloudflare returns no scheduled runs at all, not even for Ambersight's own cron, the cron checks pause and keep their current findings instead of raising a missed run for every Worker. See [troubleshooting.md](troubleshooting.md#cron-checks-paused).
 
@@ -254,7 +254,7 @@ The audit log is read every 6 hours (it needs *Account Settings Read*, which the
 | --- | --- | --- | --- |
 | `drift:binding-removed` | Warning | A binding, variable or secret that a Worker had at the last read is gone, and still missing. Raised for 7 days. | Usually a deploy dropped it: variables and secrets set only in the dashboard are replaced by the next `wrangler deploy` unless they are in your config (or kept with `--keep-vars`). |
 | `drift:env-mismatch` | Info | A Worker named like `api-staging`, `api-dev`, `api-preview` or `staging-api` has binding names that `api` does not, or the other way round. | Compare the two configs. Secrets are compared by name only; their values are never read. |
-| `drift:vars-near-limit` | Info at 58, warning at 64 | A Worker has close to the 64 environment variables and secrets allowed. | Group related settings into one JSON variable, or move configuration to KV. |
+| `drift:vars-near-limit` | Info at 90%, warning at the limit | A Worker has close to the environment variables and secrets allowed: 64 on Free (info at 58), 128 on Paid (info at 116). | Group related settings into one JSON variable, or move configuration to KV. |
 
 ## Packages
 

@@ -61,7 +61,7 @@ export const CHECK_TITLES: Record<string, string> = {
   'deploys:stuck-rollout': 'Gradual rollouts left split',
   'drift:binding-removed': 'Bindings that disappeared',
   'drift:env-mismatch': 'Staging and production bindings differ',
-  'drift:vars-near-limit': 'Close to 64 variables and secrets',
+  'drift:vars-near-limit': 'Close to the variables and secrets limit',
   'runaway:traffic-spike': 'Traffic spike',
   'runaway:cpu-spike': 'CPU time spike',
   'runaway:subrequest-spike': 'Subrequest spike',

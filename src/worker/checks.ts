@@ -34,8 +34,11 @@ export const FLOORS = {
 
 export { FREE_DAILY_REQUESTS };
 export const FREE_CPU_MS = 10;
+/** Default CPU time per scheduled run. On Paid a Worker can raise it with limits.cpu_ms (WorkerMeta.cpuLimitMs). */
 export const CRON_CPU_MS = { free: 10, paid: 30_000 };
-export const CRON_LIMIT = { free: 5, paid: 250 };
+export const CRON_LIMIT = { free: 5, paid: 1_000 };
+/** Environment variables and secrets per Worker. */
+export const VARS_LIMIT = { free: 64, paid: 128 };
 
 export interface HourPoint {
   hour: string;
@@ -75,6 +78,8 @@ export interface WorkerMeta {
   compatibilityDate: string | null;
   compatibilityFlags: string[];
   usageModel: string | null;
+  /** limits.cpu_ms from the Worker's settings; null or missing = the plan default. */
+  cpuLimitMs?: number | null;
   /** null = settings not fetched yet. */
   bindings: { type: string; name: string; target?: string }[] | null;
   workersDev: boolean | null;
@@ -171,7 +176,7 @@ export function budgetFindings(input: CheckInput, t: Thresholds): Finding[] {
       `You have used ${pct(share)} of today's free Workers requests.`,
       { usedToday: input.accountRequestsToday, limit: FREE_DAILY_REQUESTS, projectedLimitAt: projected ?? 'not today' },
       projected
-        ? `At this pace the account hits the limit around ${projected.slice(11, 16)} UTC and Workers return Error 1027 until midnight UTC. Find the Worker driving traffic below, or move to Workers Paid.`
+        ? `At this pace the account hits the limit around ${projected.slice(11, 16)} UTC and Workers return Error 1027 until midnight UTC (a route set to fail open skips its Worker instead). Find the Worker driving traffic below, or move to Workers Paid.`
         : 'Usage is high but should stay under the limit today. Check which Worker drives traffic.',
       DOCS.limits,
     ),
@@ -465,7 +470,7 @@ export function runawayFindings(input: CheckInput, tf: (n: string) => Thresholds
         'runaway', w.name, code, 'critical',
         `${label} in the last hour ${label === 'CPU time' ? 'is' : 'are'} ${Math.round(ratio)}x this Worker's usual hourly level.${extra >= 0.01 ? ` About $${extra.toFixed(2)} an hour above usual.` : ''}`,
         { lastHour: show(last), usualHour: show(usual), ...(extra >= 0.01 ? { extraPerHour: `$${extra.toFixed(2)}` } : {}) },
-        'Check for a loop, a retry storm or a crawler. On Workers Paid this usage is billed; there is no hard spending cap.',
+        'Check for a loop, a retry storm or a crawler. On Workers Paid this usage is billed, and Cloudflare\'s spending limit is not an exact maximum.',
         DOCS.budget,
       ));
     }
@@ -570,13 +575,17 @@ export function cronFindings(input: CheckInput): Finding[] {
         DOCS.cron,
       ));
     }
-    const limit = CRON_CPU_MS[input.plan];
+    // On Paid the Worker's own limits.cpu_ms applies when it sets one; the Free plan's 10 ms is fixed.
+    const own = input.plan === 'paid' ? input.meta?.find((m) => m.name === c.name)?.cpuLimitMs : null;
+    const limit = own ?? CRON_CPU_MS[input.plan];
     if (c.cpuMaxMs != null && c.cpuMaxMs >= limit * t.cpuShareWarn) {
       out.push(finding(
         'cron', c.name, 'cron-cpu-near-limit', 'warning',
         `A scheduled run used ${c.cpuMaxMs.toFixed(1)} ms of CPU, close to the ${fmt(limit)} ms limit.`,
         { cpuMaxMs: Number(c.cpuMaxMs.toFixed(1)), limitMs: limit },
-        'Runs above the limit are cancelled. Split the job into smaller steps or move it to a Queue.',
+        input.plan === 'paid' && own == null
+          ? 'Runs above the limit are cancelled. This is the default limit: raise limits.cpu_ms in the Worker\'s config (up to 5 minutes), split the job into smaller steps or move it to a Queue.'
+          : 'Runs above the limit are cancelled. Split the job into smaller steps or move it to a Queue.',
         DOCS.limits,
       ));
     }
@@ -665,7 +674,7 @@ export function runChecks(input: CheckInput): Finding[] {
   if (m.errors) out.push(...errorFindings(input, tf));
   if (m.cron) out.push(...cronFindings(input));
   if (input.meta && input.inventory) out.push(...hygieneFindings(input.now, input.meta, input.workers, input.inventory, config, tf));
-  if (input.meta && input.changes) out.push(...changeFindings(input.now, input.meta, input.changes, config, tf));
+  if (input.meta && input.changes) out.push(...changeFindings(input.now, input.plan, input.meta, input.changes, config, tf));
   if (m.timeline) out = correlateDeploys(out, input, tf);
   return addChangeContext(out, input);
 }

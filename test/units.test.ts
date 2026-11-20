@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { defaultConfig, groupsFor, inScope, matchPattern, parseConfig, thresholdsFor } from '../src/shared/config';
 import { checkOf, groupFindings } from '../src/shared/findings';
 import type { Finding } from '../src/shared/types';
-import { runChecks, type WorkerStats } from '../src/worker/checks';
+import { runChecks, type WorkerMeta, type WorkerStats } from '../src/worker/checks';
 import { cronStats } from '../src/worker/scan';
 import { accessCovers, hostOf, monthsBetween } from '../src/worker/hygiene';
 import { parseCron } from '../src/worker/cron';
@@ -15,6 +15,11 @@ const w = (over: Partial<WorkerStats> = {}): WorkerStats => ({
   name: 'api', requests24h: 10_000, errors24h: 0, requestsPrev: 60_000, errorsPrev: 60, exceeded24h: 0, cpuP99Max24h: 1,
   lastHourRequests: 400, hourlyMedian7d: 400, lastHourCpuUs: 1e6, hourlyMedianCpuUs7d: 1e6, lastHourSubrequests: 0,
   hourlyMedianSubrequests7d: 0, historyHours: 168, ...over,
+});
+
+const minimalMeta = (name: string): WorkerMeta => ({
+  name, groups: [], handlers: ['scheduled'], hasModules: true, compatibilityDate: '2026-09-01', compatibilityFlags: [], usageModel: 'standard',
+  bindings: [], workersDev: false, previewsEnabled: false, logsEnabled: false, samplingRate: 1, logpush: false, deployedOn: '2026-11-01', listed: true, deployments: [],
 });
 
 describe('config', () => {
@@ -76,6 +81,22 @@ describe('checks', () => {
   it('warns when the account is at its Cron Trigger limit', () => {
     const f = runChecks({ now, plan: 'free', accountRequestsToday: 0, workers: [], crons: [], cronTotal: 5 });
     expect(f.map((x) => [x.id, x.severity])).toEqual([['cron:*:cron-count', 'warning']]);
+  });
+  it('allows 1,000 Cron Triggers on Workers Paid', () => {
+    const at = (n: number) => runChecks({ now, plan: 'paid', accountRequestsToday: 0, workers: [], crons: [], cronTotal: n }).map((x) => [x.severity, x.evidence.limit]);
+    expect(at(250)).toEqual([]);
+    expect(at(800)).toEqual([['info', 1_000]]);
+    expect(at(1_000)).toEqual([['warning', 1_000]]);
+  });
+  it('judges scheduled CPU time by the Worker\'s own limit on Workers Paid', () => {
+    const job = { name: 'job', expected: 24, observed: 24, failures: 0, consecutiveBad: 0, cpuMaxMs: 25_000 };
+    const run = (cpuLimitMs?: number) => runChecks({
+      now, plan: 'paid', accountRequestsToday: 0, workers: [], crons: [job],
+      meta: [{ ...minimalMeta('job'), cpuLimitMs }],
+    }).filter((x) => x.code === 'cron-cpu-near-limit');
+    expect(run().map((x) => x.evidence.limitMs)).toEqual([30_000]);
+    expect(run()[0].action).toContain('limits.cpu_ms');
+    expect(run(300_000)).toEqual([]);
   });
 });
 

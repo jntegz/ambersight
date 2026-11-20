@@ -48,7 +48,7 @@
 
   <p class="note">
     {#if projected}
-      <Icon name="warning" size={16} /> <span>Limit reached around <strong class="num">{projected}</strong>. Workers then return Error 1027 until midnight UTC.</span>
+      <Icon name="warning" size={16} /> <span>Limit reached around <strong class="num">{projected}</strong>. Workers then return Error 1027 until midnight UTC, except on routes set to fail open.</span>
     {:else}
       <span class="muted">On track to stay under the limit. Resets at midnight UTC.</span>
     {/if}

@@ -205,7 +205,7 @@
     { key: 'cfAlerts', title: 'Cloudflare notifications', text: 'Notifications Cloudflare sent to the account, on the timeline. Needs Notifications Read.', icon: 'mail' },
     { key: 'pages', title: 'Pages', text: 'Failed Pages deploys and public pages.dev addresses. Needs Pages Read.', icon: 'grid' },
     { key: 'security', title: 'Security', text: 'Audit log (new members, new tokens), certificates and DNS records left pointing at deleted Workers or Pages. Needs SSL and DNS Read.', icon: 'shield' },
-    { key: 'drift', title: 'Config drift', text: 'Bindings that disappeared after a deploy, staging and production that differ, Workers near the 64-variable limit.', icon: 'list' },
+    { key: 'drift', title: 'Config drift', text: 'Bindings that disappeared after a deploy, staging and production that differ, Workers near the limit on variables and secrets.', icon: 'list' },
     { key: 'incidents', title: 'Cloudflare incidents', text: 'Adds active incidents from cloudflarestatus.com to alerts and the timeline. Contacts that public site; sends nothing about your account.', icon: 'info' },
     { key: 'packages', title: 'Packages', text: 'Direct npm dependencies of the Workers you map below: locked version → latest on npm. Reads package-lock.json from GitHub with a separate GITHUB_TOKEN; the only check that reads source code.', icon: 'list' },
   ];

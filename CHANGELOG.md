@@ -2,6 +2,18 @@
 
 All notable changes to Ambersight. Each version here has a matching [GitHub release](https://github.com/jntegz/ambersight/releases), which is what the update notice in the dashboard reads.
 
+## Unreleased
+
+Limits brought in line with Cloudflare's documentation.
+
+- `npm run deploy` applies migration 0018.
+- **Cron Triggers**: the Workers Paid limit is 1,000, not 250, so `cron:cron-count` now reports at 800 and warns at 1,000.
+- **Variables and secrets**: Workers Paid allows 128 per Worker. `drift:vars-near-limit` now uses 64 on Free and 128 on Paid.
+- **Cron CPU time**: on Workers Paid, `cron:cron-cpu-near-limit` uses the Worker's own `limits.cpu_ms` when it sets one, and 30 seconds otherwise. Ambersight reads the limit with the Worker's settings.
+- **Error 1027**: the help and docs now say that a route set to fail open skips its Worker instead of returning the error.
+- **Spending and budget alerts**: the docs no longer say Workers Paid has no spending cap or that Cloudflare's budget alerts arrive a day late.
+- **Check count**: the README and docs say 91 checks, one per ID, and a test keeps the number in step with docs/checks.md.
+
 ## 1.1.3 (2026-11-18)
 
 A security and privacy release, from a full threat model of Ambersight. Nothing here needs a new Cloudflare service.

@@ -5,7 +5,7 @@
 
 import type { Config, Thresholds } from '../shared/config';
 import type { Finding } from '../shared/types';
-import { finding, fmt, type WorkerMeta } from './checks';
+import { finding, fmt, VARS_LIMIT, type WorkerMeta } from './checks';
 import { sqlShape, withoutPerson } from './redact';
 
 export interface ChangeFacts {
@@ -223,7 +223,7 @@ const VAR_TYPES = new Set(['plain_text', 'secret_text', 'json']);
 const ENV_SUFFIX = /^(.+?)[-_](staging|stage|dev|development|preview|test|qa)$/;
 const ENV_PREFIX = /^(staging|stage|dev|development|preview|test|qa)[-_](.+)$/;
 
-export function driftFindings(meta: WorkerMeta[], c: ChangeFacts): Finding[] {
+export function driftFindings(meta: WorkerMeta[], c: ChangeFacts, plan: 'free' | 'paid'): Finding[] {
   const out: Finding[] = [];
   const byName = new Map(meta.map((m) => [m.name, m]));
 
@@ -267,14 +267,15 @@ export function driftFindings(meta: WorkerMeta[], c: ChangeFacts): Finding[] {
     ));
   }
 
-  // 3. Close to the 64 environment variables and secrets per Worker.
+  // 3. Close to the environment variables and secrets allowed per Worker: 64 on Free, 128 on Paid.
+  const limit = VARS_LIMIT[plan];
   for (const m of meta) {
     const n = (m.bindings ?? []).filter((b) => VAR_TYPES.has(b.type)).length;
-    if (n < 58) continue;
+    if (n < Math.ceil(limit * 0.9)) continue;
     out.push(finding(
-      'drift', m.name, 'vars-near-limit', n >= 64 ? 'warning' : 'info',
-      `This Worker has ${n} of the 64 environment variables and secrets allowed.`,
-      { variables: n, limit: 64 },
+      'drift', m.name, 'vars-near-limit', n >= limit ? 'warning' : 'info',
+      `This Worker has ${n} of the ${limit} environment variables and secrets allowed.`,
+      { variables: n, limit },
       'Deploys that add more will fail. Group related settings into one JSON variable, or move configuration to KV.',
       DOCS.limits,
     ));
@@ -305,13 +306,13 @@ export function d1QueryFindings(c: ChangeFacts): Finding[] {
 }
 
 /** Everything in this file, respecting the module switches. */
-export function changeFindings(now: Date, meta: WorkerMeta[], c: ChangeFacts, config: Config, tf: (n: string) => Thresholds): Finding[] {
+export function changeFindings(now: Date, plan: 'free' | 'paid', meta: WorkerMeta[], c: ChangeFacts, config: Config, tf: (n: string) => Thresholds): Finding[] {
   const m = config.modules;
   const out: Finding[] = [];
   if (m.pages) out.push(...pagesFindings(c).filter((f) => m.exposure || f.module !== 'exposure'));
   if (m.security) out.push(...auditFindings(c), ...certFindings(now, c), ...dnsFindings(c));
   if (m.timeline) out.push(...rolloutFindings(now, c, tf));
-  if (m.drift) out.push(...driftFindings(meta, c));
+  if (m.drift) out.push(...driftFindings(meta, c, plan));
   if (m.usage) out.push(...d1QueryFindings(c));
   return out;
 }
