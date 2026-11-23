@@ -258,7 +258,7 @@ The audit log is read every 6 hours (it needs *Account Settings Read*, which the
 
 ## Packages
 
-**Off by default.** For each Worker you map to a GitHub repository in **Settings › Checks › Packages**, Ambersight reads its lockfile (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock` or `bun.lock`, including monorepo workspaces) once a day, takes the direct `dependencies` and `devDependencies` with their locked versions, and compares them with the latest release on the public npm registry. The **Packages** page lists them by Worker or by package as *locked → latest* (with CSV and Markdown export), and each mapped Worker's own page shows its packages too.
+**Off by default.** For each Worker you map to a GitHub repository in **Settings › npm Packages**, Ambersight reads its lockfile (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock` or `bun.lock`, including monorepo workspaces) once a day, takes the direct `dependencies` and `devDependencies` with their locked versions, and compares them with the latest release on the public npm registry. The **Packages** page lists them by Worker or by package as *locked → latest* (with CSV and Markdown export), and each mapped Worker's own page shows its packages too.
 
 | Check | Severity | Fires when | What to do |
 | --- | --- | --- | --- |
@@ -268,9 +268,18 @@ The audit log is read every 6 hours (it needs *Account Settings Read*, which the
 
 **What is compared.** Only a package whose lockfile entry was resolved from the public npm registry under its own name is looked up on npm or OSV.dev. A package from a private registry, a Git URL, a local path, a workspace link or an alias, or one with no recorded source, is listed as **not compared**: its name is not sent anywhere and it gets no update or vulnerability advice, because a package of the same name on npm is not an update to it. (Note: `pnpm-lock.yaml` omits the registry host for default-registry packages; explicit non-npmjs tarballs, `git`, `directory`, `link:`, `file:`, `workspace:` and `npm:` aliases are marked not compared.) Rows stored by an older version have no source yet: until the lockfile is read again, which the first scans after the upgrade do, they keep their comparison with the version already stored, and nothing new is looked up for them.
 
+**Which repository a Worker belongs to.** A Worker's name does not say where its code lives: a Worker `shop-web` can be built from a monorepo while repositories called `shop`, or even `shop-web`, hold other projects. So **Settings › npm Packages** asks Cloudflare which repository and root directory [Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/) uses for each Worker, and suggests that, with the lockfile format and the folder or monorepo workspace filled in. This needs the optional *Workers CI Read* permission on `CF_API_TOKEN` ([how to add it](troubleshooting.md#cloudflare-was-not-asked-which-repository-each-worker-is-built-from)). The suggestions work as follows:
+
+- **From Cloudflare.** One button maps every unmapped Worker that Cloudflare builds from a GitHub repository. To place the lockfile, Ambersight asks GitHub which of the four lockfile names exist in the repository root and in the build's root directory. A lockfile in the root directory makes it the lockfile folder; one only in the repository root makes it a workspace.
+- **From the name.** A Worker deployed with Wrangler or another CI has no connection, and without the permission none can be read. Then a repository is suggested only if it has the Worker's full name, ignoring case, punctuation and a suffix such as `-production` or `-staging`. It is labelled as a guess and mapped by a separate button that lists every pair. A repository whose name is only part of the Worker's name is not suggested.
+- **Saved mappings are never changed for you.** If one points at a different repository or folder than Cloudflare builds from, its row says so and offers **Use Cloudflare's repository**. That changes the draft; nothing is stored until you press **Save**.
+- **Other providers.** A Worker built from GitLab is shown as such and gets no suggestion: this check reads GitHub only.
+
+None of this is stored or read by a scan. It is read when a signed-in session opens that Settings tab, and API tokens cannot read it.
+
 **Which repositories.** Anyone signed in can map a Worker to any repository `GITHUB_TOKEN` can read, and the Packages page then shows that repository's dependency names. Give the token only the repositories you mean to map. To enforce it from the deployment, set `GITHUB_REPO_ALLOWLIST` to owners or `owner/name` pairs: anything else is not read, what was stored for it is dropped, and the Worker gets a `packages:lockfile-unreadable` finding. Out-of-scope Workers are never read.
 
-Why this needs a separate token: Cloudflare stores your Worker as bundled code, without `package.json` or the lockfile, so the Cloudflare API cannot tell which versions you use. Workers Builds knows the repository, but its API needs an *Edit* permission, which Ambersight never takes. Supported lockfiles are npm (`package-lock.json` v2/v3), pnpm (`pnpm-lock.yaml` v6/v9), yarn (`yarn.lock` v1/Berry, paired with `package.json`) and bun (`bun.lock`). Workers sharing one monorepo lockfile reuse a single GitHub fetch per scan. Lockfile reads, npm lookups and optional OSV batch checks count against the scan's subrequest budget, so on the Free plan a large fleet is covered over several scans.
+Why this needs a separate token: Cloudflare stores your Worker as bundled code, without `package.json` or the lockfile, so the Cloudflare API cannot tell which versions you use. Workers Builds knows the repository and the root directory, which is what the suggestion above uses, but not the contents of the lockfile. Supported lockfiles are npm (`package-lock.json` v2/v3), pnpm (`pnpm-lock.yaml` v6/v9), yarn (`yarn.lock` v1/Berry, paired with `package.json`) and bun (`bun.lock`). Workers sharing one monorepo lockfile reuse a single GitHub fetch per scan. Lockfile reads, npm lookups and optional OSV batch checks count against the scan's subrequest budget, so on the Free plan a large fleet is covered over several scans.
 
 ## Ambersight's own health
 
@@ -311,6 +320,7 @@ When you switch a check off, its open findings resolve, the same as if you had f
 | Dangling DNS | DNS Read |
 | Audit log | Account Settings Read |
 | Cloudflare notifications on the timeline | Notifications Read. It has no key for the pre-filled token link, so add it by hand. |
-| Packages | No Cloudflare permission. A separate `GITHUB_TOKEN` secret: GitHub fine-grained token, *Contents: Read* on the mapped repositories. |
+| Packages | A separate `GITHUB_TOKEN` secret: GitHub fine-grained token, *Contents: Read* on the mapped repositories. No Cloudflare permission is needed to read packages. |
+| Packages: suggesting each Worker's repository in Settings | Workers CI. Optional and not in the pre-filled token link; add it by hand. It works only on a user-owned token. Without it, repositories are suggested by name. |
 
 If a permission is missing, the scan skips what it cannot read, carries on with the rest, and lists what it skipped. See [troubleshooting.md](troubleshooting.md).

@@ -225,6 +225,9 @@ const GH_REF = /^[\w.@-]+(\/[\w.@-]+){0,9}$/;
 /** "<account id>:<Worker name>", or just the Worker name for every account. */
 const REPO_KEY = /^(?:[\w-]{1,64}:)?[\w-]{1,100}$/;
 const dots = (s: string) => s.split('/').some((p) => p === '.' || p === '..');
+/** The same tests a saved mapping has to pass, for values that come from an API instead of a person. */
+export const isGithubRepo = (s: string) => GH_REPO.test(s) && !dots(s);
+export const isRepoDir = (s: string) => GH_DIR.test(s) && !dots(s);
 
 function num(v: unknown, [min, max]: [number, number], path: string): number {
   if (typeof v !== 'number' || !Number.isFinite(v) || v < min || v > max) throw new ConfigError(`${path} must be a number from ${min} to ${max}.`);

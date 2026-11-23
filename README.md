@@ -55,13 +55,6 @@ It runs as **one Worker in your own Cloudflare account**. Every hour it reads yo
 > - **Resources page**: every KV, D1, R2 and queue with who binds it, size, last use and status, plus what deleting the leftovers would free.
 > - **Packages (opt-in)**: each direct npm dependency of a Worker as *locked → latest*, with a warning when one is a major version behind.
 >
-> **New in 0.1.1**
-> - **Several accounts in one install**, with an account switcher, an **All accounts** view, and a label, plan and client digest per account.
-> - **74 checks, up from 39**: every free daily limit (D1, KV, Durable Objects, Queues, Workflows, Workers AI), storage caps, idle loops, Pages, audit log, certificates, dangling DNS, stuck rollouts and config drift.
-> - **Estimated bill** on Workers Paid: month to date, month-end forecast, the costliest Workers, and dollars on every runaway alert.
-> - **Richer timeline and digest**: audit log, Cloudflare notifications and Pages deploys on the timeline; a monthly digest; a printable client report.
-> - **Lighter**: an hourly scan of 200 Workers reads about 34,000 D1 rows instead of 293,000.
->
 > Everything is still read-only and free. The full list is in the [changelog](CHANGELOG.md).
 
 ## What it catches
@@ -178,6 +171,7 @@ The form opens with the token set to **All accounts** and **All zones**. If you 
 | Account | Notifications | Read | Optional: Cloudflare's own notifications on the timeline. Not in the pre-filled link (it has no short key); add it by hand. |
 | Account | Billing | Read | Detecting Free or Paid automatically. Without it, Ambersight uses `PLAN` from `wrangler.jsonc`; you can also set the plan in **Settings › General**. |
 | Account | Access: Apps and Policies | Read | Optional: the Access coverage check (off by default). Not in the pre-filled link; add it by hand if you turn the check on. |
+| Account | Workers CI | Read | Optional: lets **Settings › npm Packages** suggest the repository and folder Cloudflare builds each Worker from, instead of guessing from its name. Not in the pre-filled link; add it by hand if you use the Packages check. |
 | User | API Tokens | Read | Letting the setup wizard and the daily check read the token's own permissions |
 
 Do not add any **Edit** permission. If the token can see several accounts, the setup wizard lets you tick the ones to watch. To fix the choice in config instead, set `CF_ACCOUNT_ID` in `wrangler.jsonc` under `vars` (comma-separated for several).

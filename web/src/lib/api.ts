@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import type { Config } from '../../../src/shared/config';
 import type { PersonDataStep } from '../../../src/shared/personData';
-import type { AccountSummary, AdminLogView, AnalyticsView, FindingEvent, FindingListItem, Overview, PackagesView, Range, ResourcesView, SelfCost, SetupStatus, SinceView, TimelineEntry, WorkerDetail } from '../../../src/shared/types';
+import type { AccountSummary, AdminLogView, AnalyticsView, BuildSourcesView, RepoLayout, FindingEvent, FindingListItem, Overview, PackagesView, Range, ResourcesView, SelfCost, SetupStatus, SinceView, TimelineEntry, WorkerDetail } from '../../../src/shared/types';
 
 export interface ScanResult {
   skipped?: boolean;
@@ -114,6 +114,10 @@ export const api = {
   timeline: (days: number, account?: string) => call<TimelineEntry[]>(`/api/timeline?days=${days}${account ? `&account=${encodeURIComponent(account)}` : ''}`),
   packages: (account?: string) => call<PackagesView>(`/api/packages${q(account)}`),
   githubRepos: () => call<{ repos: string[]; owner: string | null; error?: string }>('/api/github-repos'),
+  /** The repository Cloudflare builds each Worker from (needs the optional Workers CI Read). */
+  buildSources: (account?: string) => call<BuildSourcesView>(`/api/build-sources${q(account)}`),
+  /** Which lockfile a repository holds, and whether `dir` has its own or is a workspace. */
+  repoLayout: (repo: string, dir: string) => call<RepoLayout>(`/api/repo-layout?repo=${encodeURIComponent(repo)}${dir ? `&dir=${encodeURIComponent(dir)}` : ''}`),
   resources: (account?: string) => call<ResourcesView>(`/api/resources${q(account)}`),
   selfCost: (account?: string) => call<SelfCost>(`/api/self-cost${q(account)}`),
   setup: (account?: string) => call<SetupStatus>(account ? `/api/setup?account=${encodeURIComponent(account)}` : '/api/setup'),

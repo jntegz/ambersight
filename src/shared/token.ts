@@ -30,9 +30,10 @@ export const TOKEN_TEMPLATE_URL =
   encodeURIComponent('Ambersight read-only');
 
 /**
- * Every permission Ambersight has a use for, by the name Cloudflare reports. Two are not in the link
+ * Every permission Ambersight has a use for, by the name Cloudflare reports. Three are not in the link
  * because the features that use them are optional: Access (the Access coverage check, off by
- * default) and Notifications (it has no key for the link). A name not listed here is unexpected,
+ * default), Notifications (it has no key for the link) and Workers CI (the repository a Worker is
+ * built from, for the Packages check; no documented key). A name not listed here is unexpected,
  * whatever it is called: this is a list of what is allowed, not a guess at what looks dangerous.
  */
 export const EXPECTED_TOKEN_PERMISSIONS = [
@@ -54,6 +55,7 @@ export const EXPECTED_TOKEN_PERMISSIONS = [
   'Account API Tokens Read',
   'Access: Apps and Policies Read',
   'Notifications Read',
+  'Workers CI Read',
 ] as const;
 
 const EXPECTED = new Set(EXPECTED_TOKEN_PERMISSIONS.map((p) => p.toLowerCase()));

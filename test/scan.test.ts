@@ -136,6 +136,9 @@ describe('first scan of a small fleet', () => {
 
 describe('runaway and deploy correlation', () => {
   it('flags a spike right after a deploy as critical and links the deploy', async () => {
+    // The timeline reads the clock itself and shows 14 days; pin it to the fixture date.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
     const { env: e } = env();
     // A week of quiet history for api: 100 requests an hour, no errors.
     const rows = [];

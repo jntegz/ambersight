@@ -305,6 +305,40 @@ export interface PackagesView {
   workers: ({ name: string } & WorkerPackages)[];
 }
 
+/** The Git repository Cloudflare (Workers Builds) builds a Worker from. */
+export interface BuildSource {
+  /** "github" is the only provider the Packages check can read. */
+  provider: string;
+  /** "owner/name" for GitHub; empty for any other provider. */
+  repo: string;
+  /** The build's root directory inside the repository, such as "sites/shop"; empty for the repository root. */
+  rootDir: string;
+}
+
+/** What Settings asks before it suggests a repository for a Worker. Never stored. */
+export interface BuildSourcesView {
+  /** False when Cloudflare refused the read: the token lacks Workers CI Read, or is account-owned. */
+  available: boolean;
+  /** Why not, in a sentence. Only with `available: false`. */
+  reason?: string;
+  /** Worker name to its connected repository. A Worker without a connection is absent. */
+  sources: Record<string, BuildSource>;
+  /** Workers this request did not get to, on a large account. */
+  unchecked: number;
+}
+
+/** Where the lockfile of one build root lives, from the file names GitHub lists. Never stored. */
+export interface RepoLayout {
+  /** False when no supported lockfile was found in the folder or in the repository root. */
+  found: boolean;
+  lockfile?: 'npm' | 'pnpm' | 'yarn' | 'bun';
+  /** Set when the folder has its own lockfile. */
+  dir?: string;
+  /** Set when the lockfile is in the repository root and the folder is one of its workspaces. */
+  workspace?: string;
+  error?: string;
+}
+
 /** Time ranges the charts offer. 24h and 7d are drawn by hour, the others by day. */
 export type Range = '24h' | '7d' | '30d' | '90d' | '365d';
 export const RANGES: Range[] = ['24h', '7d', '30d', '90d', '365d'];

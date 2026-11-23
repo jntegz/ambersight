@@ -2,6 +2,22 @@
 
 All notable changes to Ambersight. Each version here has a matching [GitHub release](https://github.com/jntegz/ambersight/releases), which is what the update notice in the dashboard reads.
 
+## Unreleased
+
+Fixes Workers mapped to the wrong GitHub repository in the Packages check.
+
+**What was wrong.** **Settings › npm Packages** suggested a repository from the Worker's name, and **Auto-map** saved it. A Worker `shop-web` built from a monorepo was mapped to an unrelated repository `shop` because one name contained the other, and the Packages page then listed that project's dependencies. With a single readable repository, every Worker was matched to it.
+
+**If you used Auto-map, check your mappings.** Open **Settings › npm Packages**. Saved mappings are not changed by this release.
+
+- **The repository comes from Cloudflare when it can.** With the new optional *Workers CI Read* permission on `CF_API_TOKEN`, Settings reads the repository and root directory Workers Builds uses for each Worker and suggests that, with the lockfile format and the folder or monorepo workspace filled in. Add it under **My Profile › API Tokens › Edit › Account › Workers CI › Read**. It is not in the pre-filled token link and works only on a user-owned token. Without it everything else works as before.
+- **Wrong saved mappings are shown, not rewritten.** A mapping that points at a different repository or folder than Cloudflare builds from gets a warning on its row and a **Use Cloudflare's repository** button. Nothing is stored until you press **Save**.
+- **Name matches are guesses, and say so.** A repository is suggested by name only when it has the Worker's full name (ignoring case, punctuation and a suffix such as `-production`). Partial matches and the single-repository match are gone. Guesses are mapped by their own button, which lists every pair.
+- **Add needs a repository.** An empty field no longer saves an invented `owner/<Worker name>`.
+- **What is read.** Two new reads, only when a signed-in session opens that Settings tab, never by a scan, and neither is stored: the Workers Builds connection from Cloudflare (provider, repository and root directory are kept; commands, token names and commit details are dropped), and from GitHub which lockfile names exist in the repository root and the build folder. No new host is contacted. See [SECURITY.md](SECURITY.md).
+- **Docs.** `docs/checks.md` said the Workers Builds API needs an Edit permission; a Read level exists and is what this uses.
+- A test that read the current date against fixtures fixed to 2026-11-09 now sets the clock, as the others do.
+
 ## 1.1.4 (2026-11-23)
 
 Expanded npm package tracking with multi-lockfile and monorepo support, opt-in OSV.dev vulnerability scanning, a redesigned tabbed Settings experience, improved navigation, Cloudflare limit updates, and security updates.

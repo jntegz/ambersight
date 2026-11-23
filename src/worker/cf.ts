@@ -1,7 +1,9 @@
 // Read-only Cloudflare API client. Every method is a GET or a GraphQL query.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import { isGithubRepo, isRepoDir } from '../shared/config';
 import type { QuotaMetric, StorageKind } from '../shared/limits';
+import type { BuildSource } from '../shared/types';
 
 const API = 'https://api.cloudflare.com/client/v4';
 
@@ -33,6 +35,8 @@ export interface ApiWorker {
 
 export interface ApiScript {
   id: string;
+  /** The Worker's immutable id. The Workers Builds API knows a Worker by this, not by its name. */
+  tag?: string;
   compatibility_date?: string;
   compatibility_flags?: string[];
   handlers?: string[];
@@ -203,6 +207,56 @@ export interface InventoryItem {
 
 const enc = encodeURIComponent;
 
+/** Cloudflare calls one Settings request may spend on Workers Builds, well inside the Free plan's 50. */
+const BUILD_SOURCE_CALLS = 30;
+
+type RawTrigger = {
+  external_script_id?: unknown;
+  root_directory?: unknown;
+  deleted_on?: unknown;
+  repo_connection?: { provider_type?: unknown; provider_account_name?: unknown; repo_name?: unknown; deleted_on?: unknown } | null;
+};
+
+/** True when Cloudflare refuses Workers Builds reads for this token, not just this one request. */
+export function buildsRefused(e: unknown): e is CfApiError {
+  return e instanceof CfApiError && (e.status === 401 || e.status === 403 || /invalid token|authentication/i.test(e.message));
+}
+
+/**
+ * Every build trigger in an answer. The triggers list is documented only as "unknown", and the
+ * latest-builds answer is a map whose key is not documented, so this looks for the trigger shape
+ * (an object with a `repo_connection`) wherever it sits, a few levels deep.
+ */
+function findTriggers(value: unknown, path: string[] = [], out: { trigger: RawTrigger; path: string[] }[] = []): { trigger: RawTrigger; path: string[] }[] {
+  if (!value || typeof value !== 'object' || path.length > 5 || out.length >= 500) return out;
+  if (Array.isArray(value)) {
+    for (const v of value) findTriggers(v, [...path, ''], out);
+    return out;
+  }
+  const o = value as Record<string, unknown>;
+  if (o.repo_connection && typeof o.repo_connection === 'object') {
+    out.push({ trigger: o as RawTrigger, path });
+    return out;
+  }
+  for (const [k, v] of Object.entries(o)) findTriggers(v, [...path, k], out);
+  return out;
+}
+
+/** A live trigger as a build source, or null. Values are tested as a saved mapping's would be. */
+function toBuildSource(t: RawTrigger): BuildSource | null {
+  const rc = t.repo_connection;
+  if (!rc || rc.deleted_on || t.deleted_on) return null;
+  const provider = typeof rc.provider_type === 'string' && /^[a-z_]{1,30}$/.test(rc.provider_type) ? rc.provider_type : '';
+  if (!provider) return null;
+  // Another provider is reported so that Settings can say so, without relaying names it cannot test.
+  if (provider !== 'github') return { provider, repo: '', rootDir: '' };
+  const repo = `${typeof rc.provider_account_name === 'string' ? rc.provider_account_name : ''}/${typeof rc.repo_name === 'string' ? rc.repo_name : ''}`;
+  if (!isGithubRepo(repo)) return null;
+  const root = typeof t.root_directory === 'string' ? t.root_directory.trim().replace(/^(?:\.?\/)+|\/+$/g, '') : '';
+  // A root directory a mapping could not hold (odd characters) is left out; the repository is still right.
+  return { provider, repo, rootDir: root && root !== '.' && isRepoDir(root) ? root : '' };
+}
+
 export class CfClient {
   /** Subrequests made by this client in the current invocation. */
   calls = 0;
@@ -324,6 +378,66 @@ export class CfClient {
   /** Scripts list: compatibility date and flags, handlers, module format, usage model. */
   listScripts(): Promise<ApiScript[]> {
     return this.get<ApiScript[]>(`/accounts/${this.accountId}/workers/scripts`);
+  }
+
+  /**
+   * Workers Builds: the repository and root directory each Worker is built from. Needs Workers CI
+   * Read and a user-owned token; an account-owned token is refused. Called from Settings only,
+   * never by a scan. `tags` maps a Worker's tag to its name.
+   *
+   * The latest builds are asked for 20 Workers at a time. A Worker they do not show (no build in
+   * 90 days) has its triggers read instead, one call each, until `maxCalls` is spent; the rest are
+   * returned as `unchecked`. Only the provider, the repository and the root directory are kept:
+   * build commands, token names, commit authors and messages in the same answers are dropped here.
+   */
+  async buildSources(tags: Map<string, string>, maxCalls = BUILD_SOURCE_CALLS): Promise<{ sources: Map<string, BuildSource>; unchecked: string[] }> {
+    const sources = new Map<string, BuildSource>();
+    const connected = new Set<string>();
+    let used = 0;
+    const read = async (path: string): Promise<unknown> => {
+      used++;
+      try {
+        return await this.get<unknown>(path);
+      } catch (e) {
+        // Refused for the whole account: say so. Anything else (an unknown tag, a Worker with no
+        // connection) is an answer about that one request only.
+        if (buildsRefused(e)) throw e;
+        return null;
+      }
+    };
+    const keep = (value: unknown) => {
+      for (const { trigger, path } of findTriggers(value)) {
+        // The trigger names its Worker; failing that, the key it was filed under does.
+        const tag = typeof trigger.external_script_id === 'string' && tags.has(trigger.external_script_id) ? trigger.external_script_id : path.find((k) => tags.has(k));
+        const name = tag ? tags.get(tag) : undefined;
+        if (!name || connected.has(name)) continue;
+        const source = toBuildSource(trigger);
+        if (!source) continue;
+        connected.add(name);
+        sources.set(name, source);
+      }
+    };
+    const all = [...tags.keys()];
+    for (let i = 0; i < all.length && used < maxCalls; i += 20) {
+      keep(await read(`/accounts/${this.accountId}/builds/builds/latest?external_script_ids=${all.slice(i, i + 20).map(enc).join(',')}`));
+    }
+    const unchecked: string[] = [];
+    for (const [tag, name] of [...tags].sort((a, b) => a[1].localeCompare(b[1]))) {
+      if (connected.has(name)) continue;
+      if (used >= maxCalls) {
+        unchecked.push(name);
+        continue;
+      }
+      // Asked by tag, so every trigger in the answer belongs to this Worker, whatever it says.
+      for (const { trigger } of findTriggers(await read(`/accounts/${this.accountId}/builds/workers/${enc(tag)}/triggers`))) {
+        const source = toBuildSource(trigger);
+        if (!source) continue;
+        connected.add(name);
+        sources.set(name, source);
+        break;
+      }
+    }
+    return { sources, unchecked };
   }
 
   async schedules(script: string): Promise<string[]> {

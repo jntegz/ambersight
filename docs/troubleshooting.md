@@ -104,6 +104,19 @@ You may see one of three messages:
 - **"Cron checks paused: Cloudflare returned no scheduled runs for any Worker in the last 24 hours, not even Ambersight's own."**: Ambersight's own cron ran, so an empty answer means the dataset returned nothing, not that every cron stopped. The cron checks keep their current findings instead of reporting a missed run for every Worker.
 - **"Cron checks paused: …"** with another reason: there were too many runs to count in one scan. Existing cron findings are kept as they are.
 
+### "Cloudflare was not asked which repository each Worker is built from"
+
+Shown in **Settings › npm Packages**. To suggest the right repository for a Worker, Ambersight reads its Workers Builds connection, which needs the optional *Workers CI Read* permission. The message gives one of two reasons:
+
+- **"CF_API_TOKEN does not have the Workers CI Read permission."** In the Cloudflare dashboard, open **My Profile › API Tokens**, edit Ambersight's token, add **Account › Workers CI › Read** and save. The token's value does not change, so there is nothing to redeploy. Reload Settings.
+- **"…CF_API_TOKEN is account-owned."** Cloudflare answers the Workers Builds API only for a user-owned token. Use a token created under **My Profile › API Tokens**, or map repositories by hand.
+
+Without it the Packages check works as before. Repositories are then suggested only when one has the Worker's name, which is a guess: check each one before you add it.
+
+### A mapped Worker says "Cloudflare builds this Worker from …"
+
+The saved mapping points at a different repository or folder than the one Workers Builds uses, so the Packages page is probably listing another project's dependencies. This happens when a repository was picked by its name. Press **Use Cloudflare's repository** on the row, check the lockfile format and the folder or workspace under **Options**, then **Save** and **Scan now**. If the mapping is right as it is (for example the lockfile lives in another repository), leave it: Ambersight never changes a saved mapping itself.
+
 ### "Update check failed: GitHub answered …"
 
 GitHub was unreachable or rate-limited. Nothing else is affected. Turn the update check off in **Settings › General** if you do not want it.

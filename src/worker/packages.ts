@@ -6,8 +6,8 @@
 // and optional POST/GET to api.osv.dev when modules.packagesOsv is enabled.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { groupsFor, inScope, repoFor, type Config, type LockfileKind, type PackageRepo } from '../shared/config';
-import type { AdvisorySeverity, Finding, Gap, PackageAdvisory, PackageItem, PackagesView, WorkerPackages } from '../shared/types';
+import { groupsFor, inScope, LOCKFILE_KINDS, repoFor, type Config, type LockfileKind, type PackageRepo } from '../shared/config';
+import type { AdvisorySeverity, Finding, Gap, PackageAdvisory, PackageItem, PackagesView, RepoLayout, WorkerPackages } from '../shared/types';
 import { finding } from './checks';
 import { allowedFetch, OPTIONAL_HOSTS } from './net';
 
@@ -698,6 +698,54 @@ export async function listGithubRepos(token: string, allowlist: string[] | null 
   )].sort((a, b) => a.localeCompare(b));
   const owners = [...new Set(repos.map((r) => r.split('/')[0]))];
   return { repos, owner: owners.length === 1 ? owners[0] : (owners[0] ?? null) };
+}
+
+/**
+ * Which supported lockfiles one folder of a repository holds, from GitHub's listing of it ('' is the
+ * repository root). Only the four lockfile names are looked for: no file is opened and no other
+ * name is kept. Null when the folder is missing or GITHUB_TOKEN cannot read the repository.
+ */
+export async function lockfilesIn(token: string, repo: string, folder: string): Promise<LockfileKind[] | null> {
+  const [owner, name] = repo.split('/');
+  const path = folder ? `/${folder.split('/').map(encodeURIComponent).join('/')}` : '';
+  const res = await allowedFetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/contents${path}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'ambersight-packages',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+    // As for a lockfile: a redirect would carry the token to another URL.
+    redirect: 'manual',
+  });
+  if (res.status === 401) throw new LockfileError('GitHub rejected GITHUB_TOKEN (expired or revoked).');
+  if (res.status >= 300 && res.status < 400) throw new LockfileError(`${repo} has moved on GitHub.`);
+  if (res.status === 403 || res.status === 404) {
+    await res.body?.cancel();
+    return null;
+  }
+  if (!res.ok) throw new Error(`GitHub answered ${res.status}`);
+  const items = (await res.json()) as { name?: unknown; type?: unknown }[];
+  if (!Array.isArray(items)) return [];
+  const names = new Set(items.filter((i) => i?.type === 'file' && typeof i.name === 'string').map((i) => i.name as string));
+  return LOCKFILE_KINDS.filter((k) => names.has(LOCKFILE_FILES[k]));
+}
+
+/** When a folder holds several lockfiles, a stray package-lock.json is the likeliest leftover. */
+const LOCKFILE_PREFERENCE: readonly LockfileKind[] = ['pnpm', 'yarn', 'bun', 'npm'];
+
+/**
+ * The mapping fields for a build that runs in `rootDir`: a lockfile in that folder makes it the
+ * lockfile folder; one only in the repository root makes the folder a workspace of a monorepo.
+ */
+export function layoutFor(rootKinds: LockfileKind[] | null, dirKinds: LockfileKind[] | null, rootDir: string): RepoLayout {
+  const pick = (kinds: LockfileKind[] | null) => LOCKFILE_PREFERENCE.find((k) => kinds?.includes(k));
+  const lockfile = (k: LockfileKind) => (k === 'npm' ? {} : { lockfile: k });
+  const own = rootDir ? pick(dirKinds) : undefined;
+  if (own) return { found: true, ...lockfile(own), dir: rootDir };
+  const top = pick(rootKinds);
+  if (!top) return { found: false };
+  return { found: true, ...lockfile(top), ...(rootDir ? { workspace: rootDir } : {}) };
 }
 
 /**

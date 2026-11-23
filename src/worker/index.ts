@@ -5,14 +5,15 @@
 import { Hono, type Context } from 'hono';
 import { csrf } from 'hono/csrf';
 import { HTTPException } from 'hono/http-exception';
-import { ConfigError, defaultConfig, isValidTimeZone, parseConfig, type Config } from '../shared/config';
+import { ConfigError, defaultConfig, isGithubRepo, isRepoDir, isValidTimeZone, parseConfig, type Config } from '../shared/config';
+import type { BuildSourcesView, RepoLayout } from '../shared/types';
 import { MAX_PASSPHRASE, passphraseProblem } from '../shared/passphrase';
 import { adminEventStatements, buildAdminLog, configEvents, handleOf, type AdminEvent } from './adminLog';
 import { confirmationValid, CURSOR_REFUSED, cursorValid, personRequest, previewPersonData, removePersonData, type PersonRequest, type PersonStepKind } from './personData';
 import { deliverAdminNotices, noticeAudience } from './adminNotice';
 import { attributionStep, eraseNow } from './attribution';
 import { attemptFailed, attemptKey, attemptSucceeded, checkPassphrase, COOKIE, credentialGeneration, ensureCredSalt, hasSession, login, logout, passphraseChangeStatements, readCookie, reserveAttempt, turnstileOn, verifyTurnstile } from './auth';
-import { CfClient } from './cf';
+import { buildsRefused, CfClient } from './cf';
 import { claimCooldown, configFrom, getSettings, listAccounts, pinnedAccounts, recordUsage, setSettings, upsertAccount, type AccountRow } from './db';
 import type { Env, ScanMessage } from './env';
 import { metered } from './meter';
@@ -24,7 +25,7 @@ import { accountChoice, authorizeToken, createToken, DEFAULT_TOKEN_DAYS, listTok
 import { plainFinding, plainPackages, plainTimeline, plainWorker, tokenAccounts, tokenOverview, tokenSelfCost } from './tokenView';
 import { sendTest, watchedAccountIds } from './notify';
 import { buildAccounts, buildOverview, buildSelfCost, buildTimeline, pickAccount } from './overview';
-import { buildPackages, listGithubRepos, repoAllowlist } from './packages';
+import { buildPackages, layoutFor, listGithubRepos, lockfilesIn, LockfileError, REPO_NOT_ALLOWED, repoAllowed, repoAllowlist } from './packages';
 import { buildResources } from './resources';
 import { safeError } from './redact';
 import { reportHtml } from './report';
@@ -300,6 +301,45 @@ app.get('/api/github-repos', async (c) => {
     error: 'Could not reach GitHub to list repositories.',
   }));
   return c.json(result);
+});
+/**
+ * For Settings › npm Packages: the repository Cloudflare builds each Worker from, so that the
+ * suggestion is not a guess from the Worker's name. Read on request and never stored. Without
+ * Workers CI Read (an optional permission) it answers `available: false` and Settings says so.
+ */
+app.get('/api/build-sources', async (c) => {
+  if (c.get('viaToken')) return c.json({ error: 'Dashboard session required.' }, 403);
+  const account = await accountOf(c, c.req.query('account'));
+  const cf = new CfClient(c.env.CF_API_TOKEN, account);
+  const none = (reason: string): BuildSourcesView => ({ available: false, reason, sources: {}, unchecked: 0 });
+  try {
+    const tags = new Map((await cf.listScripts()).filter((s) => s.tag).map((s) => [s.tag!, s.id]));
+    const { sources, unchecked } = await cf.buildSources(tags);
+    return c.json({ available: true, sources: Object.fromEntries(sources), unchecked: unchecked.length } satisfies BuildSourcesView);
+  } catch (e) {
+    // Fixed sentences: Cloudflare's own error text is not passed on.
+    if (!buildsRefused(e)) return c.json(none('Cloudflare did not answer.'));
+    return c.json(none(/invalid token/i.test(e.message)
+      ? 'Cloudflare answers this only for a user-owned API token, and CF_API_TOKEN is account-owned.'
+      : 'CF_API_TOKEN does not have the Workers CI Read permission.'));
+  }
+});
+/** For the same page: which lockfile a connected repository holds, and whether the build folder is a workspace. */
+app.get('/api/repo-layout', async (c) => {
+  if (c.get('viaToken')) return c.json({ error: 'Dashboard session required.' }, 403);
+  const repo = c.req.query('repo') ?? '';
+  const dir = c.req.query('dir') ?? '';
+  if (!isGithubRepo(repo) || (dir && !isRepoDir(dir))) return c.json({ error: 'Not a repository or folder.' }, 400);
+  const none = (error: string): RepoLayout => ({ found: false, error });
+  if (!c.env.GITHUB_TOKEN) return c.json(none('GITHUB_TOKEN is not set.'));
+  if (!repoAllowed(repoAllowlist(c.env.GITHUB_REPO_ALLOWLIST), repo)) return c.json(none(REPO_NOT_ALLOWED));
+  try {
+    const top = await lockfilesIn(c.env.GITHUB_TOKEN, repo, '');
+    if (!top) return c.json(none(`GITHUB_TOKEN cannot read ${repo}.`));
+    return c.json(layoutFor(top, dir ? await lockfilesIn(c.env.GITHUB_TOKEN, repo, dir) : null, dir));
+  } catch (e) {
+    return c.json(none(e instanceof LockfileError ? e.message : 'Could not reach GitHub.'));
+  }
 });
 app.get('/api/resources', async (c) => {
   const account = await accountOf(c, c.req.query('account'));

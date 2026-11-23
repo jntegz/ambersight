@@ -4,7 +4,7 @@
   import { onMount } from 'svelte';
   import { ConfigError, DEFAULT_THRESHOLDS, parseConfig, THRESHOLD_RANGES, type Config, type InstantChannel } from '../../../src/shared/config';
   import { CHECK_TITLES } from '../../../src/shared/findings';
-  import type { SetupStatus } from '../../../src/shared/types';
+  import type { BuildSource, RepoLayout, SetupStatus } from '../../../src/shared/types';
   import Icon, { type IconName } from '../components/Icon.svelte';
   import MapEditor from '../components/settings/MapEditor.svelte';
   import NotifyChannels from '../components/settings/NotifyChannels.svelte';
@@ -16,6 +16,7 @@
   import SelfCost from '../components/settings/SelfCost.svelte';
   import Switch from '../components/Switch.svelte';
   import { api, ApiError } from '../lib/api';
+  import { mappingFrom, mappingProblem, suggestFor, type MappingProblem } from '../lib/repoMatch';
   import { setParam } from '../lib/route';
   import { fromDisplay, inputStep, rangeText, THRESHOLD_GROUPS, toDisplay, type ThresholdKey } from '../lib/thresholds';
 
@@ -259,53 +260,110 @@
     }
     return null;
   });
-  const normSlug = (s: string) => s.toLowerCase().replace(/[-_.]+/g, '');
-  const baseWorker = (s: string) => s.toLowerCase().replace(/-(?:prod|production|staging|stage|dev|test|preview|workers?)$/, '');
-  function matchRepoForWorker(workerName: string, repos: string[]): string {
-    if (!repos.length) return '';
-    const w = workerName.toLowerCase();
-    const wNorm = normSlug(w);
-    const wBase = baseWorker(w);
-    const wBaseNorm = normSlug(wBase);
-    return (
-      repos.find((r) => r.split('/')[1]?.toLowerCase() === w)
-      ?? repos.find((r) => normSlug(r.split('/')[1] ?? '') === wNorm)
-      ?? repos.find((r) => r.split('/')[1]?.toLowerCase() === wBase)
-      ?? repos.find((r) => normSlug(r.split('/')[1] ?? '') === wBaseNorm)
-      ?? repos.find((r) => {
-        const rn = normSlug(r.split('/')[1] ?? '');
-        return rn.length >= 4 && (wNorm.includes(rn) || rn.includes(wNorm));
-      })
-      ?? (repos.length === 1 ? repos[0] : '')
-    );
+  // The repository Cloudflare builds each Worker from, read when this tab is open and the check is
+  // on. It needs the optional Workers CI Read permission; without it only names are left to go on.
+  let buildSources = $state<Record<string, BuildSource>>({});
+  let buildSourcesReason = $state('');
+  let buildUnchecked = $state(0);
+  let buildSourcesLoaded = $state<string | null>(null);
+  $effect(() => {
+    const key = account ?? '';
+    if (active !== 'packages' || !draft?.modules.packages || buildSourcesLoaded === key) return;
+    buildSourcesLoaded = key;
+    buildSources = {};
+    buildSourcesReason = '';
+    buildUnchecked = 0;
+    api.buildSources(account ?? undefined).then((r) => {
+      if (buildSourcesLoaded !== key) return;
+      // A Worker picked before this arrived still shows the guess from its name: replace that, not something typed.
+      const guessed = addPackageWorker ? (suggestFor(addPackageWorker, undefined, githubRepos)?.repo ?? '') : '';
+      const fromCloudflare = addPackageWorker ? suggestFor(addPackageWorker, r.sources[addPackageWorker], githubRepos) : null;
+      if (addPackageWorker && r.sources[addPackageWorker] && (!addPackageRepo || addPackageRepo === guessed)) addPackageRepo = fromCloudflare?.repo ?? '';
+      buildSources = r.sources;
+      buildSourcesReason = r.available ? '' : (r.reason ?? 'Cloudflare did not answer.');
+      buildUnchecked = r.unchecked;
+    }, () => {});
+  });
+  const suggestions = $derived(unmapped.map((w) => ({ worker: w, s: suggestFor(w, buildSources[w], githubRepos) })));
+  /** Workers whose repository Cloudflare reports, and those with only a repository of the same name. */
+  const confirmedMatches = $derived(suggestions.flatMap((m) => (m.s?.from === 'cloudflare' ? [{ worker: m.worker, source: m.s }] : [])));
+  const guessedMatches = $derived(suggestions.flatMap((m) => (m.s?.from === 'name' ? [{ worker: m.worker, repo: m.s.repo }] : [])));
+  /** Saved mappings that point somewhere else than Cloudflare builds from. Shown, never changed. */
+  const mappingProblems = $derived.by(() => {
+    const out: Record<string, MappingProblem> = {};
+    if (!draft) return out;
+    for (const k of repoKeys) {
+      const p = mappingProblem(draft.packageRepos[k], buildSources[workerOf(k)]);
+      if (p) out[k] = p;
+    }
+    return out;
+  });
+  const problemCount = $derived(Object.keys(mappingProblems).length);
+  const where = (s: { repo: string; rootDir: string }) => `${s.repo}${s.rootDir ? `, folder ${s.rootDir}` : ''}`;
+
+  /** One GitHub lookup per repository and folder: which lockfile it holds, and where. */
+  const layouts = new Map<string, Promise<RepoLayout | null>>();
+  function layoutOf(repo: string, rootDir: string): Promise<RepoLayout | null> {
+    const key = `${repo}|${rootDir}`;
+    if (!layouts.has(key)) layouts.set(key, features?.github ? api.repoLayout(repo, rootDir).catch(() => null) : Promise.resolve(null));
+    return layouts.get(key)!;
   }
-  function suggestRepo(workerName: string): string {
-    if (!workerName) return '';
-    const matched = matchRepoForWorker(workerName, githubRepos);
-    if (matched) return matched;
-    return defaultOwner ? `${defaultOwner}/${workerName}` : '';
+  let pkgNotes = $state<Record<string, string>>({});
+  let mappingBusy = $state(false);
+  /** Puts Cloudflare's repository in the draft for one key. Nothing is saved until Save. */
+  async function applySource(key: string, source: { repo: string; rootDir: string }) {
+    const layout = await layoutOf(source.repo, source.rootDir);
+    if (!draft) return;
+    draft.packageRepos[key] = mappingFrom(source, layout, draft.packageRepos[key]);
+    pkgNotes[key] = layout?.found
+      ? ''
+      : `${layout?.error ?? `No lockfile found in ${where(source)}.`} Set the lockfile format${source.rootDir ? ', folder or workspace' : ''} under Options.`;
   }
-  const autoMatches = $derived(
-    githubRepos.length
-      ? unmapped.map((w) => ({ worker: w, repo: matchRepoForWorker(w, githubRepos) })).filter((m) => Boolean(m.repo))
-      : [],
-  );
+  async function useSource(key: string) {
+    const p = mappingProblems[key];
+    if (!p || mappingBusy) return;
+    mappingBusy = true;
+    try {
+      await applySource(key, p.source);
+    } finally {
+      mappingBusy = false;
+    }
+  }
+  const addSuggestion = $derived(addPackageWorker ? suggestFor(addPackageWorker, buildSources[addPackageWorker], githubRepos) : null);
+  const addSource = $derived(addPackageWorker ? buildSources[addPackageWorker] : undefined);
+  const sameRepo = (a: string, b: string) => normalizeRepo(a).toLowerCase() === b.toLowerCase();
   function pickAddWorker(w: string) {
     addPackageWorker = w;
-    addPackageRepo = suggestRepo(w);
+    addPackageRepo = w ? (suggestFor(w, buildSources[w], githubRepos)?.repo ?? '') : '';
   }
-  function mapWorker() {
-    if (!draft || !addPackageWorker) return;
-    const repo = normalizeRepo(addPackageRepo || suggestRepo(addPackageWorker));
-    draft.packageRepos[repoKey(addPackageWorker)] = { repo };
+  async function mapWorker() {
+    const repo = normalizeRepo(addPackageRepo);
+    if (!draft || !addPackageWorker || !repo || mappingBusy) return;
+    const key = repoKey(addPackageWorker);
+    const s = addSuggestion;
+    mappingBusy = true;
+    try {
+      // Cloudflare's repository comes with its folder and lockfile; anything typed is saved as typed.
+      if (s?.from === 'cloudflare' && sameRepo(repo, s.repo)) await applySource(key, s);
+      else draft.packageRepos[key] = { repo };
+    } finally {
+      mappingBusy = false;
+    }
     addPackageWorker = '';
     addPackageRepo = '';
   }
-  function autoMapWorkers() {
-    if (!draft) return;
-    for (const m of autoMatches) {
-      draft.packageRepos[repoKey(m.worker)] = { repo: m.repo };
+  async function autoMapConfirmed() {
+    if (!draft || mappingBusy) return;
+    mappingBusy = true;
+    try {
+      for (const m of confirmedMatches) await applySource(repoKey(m.worker), m.source);
+    } finally {
+      mappingBusy = false;
     }
+  }
+  function autoMapGuessed() {
+    if (!draft) return;
+    for (const m of guessedMatches) draft.packageRepos[repoKey(m.worker)] = { repo: m.repo };
   }
   const listText = (l: string[]) => l.join(', ');
   const splitList = (s: string) => s.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
@@ -621,7 +679,7 @@
             {#if githubReposError}
               <p class="field-err" role="status">{githubReposError}</p>
             {:else if githubRepos.length}
-              <p class="hint"><span class="mono">GITHUB_TOKEN</span> can read <strong>{githubRepos.length}</strong> {githubRepos.length === 1 ? 'repository' : 'repositories'} on GitHub — select a Worker below and its matching repository pre-fills automatically.</p>
+              <p class="hint"><span class="mono">GITHUB_TOKEN</span> can read <strong>{githubRepos.length}</strong> {githubRepos.length === 1 ? 'repository' : 'repositories'} on GitHub. Select a Worker below to see the repository suggested for it.</p>
             {:else if features?.github}
               <p class="hint">Map each Worker to its GitHub repository (<span class="mono">owner/name</span> or paste a GitHub URL). Optional fields cover pnpm/yarn/bun lockfiles, subfolders, monorepo workspaces, and branches.</p>
             {/if}
@@ -629,6 +687,21 @@
               <p class="hint"><span class="mono">GITHUB_REPO_ALLOWLIST</span> limits reads to: <span class="mono">{status.githubRepoAllowlist.join(', ')}</span>.</p>
             {:else}
               <p class="hint">Anyone signed in can map any repository <span class="mono">GITHUB_TOKEN</span> can read, so scope that token only to the repositories you mean to track, or set <span class="mono">GITHUB_REPO_ALLOWLIST</span>.</p>
+            {/if}
+            {#if buildSourcesReason}
+              <p class="hint" role="status">
+                Cloudflare was not asked which repository each Worker is built from: {buildSourcesReason}
+                Until then a repository is suggested only when it has the Worker's name, which can be the wrong one.
+                To fix it, add <strong>Account › Workers CI › Read</strong> to <span class="mono">CF_API_TOKEN</span> under <strong>My Profile › API Tokens</strong> in the Cloudflare dashboard. It is optional, and read only on this page.
+              </p>
+            {:else if buildUnchecked}
+              <p class="hint" role="status">This account has more Workers than one request can ask Cloudflare about. {buildUnchecked} were not checked, so they get a suggestion from their name at most.</p>
+            {/if}
+            {#if problemCount}
+              <p class="pkg-warn" role="status">
+                <Icon name="warning" size={14} />
+                <span><strong>{problemCount}</strong> mapped {problemCount === 1 ? 'Worker points' : 'Workers point'} at a different repository or folder than the one Cloudflare builds {problemCount === 1 ? 'it' : 'them'} from. Nothing was changed: review {problemCount === 1 ? 'it' : 'them'} below.</span>
+              </p>
             {/if}
             <details class="hint-details">
               <summary>Need to rotate or limit <span class="mono">GITHUB_TOKEN</span>?</summary>
@@ -672,14 +745,39 @@
                       onblur={() => (addPackageRepo = normalizeRepo(addPackageRepo))}
                     />
                   {/if}
-                  <button type="button" class="primary small" disabled={!addPackageWorker} onclick={mapWorker}>Add</button>
+                  <button type="button" class="primary small" disabled={!addPackageWorker || !normalizeRepo(addPackageRepo) || mappingBusy} onclick={mapWorker}>Add</button>
                 </div>
-                {#if autoMatches.length}
+                {#if addPackageWorker}
+                  {#if addSuggestion?.from === 'cloudflare'}
+                    <p class="hint">
+                      Cloudflare builds <span class="mono">{addPackageWorker}</span> from <span class="mono">{where(addSuggestion)}</span>.
+                      {#if addPackageRepo && !sameRepo(addPackageRepo, addSuggestion.repo)}The repository entered here is a different one.{/if}
+                    </p>
+                  {:else if addSource}
+                    <p class="hint">Cloudflare builds <span class="mono">{addPackageWorker}</span> from a repository that is not on GitHub ({addSource.provider}). The Packages check reads GitHub only.</p>
+                  {:else if addSuggestion?.from === 'name' && sameRepo(addPackageRepo, addSuggestion.repo)}
+                    <p class="hint">Suggested because the repository has the Worker's name. Check that <span class="mono">{addPackageWorker}</span> is deployed from it before you add it.</p>
+                  {/if}
+                {/if}
+                {#if confirmedMatches.length}
                   <div class="pkg-auto">
-                    <button type="button" class="ghost small" onclick={autoMapWorkers}>
-                      Auto-map {autoMatches.length} matching {autoMatches.length === 1 ? 'Worker' : 'Workers'}
+                    <button type="button" class="ghost small" disabled={mappingBusy} onclick={autoMapConfirmed}>
+                      Map {confirmedMatches.length} {confirmedMatches.length === 1 ? 'Worker' : 'Workers'} to the repository Cloudflare builds {confirmedMatches.length === 1 ? 'it' : 'them'} from
                     </button>
-                    <span class="hint">{autoMatches.slice(0, 4).map((m) => `${m.worker} → ${m.repo}`).join(', ')}{autoMatches.length > 4 ? ` +${autoMatches.length - 4} more` : ''}</span>
+                    <ul class="pkg-pairs">
+                      {#each confirmedMatches as m (m.worker)}<li><span class="mono">{m.worker}</span> → <span class="mono">{where(m.source)}</span></li>{/each}
+                    </ul>
+                  </div>
+                {/if}
+                {#if guessedMatches.length}
+                  <div class="pkg-auto">
+                    <button type="button" class="ghost small" onclick={autoMapGuessed}>
+                      Map {guessedMatches.length} {guessedMatches.length === 1 ? 'Worker' : 'Workers'} by name (a guess)
+                    </button>
+                    <ul class="pkg-pairs">
+                      {#each guessedMatches as m (m.worker)}<li><span class="mono">{m.worker}</span> → <span class="mono">{m.repo}</span></li>{/each}
+                    </ul>
+                    <span class="hint">A repository with the Worker's name is not always the one it is deployed from. Check each pair.</span>
                   </div>
                 {/if}
               </div>
@@ -696,6 +794,7 @@
                 {#each filteredRepoKeys as name (name)}
                   {@const entry = draft.packageRepos[name]}
                   {@const badRepo = repoProblem(entry.repo)}
+                  {@const problem = mappingProblems[name]}
                   {@const extraOpen = Boolean(expandedPkg[name])}
                   {@const hasExtra = hasExtraOpts(entry)}
                   <div class="pkg-item" class:invalid-row={!!badRepo}>
@@ -749,6 +848,20 @@
                       <button type="button" class="ghost small" onclick={() => delete draft!.packageRepos[name]}>Remove</button>
                     </div>
                     {#if badRepo}<p class="field-err pkg-row-err">{badRepo}</p>{/if}
+                    {#if problem}
+                      <p class="pkg-warn pkg-row-err" role="status">
+                        <Icon name="warning" size={14} />
+                        <span>
+                          {#if problem.kind === 'repo'}
+                            Cloudflare builds this Worker from <span class="mono">{where(problem.source)}</span>, not from this repository.
+                          {:else}
+                            Cloudflare builds this Worker from the folder <span class="mono">{problem.source.rootDir}</span>, which this mapping does not read.
+                          {/if}
+                        </span>
+                        <button type="button" class="ghost small" disabled={mappingBusy} onclick={() => useSource(name)}>Use Cloudflare's repository</button>
+                      </p>
+                    {/if}
+                    {#if pkgNotes[name]}<p class="hint pkg-row-err" role="status">{pkgNotes[name]}</p>{/if}
                     {#if !extraOpen && hasExtra}
                       <p class="pkg-extra-summary muted">
                         {#if entry.dir}folder: <span class="mono">{entry.dir}</span>{' '}{/if}
@@ -1137,6 +1250,11 @@
   .pkg-add-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .pkg-add-row .input { flex: 1 1 180px; min-width: 0; }
   .pkg-auto { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+  .pkg-pairs { flex: 1 1 100%; margin: 0; padding-left: 18px; font-size: 12px; line-height: 18px; color: var(--ink-muted); max-height: 126px; overflow-y: auto; }
+  .pkg-warn { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 13px; line-height: 19px; color: var(--warning-text); }
+  .pkg-warn :global(svg) { flex: none; }
+  .pkg-warn span { flex: 1 1 240px; min-width: 0; }
+  .pkg-warn .mono { overflow-wrap: anywhere; }
   .pkg-list-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
   .pkg-search { max-width: 260px; }
   .pkg-table { margin-top: 6px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--paper); overflow: hidden; }

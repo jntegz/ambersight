@@ -279,4 +279,11 @@ describe('the token template', () => {
   it('does not expect the optional Access permission to be missing', () => {
     expect(unexpectedPermissions(['Access: Apps and Policies Read', 'Notifications Read'])).toEqual([]);
   });
+
+  it('expects the optional Workers CI Read, without asking for it in the link', () => {
+    expect(unexpectedPermissions(['Workers CI Read'])).toEqual([]);
+    // The level that could change a build stays unexpected.
+    expect(unexpectedPermissions(['Workers CI Write', 'Workers CI Edit'])).toEqual(['Workers CI Write', 'Workers CI Edit']);
+    expect(TOKEN_PERMISSION_KEYS.filter((k) => /ci|build/.test(k))).toEqual([]);
+  });
 });
