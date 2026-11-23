@@ -96,8 +96,9 @@ One install can watch every account its token can see. Choose them in the setup 
 | `modules.security` | `true` | Audit log (members, tokens), certificates and dangling DNS. Needs *SSL and Certificates Read* and *DNS Read*. |
 | `modules.drift` | `true` | Bindings that disappeared, staging and production that differ, the limit on variables and secrets (64 on Free, 128 on Paid) |
 | `modules.incidents` | `false` | Active incidents from the public status page `www.cloudflarestatus.com`, on alerts and the timeline. The request carries nothing about your account. |
-| `modules.packages` | `false` | The [Packages check](checks.md#packages): direct npm dependencies of mapped Workers, locked version against the latest on npm. Needs the `GITHUB_TOKEN` secret. Contacts `api.github.com` and `registry.npmjs.org`, and is the only check that reads source code (`package-lock.json` only). |
-| `packageRepos` | `{}` | `"<account id>:<Worker name>"` → `{ "repo": "owner/name", "dir": "workers/api", "ref": "main" }`. `dir` and `ref` are optional (root folder, default branch). A key with only the Worker name applies in every account. Settings adds the account id for you. |
+| `modules.packages` | `false` | The [Packages check](checks.md#packages): direct npm dependencies of mapped Workers, locked version against the latest on npm. Needs the `GITHUB_TOKEN` secret. Contacts `api.github.com` and `registry.npmjs.org`, and is the only check that reads source code (lockfiles, and `package.json` for yarn). |
+| `modules.packagesOsv` | `false` | Optional security vulnerability check inside Packages. **No API key or account needed** (`api.osv.dev` is a free public database). Contacts `api.osv.dev` once a day in a batch query for public-registry packages only, raising `packages:vulnerable` findings. |
+| `packageRepos` | `{}` | `"<account id>:<Worker name>"` → `{ "repo": "owner/name", "lockfile": "npm", "dir": "workers/api", "workspace": "packages/api", "ref": "main" }`. `lockfile` (`npm`, `pnpm`, `yarn`, `bun`), `dir`, `workspace` and `ref` are optional. A key with only the Worker name applies in every account. Settings adds the account id for you. |
 | `mutedChecks` | `[]` | Individual checks switched off, by ID, for example `"zombies:unbound-kv"`. The IDs are in [checks.md](checks.md). |
 
 ### Thresholds

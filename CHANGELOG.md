@@ -2,17 +2,23 @@
 
 All notable changes to Ambersight. Each version here has a matching [GitHub release](https://github.com/jntegz/ambersight/releases), which is what the update notice in the dashboard reads.
 
-## Unreleased
+## 1.1.4 (2026-11-23)
 
-Limits brought in line with Cloudflare's documentation.
+Expanded npm package tracking with multi-lockfile and monorepo support, opt-in OSV.dev vulnerability scanning, a redesigned tabbed Settings experience, improved navigation, Cloudflare limit updates, and security updates.
 
-- `npm run deploy` applies migration 0018.
-- **Cron Triggers**: the Workers Paid limit is 1,000, not 250, so `cron:cron-count` now reports at 800 and warns at 1,000.
-- **Variables and secrets**: Workers Paid allows 128 per Worker. `drift:vars-near-limit` now uses 64 on Free and 128 on Paid.
-- **Cron CPU time**: on Workers Paid, `cron:cron-cpu-near-limit` uses the Worker's own `limits.cpu_ms` when it sets one, and 30 seconds otherwise. Ambersight reads the limit with the Worker's settings.
-- **Error 1027**: the help and docs now say that a route set to fail open skips its Worker instead of returning the error.
-- **Spending and budget alerts**: the docs no longer say Workers Paid has no spending cap or that Cloudflare's budget alerts arrive a day late.
-- **Check count**: the README and docs say 91 checks, one per ID, and a test keeps the number in step with docs/checks.md.
+- `npm run deploy` applies migrations 0018 and 0019.
+- **Multi-lockfile & monorepo Packages tracking**: read direct dependencies from `package-lock.json` (npm v2/v3), `pnpm-lock.yaml` (v6/v9), `yarn.lock` (Classic v1 & Berry v2+) and `bun.lock` (JSONC), including monorepo `workspace` paths with shared lockfile fetch deduplication.
+- **Opt-in OSV.dev vulnerability checks (`packages:vulnerable`)**: check locked public npm dependencies against OSV.dev (free, no API key required), with daily caching, severity badges, advisory links and fixed version hints. Runtime major updates stay warnings while dev-only major updates report as info.
+- **Upgraded Packages view & Worker detail card**: fleet summary stats, unmapped Workers list, **By Worker** and **By Package** views, urgency and alphabetical sorting, built-in plain-language filter explanations, CSV and Markdown export, and a **Packages** card on each mapped Worker's page.
+- **Easier Packages setup & tabbed Settings UI**: Settings now uses left-sidebar tabs instead of one long scrolling page, with a dedicated **npm Packages** tab featuring step-by-step `GITHUB_TOKEN` setup, a GitHub repository picker with automatic pre-fill and one-click **Auto-map**, and a compact searchable Worker table built for 50+ Workers.
+- **Grouped navigation & live badges**: top navigation grouped into **Monitor**, **Track** and **Settings**, with live count badges on **Findings** and **Packages** plus the `g p` shortcut.
+- **Cloudflare limits & documentation alignment**:
+  - **Cron Triggers**: Workers Paid limit updated to 1,000 (`cron:cron-count` reports at 800 and warns at 1,000).
+  - **Variables and secrets**: `drift:vars-near-limit` now uses 64 on Free and 128 on Paid.
+  - **Cron CPU time**: on Workers Paid, `cron:cron-cpu-near-limit` uses the Worker's own `limits.cpu_ms` when set, and 30 seconds otherwise.
+  - **Error 1027 & spending docs**: clarified fail-open route behavior and Workers Paid spending/budget alerts.
+  - **Check count**: updated to 92 checks across the README and `docs/checks.md`.
+- **Security updates**: includes general security updates across the Worker backend and UI.
 
 ## 1.1.3 (2026-11-18)
 

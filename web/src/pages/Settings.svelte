@@ -16,9 +16,11 @@
   import SelfCost from '../components/settings/SelfCost.svelte';
   import Switch from '../components/Switch.svelte';
   import { api, ApiError } from '../lib/api';
+  import { setParam } from '../lib/route';
   import { fromDisplay, inputStep, rangeText, THRESHOLD_GROUPS, toDisplay, type ThresholdKey } from '../lib/thresholds';
 
-  let { workers, groups, account = null, accountCount = 1, features = null, onSaved, onAccountsChanged, onSignedOut, onUnauthorized }: {
+  let { params = null, workers, groups, account = null, accountCount = 1, features = null, onSaved, onAccountsChanged, onSignedOut, onUnauthorized }: {
+    params?: URLSearchParams | null;
     workers: string[];
     groups: string[];
     /** Optional bindings present on this install (from the overview). */
@@ -37,6 +39,10 @@
   let saved = $state<Config | null>(null);
   let draft = $state<Config | null>(null);
   let status = $state<SetupStatus | null>(null);
+  let githubRepos = $state<string[]>([]);
+  let githubOwner = $state<string | null>(null);
+  let githubReposError = $state('');
+  let githubReposLoaded = $state(false);
   let loadError = $state('');
   let saveError = $state('');
   let saving = $state(false);
@@ -53,6 +59,17 @@
   let confirmErase = $state(false);
   $effect(() => {
     if (!erasesNames) confirmErase = false;
+  });
+
+  $effect(() => {
+    if (features?.github && !githubReposLoaded) {
+      githubReposLoaded = true;
+      api.githubRepos().then((r) => {
+        githubRepos = r.repos;
+        githubOwner = r.owner;
+        githubReposError = r.error ?? '';
+      }, () => {});
+    }
   });
 
   onMount(async () => {
@@ -76,9 +93,25 @@
     toastTimer = setTimeout(() => (toast = ''), 3200);
   }
 
+  const VALID_GH_REPO = /^[A-Za-z0-9-]{1,39}\/[\w.-]{1,100}$/;
+  function normalizeRepo(raw: string): string {
+    const s = raw.trim().replace(/^@/, '');
+    const url = /^(?:https?:\/\/|ssh:\/\/git@)?(?:www\.)?github\.com\/([^/\s]+)\/([^/\s?#]+)/i.exec(s)
+      ?? /^git@github\.com:([^/\s]+)\/([^/\s?#]+)/i.exec(s);
+    if (url) return `${url[1]}/${url[2].replace(/\.git$/i, '')}`;
+    return s.replace(/\s*\/\s*/, '/').replace(/^\/+|\/+$/g, '').replace(/\.git$/i, '');
+  }
+  const repoProblem = (raw: string) => {
+    const n = normalizeRepo(raw);
+    if (!n) return 'Enter owner/name (for example jntegz/ambersight), or pick from the list.';
+    if (!VALID_GH_REPO.test(n) || n.split('/').some((p) => p === '.' || p === '..')) return `"${n}" is not owner/name (needs owner/repo, e.g. jntegz/ambersight).`;
+    return '';
+  };
+
   async function save() {
     if (!draft) return;
     saveError = '';
+    for (const r of Object.values(draft.packageRepos)) r.repo = normalizeRepo(r.repo);
     let valid: Config;
     try {
       valid = parseConfig(clone(draft));
@@ -207,19 +240,72 @@
     { key: 'security', title: 'Security', text: 'Audit log (new members, new tokens), certificates and DNS records left pointing at deleted Workers or Pages. Needs SSL and DNS Read.', icon: 'shield' },
     { key: 'drift', title: 'Config drift', text: 'Bindings that disappeared after a deploy, staging and production that differ, Workers near the limit on variables and secrets.', icon: 'list' },
     { key: 'incidents', title: 'Cloudflare incidents', text: 'Adds active incidents from cloudflarestatus.com to alerts and the timeline. Contacts that public site; sends nothing about your account.', icon: 'info' },
-    { key: 'packages', title: 'Packages', text: 'Direct npm dependencies of the Workers you map below: locked version → latest on npm. Reads package-lock.json from GitHub with a separate GITHUB_TOKEN; the only check that reads source code.', icon: 'list' },
   ];
   let addPackageWorker = $state('');
+  let addPackageRepo = $state('');
   // Mappings are per account ("<account id>:<Worker>"), so two accounts can each have a Worker of
   // the same name. A key with only the Worker name (older configs) applies in every account.
   const repoKey = (w: string) => (account ? `${account}:${w}` : w);
   const repoKeys = $derived(draft ? Object.keys(draft.packageRepos).filter((k) => !k.includes(':') || (account && k.startsWith(`${account}:`))).sort() : []);
   const workerOf = (k: string) => k.slice(k.indexOf(':') + 1);
   const unmapped = $derived(draft ? workers.filter((w) => !draft!.packageRepos[repoKey(w)] && !draft!.packageRepos[w]) : []);
+  const defaultOwner = $derived.by(() => {
+    if (githubOwner) return githubOwner;
+    if (draft) {
+      for (const r of Object.values(draft.packageRepos)) {
+        const n = normalizeRepo(r.repo);
+        if (VALID_GH_REPO.test(n)) return n.split('/')[0];
+      }
+    }
+    return null;
+  });
+  const normSlug = (s: string) => s.toLowerCase().replace(/[-_.]+/g, '');
+  const baseWorker = (s: string) => s.toLowerCase().replace(/-(?:prod|production|staging|stage|dev|test|preview|workers?)$/, '');
+  function matchRepoForWorker(workerName: string, repos: string[]): string {
+    if (!repos.length) return '';
+    const w = workerName.toLowerCase();
+    const wNorm = normSlug(w);
+    const wBase = baseWorker(w);
+    const wBaseNorm = normSlug(wBase);
+    return (
+      repos.find((r) => r.split('/')[1]?.toLowerCase() === w)
+      ?? repos.find((r) => normSlug(r.split('/')[1] ?? '') === wNorm)
+      ?? repos.find((r) => r.split('/')[1]?.toLowerCase() === wBase)
+      ?? repos.find((r) => normSlug(r.split('/')[1] ?? '') === wBaseNorm)
+      ?? repos.find((r) => {
+        const rn = normSlug(r.split('/')[1] ?? '');
+        return rn.length >= 4 && (wNorm.includes(rn) || rn.includes(wNorm));
+      })
+      ?? (repos.length === 1 ? repos[0] : '')
+    );
+  }
+  function suggestRepo(workerName: string): string {
+    if (!workerName) return '';
+    const matched = matchRepoForWorker(workerName, githubRepos);
+    if (matched) return matched;
+    return defaultOwner ? `${defaultOwner}/${workerName}` : '';
+  }
+  const autoMatches = $derived(
+    githubRepos.length
+      ? unmapped.map((w) => ({ worker: w, repo: matchRepoForWorker(w, githubRepos) })).filter((m) => Boolean(m.repo))
+      : [],
+  );
+  function pickAddWorker(w: string) {
+    addPackageWorker = w;
+    addPackageRepo = suggestRepo(w);
+  }
   function mapWorker() {
     if (!draft || !addPackageWorker) return;
-    draft.packageRepos[repoKey(addPackageWorker)] = { repo: '' };
+    const repo = normalizeRepo(addPackageRepo || suggestRepo(addPackageWorker));
+    draft.packageRepos[repoKey(addPackageWorker)] = { repo };
     addPackageWorker = '';
+    addPackageRepo = '';
+  }
+  function autoMapWorkers() {
+    if (!draft) return;
+    for (const m of autoMatches) {
+      draft.packageRepos[repoKey(m.worker)] = { repo: m.repo };
+    }
   }
   const listText = (l: string[]) => l.join(', ');
   const splitList = (s: string) => s.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
@@ -237,6 +323,7 @@
     { id: 'general', label: 'General', icon: 'settings' },
     { id: 'accounts', label: 'Accounts', icon: 'grid' },
     { id: 'modules', label: 'Checks', icon: 'healthy' },
+    { id: 'packages', label: 'npm Packages', icon: 'package' },
     { id: 'thresholds', label: 'Thresholds', icon: 'budget' },
     { id: 'groups', label: 'Groups & scope', icon: 'grid' },
     { id: 'overrides', label: 'Overrides', icon: 'list' },
@@ -246,23 +333,27 @@
     { id: 'cost', label: 'Self-cost', icon: 'usage' },
     { id: 'backup', label: 'Backup', icon: 'download' },
   ] as const satisfies readonly { id: string; label: string; icon: IconName }[];
-  let active = $state<string>('general');
-  function go(id: string) {
-    document.getElementById(`s-${id}`)?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
-  }
+  type SectionId = (typeof SECTIONS)[number]['id'];
+  const isSection = (v: string | null | undefined): v is SectionId => Boolean(v && SECTIONS.some((s) => s.id === v));
+  let active = $state<SectionId>('general');
   $effect(() => {
-    if (!draft) return;
-    const els = SECTIONS.map((s) => document.getElementById(`s-${s.id}`)).filter((e): e is HTMLElement => !!e);
-    const io = new IntersectionObserver(
-      (entries) => {
-        const top = entries.filter((e) => e.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
-        if (top) active = top.target.id.slice(2);
-      },
-      { rootMargin: '-90px 0px -60% 0px' },
-    );
-    els.forEach((e) => io.observe(e));
-    return () => io.disconnect();
+    const t = params?.get('tab');
+    if (isSection(t)) active = t;
   });
+  function go(id: SectionId) {
+    active = id;
+    setParam('tab', id === 'general' ? null : id);
+    scrollTo({ top: 0, behavior: 'auto' });
+  }
+
+  let pkgFilter = $state('');
+  let expandedPkg = $state<Record<string, boolean>>({});
+  const filteredRepoKeys = $derived.by(() => {
+    const q = pkgFilter.trim().toLowerCase();
+    if (!q || !draft) return repoKeys;
+    return repoKeys.filter((k) => workerOf(k).toLowerCase().includes(q) || (draft!.packageRepos[k]?.repo ?? '').toLowerCase().includes(q));
+  });
+  const hasExtraOpts = (r: { dir?: string; workspace?: string; ref?: string }) => Boolean(r.dir || r.workspace || r.ref);
 
   const targets = $derived([...groups.map((g) => `group:${g}`), ...workers]);
   const overrideCount = $derived(draft ? Object.keys(draft.overrides).length : 0);
@@ -283,16 +374,18 @@
   <div class="card empty muted" aria-busy="true"><p>Loading settings…</p></div>
 {:else}
   <div class="layout">
-    <nav class="nav" aria-label="Settings sections">
+    <div class="nav" role="tablist" aria-label="Settings sections">
       {#each SECTIONS as s (s.id)}
-        <button type="button" class:on={active === s.id} aria-current={active === s.id ? 'true' : undefined} onclick={() => go(s.id)}>
+        <button type="button" role="tab" aria-selected={active === s.id} class:on={active === s.id} onclick={() => go(s.id)}>
           <Icon name={s.icon} size={16} /> {s.label}
+          {#if s.id === 'packages' && repoKeys.length}<span class="count">{repoKeys.length}</span>{/if}
           {#if s.id === 'overrides' && overrideCount}<span class="count">{overrideCount}</span>{/if}
         </button>
       {/each}
-    </nav>
+    </div>
 
-    <div class="sections">
+    <div class="sections" role="tabpanel">
+      {#if active === 'general'}
       <!-- General -->
       <section id="s-general" class="card sec" aria-labelledby="h-general">
         <h2 id="h-general">General</h2>
@@ -355,6 +448,7 @@
         </div>
       </section>
 
+      {:else if active === 'accounts'}
       <!-- Accounts -->
       <section id="s-accounts" class="card sec" aria-labelledby="h-accounts">
         <h2 id="h-accounts">Accounts</h2>
@@ -424,6 +518,7 @@
         </div>
       </section>
 
+      {:else if active === 'modules'}
       <!-- Modules -->
       <section id="s-modules" class="card sec" aria-labelledby="h-modules">
         <h2 id="h-modules">Checks</h2>
@@ -433,44 +528,8 @@
             <div class="module" class:off={!draft.modules[m.key]}>
               <span class="m-icon"><Icon name={m.icon} size={18} /></span>
               <div><p class="label">{m.title}</p><p class="hint">{m.text}</p></div>
-              <Switch label={m.title} disabled={m.key === 'packages' && !features?.github && !draft.modules.packages} bind:checked={draft.modules[m.key]} />
+              <Switch label={m.title} bind:checked={draft.modules[m.key]} />
             </div>
-            {#if m.key === 'packages' && !features?.github}
-              <div class="module sub off"><span></span><div><p class="hint">Needs a GitHub token: <span class="mono">npx wrangler secret put GITHUB_TOKEN</span>. Create a fine-grained token with <strong>Contents: Read</strong> on the repositories only, nothing else.</p></div><span></span></div>
-            {/if}
-            {#if m.key === 'packages' && draft.modules.packages}
-              <div class="module sub pkg-map">
-                <span></span>
-                <div>
-                  <p class="label">Workers and their repositories</p>
-                  <p class="hint">GitHub repository as <span class="mono">owner/name</span>, the folder that holds <span class="mono">package-lock.json</span> (empty = the root), and the branch (empty = the default one).</p>
-                  {#if status?.githubRepoAllowlist}
-                    <p class="hint"><span class="mono">GITHUB_REPO_ALLOWLIST</span> limits this to: <span class="mono">{status.githubRepoAllowlist.join(', ')}</span>. Other repositories are not read.</p>
-                  {:else}
-                    <p class="hint">Anyone signed in can map any repository <span class="mono">GITHUB_TOKEN</span> can read, so give that token only the repositories you mean to map, or set <span class="mono">GITHUB_REPO_ALLOWLIST</span>.</p>
-                  {/if}
-                  {#each repoKeys as name (name)}
-                    <div class="inline pkg-row">
-                      <span class="mono pkg-name">{workerOf(name)}{#if !name.includes(':') && accountCount > 1} <span class="hint">(every account)</span>{/if}</span>
-                      <input class="input" aria-label="Repository for {workerOf(name)}" placeholder="owner/name" bind:value={draft.packageRepos[name].repo} />
-                      <input class="input" aria-label="Folder for {workerOf(name)}" placeholder="Folder (optional)" value={draft.packageRepos[name].dir ?? ''} oninput={(e) => (draft!.packageRepos[name].dir = e.currentTarget.value.trim() || undefined)} />
-                      <input class="input" aria-label="Branch for {workerOf(name)}" placeholder="Branch (optional)" value={draft.packageRepos[name].ref ?? ''} oninput={(e) => (draft!.packageRepos[name].ref = e.currentTarget.value.trim() || undefined)} />
-                      <button type="button" class="ghost small" onclick={() => delete draft!.packageRepos[name]}>Remove</button>
-                    </div>
-                  {/each}
-                  {#if unmapped.length}
-                    <div class="inline pkg-row">
-                      <select class="input" aria-label="Worker to map" bind:value={addPackageWorker}>
-                        <option value="">Add a Worker…</option>
-                        {#each unmapped as w (w)}<option value={w}>{w}</option>{/each}
-                      </select>
-                      <button type="button" class="ghost small" disabled={!addPackageWorker} onclick={mapWorker}>Add</button>
-                    </div>
-                  {/if}
-                </div>
-                <span></span>
-              </div>
-            {/if}
             {#if m.key === 'exposure'}
               <div class="module sub" class:off={!draft.modules.access || !draft.modules.exposure}>
                 <span></span>
@@ -493,6 +552,237 @@
         {/if}
       </section>
 
+      {:else if active === 'packages'}
+      <!-- npm Packages & Security -->
+      <section id="s-packages" class="card sec" aria-labelledby="h-packages">
+        <h2 id="h-packages">npm Packages &amp; Security</h2>
+        <p class="sec-intro">
+          Tracks which Workers have outdated npm dependencies or known security vulnerabilities. Once a day, Ambersight reads each mapped Worker's lockfile
+          (<span class="mono">package-lock.json</span>, <span class="mono">pnpm-lock.yaml</span>, <span class="mono">yarn.lock</span> or <span class="mono">bun.lock</span>) from GitHub with your read-only <span class="mono">GITHUB_TOKEN</span>,
+          compares public packages with <span class="mono">registry.npmjs.org</span>, and optionally checks CVEs via <a href="https://osv.dev" target="_blank" rel="noopener noreferrer">OSV.dev</a>. Results show on the <a href="#/packages">Packages</a> page and on each Worker's page.
+        </p>
+
+        <div class="modules">
+          <div class="module" class:off={!draft.modules.packages}>
+            <span class="m-icon"><Icon name="package" size={18} /></span>
+            <div>
+              <p class="label">Track outdated npm packages</p>
+              <p class="hint">Compares direct dependencies from each mapped Worker's lockfile against the latest release on npm. Private packages are never sent anywhere.</p>
+            </div>
+            <Switch label="Track outdated npm packages" disabled={!features?.github && !draft.modules.packages} bind:checked={draft.modules.packages} />
+          </div>
+
+          {#if !features?.github}
+            <div class="module sub pkg-setup">
+              <span></span>
+              <div class="callout-box">
+                <p class="label">How to set up <span class="mono">GITHUB_TOKEN</span> (read-only, selected repos only)</p>
+                <ol class="setup-steps">
+                  <li>
+                    Open <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener noreferrer">GitHub › Fine-grained personal access tokens</a>
+                    (<strong>Settings › Developer settings › Personal access tokens › Fine-grained tokens › Generate new token</strong>).
+                  </li>
+                  <li>
+                    Under <strong>Repository access</strong>, pick <strong>Only select repositories</strong> and choose only the Worker repos you want to track — do not grant access to all repositories.
+                  </li>
+                  <li>
+                    Under <strong>Permissions › Repository permissions</strong>, set <strong>Contents</strong> to <strong>Read-only</strong> (GitHub adds <em>Metadata: Read-only</em> automatically). Leave every other permission on <strong>No access</strong>, then click <strong>Generate token</strong>.
+                  </li>
+                  <li>
+                    Save the token as a Worker secret named <span class="mono">GITHUB_TOKEN</span>:
+                    <ul>
+                      <li><strong>Cloudflare Dashboard:</strong> <strong>Workers &amp; Pages ›</strong> this Worker <strong>› Settings › Variables and Secrets › Add › Secret</strong>, name <span class="mono">GITHUB_TOKEN</span>, paste the token, and deploy.</li>
+                      <li><strong>Terminal:</strong> <span class="mono">npx wrangler secret put GITHUB_TOKEN</span> (add <span class="mono">--name &lt;worker&gt;</span> if renamed).</li>
+                    </ul>
+                  </li>
+                  <li>Reload this page, turn <strong>Track outdated npm packages</strong> on above, and map your Workers below.</li>
+                </ol>
+              </div>
+              <span></span>
+            </div>
+          {/if}
+
+          <div class="module sub" class:off={!draft.modules.packagesOsv || !draft.modules.packages}>
+            <span></span>
+            <div>
+              <p class="label">Check known security vulnerabilities (OSV.dev)</p>
+              <p class="hint">
+                <strong>No API key or account needed</strong> — <a href="https://osv.dev" target="_blank" rel="noopener noreferrer">OSV.dev</a> is a free public vulnerability database.
+                Turn this on once package tracking is enabled and Ambersight checks locked public-registry packages once a day against <span class="mono">api.osv.dev</span> in one batch query. Raises <span class="mono">packages:vulnerable</span> findings.
+              </p>
+            </div>
+            <Switch label="Check known security vulnerabilities (OSV.dev)" disabled={!draft.modules.packages} bind:checked={draft.modules.packagesOsv} />
+          </div>
+        </div>
+
+        {#if draft.modules.packages}
+          <div class="pkg-section">
+            <h3 class="sub-h">Workers and their GitHub repositories</h3>
+            {#if githubReposError}
+              <p class="field-err" role="status">{githubReposError}</p>
+            {:else if githubRepos.length}
+              <p class="hint"><span class="mono">GITHUB_TOKEN</span> can read <strong>{githubRepos.length}</strong> {githubRepos.length === 1 ? 'repository' : 'repositories'} on GitHub — select a Worker below and its matching repository pre-fills automatically.</p>
+            {:else if features?.github}
+              <p class="hint">Map each Worker to its GitHub repository (<span class="mono">owner/name</span> or paste a GitHub URL). Optional fields cover pnpm/yarn/bun lockfiles, subfolders, monorepo workspaces, and branches.</p>
+            {/if}
+            {#if status?.githubRepoAllowlist}
+              <p class="hint"><span class="mono">GITHUB_REPO_ALLOWLIST</span> limits reads to: <span class="mono">{status.githubRepoAllowlist.join(', ')}</span>.</p>
+            {:else}
+              <p class="hint">Anyone signed in can map any repository <span class="mono">GITHUB_TOKEN</span> can read, so scope that token only to the repositories you mean to track, or set <span class="mono">GITHUB_REPO_ALLOWLIST</span>.</p>
+            {/if}
+            <details class="hint-details">
+              <summary>Need to rotate or limit <span class="mono">GITHUB_TOKEN</span>?</summary>
+              <ol class="setup-steps">
+                <li>Create a <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener noreferrer">fine-grained GitHub token</a> with <strong>Only select repositories</strong> and <strong>Repository permissions › Contents: Read-only</strong> (leave everything else on <strong>No access</strong>).</li>
+                <li>Add or replace the <span class="mono">GITHUB_TOKEN</span> secret in <strong>Workers &amp; Pages ›</strong> this Worker <strong>› Settings › Variables and Secrets</strong>, or run <span class="mono">npx wrangler secret put GITHUB_TOKEN</span>.</li>
+              </ol>
+            </details>
+
+            {#if githubRepos.length}
+              <datalist id="ambersight-gh-repos">
+                {#each githubRepos as r (r)}<option value={r}></option>{/each}
+              </datalist>
+            {/if}
+
+            {#if unmapped.length}
+              <div class="pkg-add">
+                <div class="pkg-add-row">
+                  <select class="input" aria-label="Worker to map" value={addPackageWorker} onchange={(e) => pickAddWorker(e.currentTarget.value)}>
+                    <option value="">Select a Worker to track…</option>
+                    {#each unmapped as w (w)}<option value={w}>{w}</option>{/each}
+                  </select>
+                  {#if addPackageWorker}
+                    {#if githubRepos.length}
+                      <select
+                        class="input"
+                        aria-label="Pick GitHub repository"
+                        value={githubRepos.includes(addPackageRepo) ? addPackageRepo : ''}
+                        onchange={(e) => { if (e.currentTarget.value) addPackageRepo = e.currentTarget.value; }}
+                      >
+                        <option value="">Pick GitHub repo…</option>
+                        {#each githubRepos as r (r)}<option value={r}>{r}</option>{/each}
+                      </select>
+                    {/if}
+                    <input
+                      class="input"
+                      list={githubRepos.length ? 'ambersight-gh-repos' : undefined}
+                      aria-label="Repository for {addPackageWorker}"
+                      placeholder={defaultOwner ? `${defaultOwner}/${addPackageWorker}` : 'owner/name or GitHub URL'}
+                      bind:value={addPackageRepo}
+                      onblur={() => (addPackageRepo = normalizeRepo(addPackageRepo))}
+                    />
+                  {/if}
+                  <button type="button" class="primary small" disabled={!addPackageWorker} onclick={mapWorker}>Add</button>
+                </div>
+                {#if autoMatches.length}
+                  <div class="pkg-auto">
+                    <button type="button" class="ghost small" onclick={autoMapWorkers}>
+                      Auto-map {autoMatches.length} matching {autoMatches.length === 1 ? 'Worker' : 'Workers'}
+                    </button>
+                    <span class="hint">{autoMatches.slice(0, 4).map((m) => `${m.worker} → ${m.repo}`).join(', ')}{autoMatches.length > 4 ? ` +${autoMatches.length - 4} more` : ''}</span>
+                  </div>
+                {/if}
+              </div>
+            {/if}
+
+            {#if repoKeys.length}
+              <div class="pkg-list-head">
+                <span class="hint"><strong>{repoKeys.length}</strong> mapped {repoKeys.length === 1 ? 'Worker' : 'Workers'}{#if pkgFilter.trim()} (showing {filteredRepoKeys.length}){/if}</span>
+                {#if repoKeys.length >= 4}
+                  <input class="input pkg-search" type="search" placeholder="Filter {repoKeys.length} mapped Workers…" aria-label="Filter mapped Workers" bind:value={pkgFilter} />
+                {/if}
+              </div>
+              <div class="pkg-table">
+                {#each filteredRepoKeys as name (name)}
+                  {@const entry = draft.packageRepos[name]}
+                  {@const badRepo = repoProblem(entry.repo)}
+                  {@const extraOpen = Boolean(expandedPkg[name])}
+                  {@const hasExtra = hasExtraOpts(entry)}
+                  <div class="pkg-item" class:invalid-row={!!badRepo}>
+                    <div class="pkg-item-main">
+                      <span class="mono pkg-name" title={workerOf(name)}>
+                        {workerOf(name)}{#if !name.includes(':') && accountCount > 1} <span class="hint">(all)</span>{/if}
+                      </span>
+                      <div class="pkg-repo-inputs">
+                        {#if githubRepos.length}
+                          <select
+                            class="input pkg-repo-pick"
+                            aria-label="Pick repository for {workerOf(name)}"
+                            value={githubRepos.includes(entry.repo) ? entry.repo : ''}
+                            onchange={(e) => { if (e.currentTarget.value) draft!.packageRepos[name].repo = e.currentTarget.value; }}
+                          >
+                            <option value="">GitHub repo…</option>
+                            {#each githubRepos as r (r)}<option value={r}>{r}</option>{/each}
+                          </select>
+                        {/if}
+                        <input
+                          class="input"
+                          class:invalid={!!badRepo}
+                          list={githubRepos.length ? 'ambersight-gh-repos' : undefined}
+                          aria-label="Repository for {workerOf(name)}"
+                          placeholder={defaultOwner ? `${defaultOwner}/${workerOf(name)}` : 'owner/name or GitHub URL'}
+                          bind:value={draft.packageRepos[name].repo}
+                          onblur={() => (draft!.packageRepos[name].repo = normalizeRepo(draft!.packageRepos[name].repo))}
+                        />
+                      </div>
+                      <select
+                        class="input pkg-kind-sel"
+                        aria-label="Lockfile format for {workerOf(name)}"
+                        value={entry.lockfile ?? 'npm'}
+                        onchange={(e) => { const v = e.currentTarget.value; draft!.packageRepos[name].lockfile = v === 'npm' ? undefined : (v as 'pnpm' | 'yarn' | 'bun'); }}
+                      >
+                        <option value="npm">npm</option>
+                        <option value="pnpm">pnpm</option>
+                        <option value="yarn">yarn</option>
+                        <option value="bun">bun</option>
+                      </select>
+                      <button
+                        type="button"
+                        class="ghost small pkg-opt-btn"
+                        class:has-extra={hasExtra}
+                        aria-expanded={extraOpen}
+                        title="Lockfile folder, monorepo workspace, or branch"
+                        onclick={() => (expandedPkg[name] = !extraOpen)}
+                      >
+                        {extraOpen ? 'Hide options' : hasExtra ? 'Options •' : 'Options'}
+                      </button>
+                      <button type="button" class="ghost small" onclick={() => delete draft!.packageRepos[name]}>Remove</button>
+                    </div>
+                    {#if badRepo}<p class="field-err pkg-row-err">{badRepo}</p>{/if}
+                    {#if !extraOpen && hasExtra}
+                      <p class="pkg-extra-summary muted">
+                        {#if entry.dir}folder: <span class="mono">{entry.dir}</span>{' '}{/if}
+                        {#if entry.workspace}workspace: <span class="mono">{entry.workspace}</span>{' '}{/if}
+                        {#if entry.ref}branch: <span class="mono">{entry.ref}</span>{/if}
+                      </p>
+                    {/if}
+                    {#if extraOpen}
+                      <div class="pkg-extra">
+                        <label class="pkg-field">
+                          <span>Lockfile folder <span class="muted">(optional)</span></span>
+                          <input class="input" aria-label="Folder for {workerOf(name)}" placeholder="root" value={entry.dir ?? ''} oninput={(e) => (draft!.packageRepos[name].dir = e.currentTarget.value.trim() || undefined)} />
+                        </label>
+                        <label class="pkg-field">
+                          <span>Workspace <span class="muted">(monorepo)</span></span>
+                          <input class="input" aria-label="Workspace for {workerOf(name)}" placeholder="e.g. workers/api" value={entry.workspace ?? ''} oninput={(e) => (draft!.packageRepos[name].workspace = e.currentTarget.value.trim() || undefined)} />
+                        </label>
+                        <label class="pkg-field">
+                          <span>Branch <span class="muted">(optional)</span></span>
+                          <input class="input" aria-label="Branch for {workerOf(name)}" placeholder="default" value={entry.ref ?? ''} oninput={(e) => (draft!.packageRepos[name].ref = e.currentTarget.value.trim() || undefined)} />
+                        </label>
+                      </div>
+                    {/if}
+                  </div>
+                {:else}
+                  <p class="hint pkg-empty">No mapped Workers match "{pkgFilter}".</p>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
+      </section>
+
+      {:else if active === 'thresholds'}
       <!-- Thresholds -->
       <section id="s-thresholds" class="card sec" aria-labelledby="h-thresholds">
         <h2 id="h-thresholds">Thresholds</h2>
@@ -518,6 +808,7 @@
         {/each}
       </section>
 
+      {:else if active === 'groups'}
       <!-- Groups & scope -->
       <section id="s-groups" class="card sec" aria-labelledby="h-groups">
         <h2 id="h-groups">Groups & scope</h2>
@@ -539,6 +830,7 @@
         </div>
       </section>
 
+      {:else if active === 'overrides'}
       <!-- Overrides -->
       <section id="s-overrides" class="card sec" aria-labelledby="h-overrides">
         <h2 id="h-overrides">Overrides</h2>
@@ -548,6 +840,7 @@
         {/key}
       </section>
 
+      {:else if active === 'alerts'}
       <!-- Alerts -->
       <section id="s-alerts" class="card sec" aria-labelledby="h-alerts">
         <h2 id="h-alerts">Alerts</h2>
@@ -586,6 +879,7 @@
         {/if}
       </section>
 
+      {:else if active === 'digest'}
       <!-- Digest -->
       <section id="s-digest" class="card sec" aria-labelledby="h-digest">
         <h2 id="h-digest">Digest</h2>
@@ -642,6 +936,7 @@
         </div>
       </section>
 
+      {:else if active === 'security'}
       <!-- Security -->
       <section id="s-security" class="card sec" aria-labelledby="h-security">
         <h2 id="h-security">Security <span class="now">Applies right away</span></h2>
@@ -665,6 +960,7 @@
         <PersonalData />
       </section>
 
+      {:else if active === 'cost'}
       <!-- Self-cost -->
       <section id="s-cost" class="card sec" aria-labelledby="h-cost">
         <h2 id="h-cost">Self-cost</h2>
@@ -672,6 +968,7 @@
         <SelfCost {account} />
       </section>
 
+      {:else if active === 'backup'}
       <!-- Backup -->
       <section id="s-backup" class="card sec" aria-labelledby="h-backup">
         <h2 id="h-backup">Backup</h2>
@@ -685,6 +982,7 @@
         </div>
         {#if importError}<p class="error-text" role="alert">{importError}</p>{/if}
       </section>
+      {/if}
     </div>
   </div>
 
@@ -824,10 +1122,45 @@
     .r-head { display: none; }
     .tz .input, .range input { width: 100%; }
   }
-  .pkg-map { align-items: start; }
-  .pkg-row { flex-wrap: wrap; margin-top: 8px; }
-  .pkg-row .input { min-width: 0; flex: 1 1 140px; }
-  .pkg-name { flex: 0 0 auto; min-width: 120px; }
+  .pkg-map, .pkg-setup { align-items: start; }
+  .callout-box { padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--row-tint); }
+  .setup-steps { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 6px; font-size: 13px; line-height: 19px; color: var(--ink-muted); }
+  .setup-steps ul { margin: 4px 0 0; padding-left: 18px; display: grid; gap: 4px; }
+  .setup-steps strong { color: var(--ink); }
+  .setup-steps a, .hint a { color: var(--accent-text); text-decoration: none; font-weight: 500; }
+  .setup-steps a:hover, .hint a:hover { text-decoration: underline; }
+  .hint-details { margin-top: 8px; font-size: 13px; color: var(--ink-muted); }
+  .hint-details summary { cursor: pointer; font-weight: 500; color: var(--accent-text); }
+  .pkg-section { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); display: grid; gap: 6px; }
+  .pkg-section .sub-h { margin-top: 0; }
+  .pkg-add { margin-top: 8px; padding: 12px; border: 1px dashed var(--line); border-radius: var(--radius-control); background: var(--row-tint); display: grid; gap: 8px; }
+  .pkg-add-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .pkg-add-row .input { flex: 1 1 180px; min-width: 0; }
+  .pkg-auto { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+  .pkg-list-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
+  .pkg-search { max-width: 260px; }
+  .pkg-table { margin-top: 6px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--paper); overflow: hidden; }
+  .pkg-item { padding: 8px 12px; border-top: 1px solid var(--line); display: grid; gap: 6px; }
+  .pkg-item:first-child { border-top: 0; }
+  .pkg-item.invalid-row { background: color-mix(in srgb, var(--critical) 5%, var(--paper)); }
+  .pkg-item-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .pkg-name { flex: 0 0 150px; font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pkg-repo-inputs { flex: 1 1 240px; display: flex; gap: 6px; min-width: 0; }
+  .pkg-repo-inputs .input { flex: 1 1 140px; min-width: 0; }
+  .pkg-repo-inputs .pkg-repo-pick { flex: 0 1 160px; }
+  .pkg-kind-sel { flex: 0 0 84px; }
+  .pkg-opt-btn.has-extra { color: var(--accent-text); }
+  .pkg-row-err { margin: 0; }
+  .pkg-extra-summary { font-size: 12px; margin: 0; }
+  .pkg-extra { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; padding-top: 6px; border-top: 1px dashed var(--line); }
+  .pkg-field { display: grid; gap: 4px; font-size: 12px; color: var(--ink-muted); align-content: start; }
+  .pkg-field .input { width: 100%; min-width: 0; }
+  .pkg-empty { padding: 14px 12px; }
+  .input.invalid { border-color: var(--critical); }
+  .field-err { font-size: 12px; color: var(--critical); }
+  .sec-intro a { color: var(--accent-text); text-decoration: none; font-weight: 500; }
+  .sec-intro a:hover { text-decoration: underline; }
+  @media (max-width: 640px) { .pkg-name { flex: 1 1 100%; } .pkg-repo-inputs { flex-wrap: wrap; } }
   .budget { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
   .sub-h { font-size: 15px; margin-top: 20px; }
 </style>

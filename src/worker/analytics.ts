@@ -2,7 +2,7 @@
 // rollups (plus today's hours) for long ones. No Cloudflare API call happens on page view.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { groupsFor, inScope } from '../shared/config';
+import { groupsFor, inScope, repoFor } from '../shared/config';
 import { checkOf } from '../shared/findings';
 import { FREE_DAILY, PRICES, STORAGE_LIMITS, unitPrice, type QuotaMetric, type StorageKind } from '../shared/limits';
 import type { AnalyticsView, Finding, FindingListItem, MetricPoint, MetricTotals, Range, Severity, WorkerDetail } from '../shared/types';
@@ -10,6 +10,7 @@ import { monthlyCost } from './cost';
 import { configFrom, getAccountState, getSettings, isoHour, planFrom } from './db';
 import type { Env } from './env';
 import { pickAccount, toFinding, type FindingRow } from './overview';
+import { formatWorkerPackages, packagesQuerySql, repoAllowlist, type RawPackageDbRow } from './packages';
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -364,7 +365,8 @@ export async function buildWorkerDetail(env: Env, requested: string | undefined,
     };
   }
   const cronHourly = w.granularity === 'hour';
-  const [series, totals, previous, workerR, schedR, entriesR, cronR, depR, findR, eventsR, auditR, impactR] = await db.batch([
+  const mappedRepo = config.modules.packages ? repoFor(config, A, name) : undefined;
+  const [series, totals, previous, workerR, schedR, entriesR, cronR, depR, findR, eventsR, auditR, impactR, pkgsR] = await db.batch([
     metricsQuery(db, A, w.start, w.end, rolled, w.granularity, name),
     metricsQuery(db, A, w.start, w.end, rolled, 'total', name, hourly),
     metricsQuery(db, A, w.prevStart, w.start, rolled, 'total', name, hourly),
@@ -394,11 +396,12 @@ export async function buildWorkerDetail(env: Env, requested: string | undefined,
       `SELECT hour, requests, errors, subrequests, cpu_time_us, cpu_p99, exceeded, exceeded_cpu, exceeded_memory, cpu_p50, wall_p50, wall_p99 FROM metrics_hourly
        WHERE account = ?1 AND script = ?2 AND hour >= ?3 ORDER BY hour`,
     ).bind(A, name, isoHour(new Date(w.start - DAY))),
+    mappedRepo ? db.prepare(packagesQuerySql(config.modules.packagesOsv, true)).bind(A, name) : db.prepare('SELECT 1 WHERE 0'),
   ]);
 
   type WRow = { name: string; handlers: string | null; tags: string | null; deployed_on: string | null; modified_on: string | null; created_on: string | null;
     compatibility_date: string | null; usage_model: string | null; workers_dev: number | null; previews_enabled: number | null; logs_enabled: number | null;
-    bindings: string | null; detail_checked_at: string | null };
+    bindings: string | null; detail_checked_at: string | null; packages_checked_at: string | null; packages_error: string | null };
   const wr = (workerR.results as WRow[])[0];
   const bool = (v: number | null | undefined) => (v == null ? null : v === 1);
   const subdomain = state.workers_subdomain;
@@ -484,5 +487,8 @@ export async function buildWorkerDetail(env: Env, requested: string | undefined,
     findings,
     changes,
     cost,
+    ...(wr && mappedRepo
+      ? { packages: formatWorkerPackages(mappedRepo, wr.packages_checked_at, wr.packages_error, pkgsR.results as RawPackageDbRow[], repoAllowlist(env.GITHUB_REPO_ALLOWLIST)) }
+      : {}),
   };
 }

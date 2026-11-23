@@ -81,6 +81,21 @@
   const csvBase = $derived(`ambersight-${name}-${range}`);
   const when = (iso: string) => new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' }) + ' UTC';
   const noHistory = $derived(data && !data.historyStart);
+  const GAP_RANK: Record<string, number> = { major: 0, minor: 1, patch: 2, unknown: 3, none: 4 };
+  const BEHIND_GAPS = new Set(['major', 'minor', 'patch']);
+  let showAllPackages = $state(false);
+  const pkgStats = $derived.by(() => {
+    const pkgs = data?.packages?.packages ?? [];
+    const behind = pkgs.filter((p) => BEHIND_GAPS.has(p.gap));
+    const vulnerable = pkgs.filter((p) => (p.advisories?.length ?? 0) > 0);
+    const sorted = [...pkgs].sort((a, b) =>
+      Number((b.advisories?.length ?? 0) > 0) - Number((a.advisories?.length ?? 0) > 0)
+      || Number(a.dev) - Number(b.dev)
+      || (GAP_RANK[a.gap] ?? 4) - (GAP_RANK[b.gap] ?? 4)
+      || a.name.localeCompare(b.name));
+    const shown = showAllPackages ? sorted : sorted.filter((p) => BEHIND_GAPS.has(p.gap) || (p.advisories?.length ?? 0) > 0);
+    return { total: pkgs.length, compared: pkgs.filter((p) => p.compared).length, behind: behind.length, vulnerable: vulnerable.length, shown };
+  });
 </script>
 
 <section class="worker-page" aria-busy={loading}>
@@ -260,6 +275,60 @@
       {/if}
     </article>
 
+    {#if data.packages}
+      <article class="card">
+        <div class="section-head pad pkg-head">
+          <div>
+            <h2>Packages {#if pkgStats.compared}<span class="count">{pkgStats.behind} of {pkgStats.compared} behind</span>{/if}</h2>
+            <p class="hint">
+              {#if data.packages.repo}<span class="mono">{data.packages.repo}{data.packages.dir ? `/${data.packages.dir}` : ''}</span>{#if data.packages.workspace} · workspace <span class="mono">{data.packages.workspace}</span>{/if} · {/if}
+              {#if data.packages.lockfile && data.packages.lockfile !== 'npm'}{data.packages.lockfile} · {/if}
+              read {timeAgo(data.packages.checkedAt)}
+              {#if pkgStats.vulnerable > 0} · <span class="vuln-note">{pkgStats.vulnerable} vulnerable</span>{/if}
+            </p>
+          </div>
+          <div class="pkg-actions">
+            {#if !data.packages.error && pkgStats.total > 0}
+              <label class="pkg-toggle"><input type="checkbox" bind:checked={showAllPackages} /><span>Show up-to-date</span></label>
+            {/if}
+            <a class="pkg-all" href="#/packages">All packages</a>
+          </div>
+        </div>
+        {#if data.packages.error}
+          <p class="pkg-err pad"><Icon name="warning" size={14} /> {data.packages.error}</p>
+        {:else if !data.packages.checkedAt}
+          <p class="muted pad">Not read yet. It will be on one of the next scans.</p>
+        {:else if !pkgStats.shown.length}
+          <p class="muted pad">Every direct dependency compared with npm is on the latest release.</p>
+        {:else}
+          <div class="scroll">
+            <table class="t">
+              <thead><tr><th>Package</th><th>Locked</th><th>Latest</th><th>Status</th></tr></thead>
+              <tbody>
+                {#each pkgStats.shown as p (p.name)}
+                  <tr>
+                    <td class="mono">{p.name}{#if p.dev} <span class="tag-chip">dev</span>{/if}</td>
+                    <td class="mono nowrap">{p.locked}</td>
+                    <td class="mono nowrap">{#if p.compared}{p.latest ?? '…'}{:else}<span class="muted">not compared</span>{/if}</td>
+                    <td>
+                      <span class="pkg-badges">
+                        {#if BEHIND_GAPS.has(p.gap)}<span class="gap {p.gap}">{p.gap}</span>{/if}
+                        {#each p.advisories ?? [] as adv (adv.id)}
+                          <a class="adv {adv.severity}" href="https://osv.dev/vulnerability/{encodeURIComponent(adv.id)}" target="_blank" rel="noopener noreferrer" title={adv.summary ?? adv.id}>
+                            {adv.id}{#if adv.fixed} → {adv.fixed}{/if}
+                          </a>
+                        {/each}
+                      </span>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+      </article>
+    {/if}
+
     <div class="grid2">
       <article class="card">
         <div class="section-head pad"><h2>Changes</h2></div>
@@ -333,6 +402,22 @@
   .conf dt { color: var(--ink-muted); }
   .conf dd { margin: 0; display: flex; flex-wrap: wrap; gap: 4px 10px; min-width: 0; word-break: break-word; }
   .bindings { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+  .pkg-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .pkg-actions { display: flex; align-items: center; gap: 14px; font-size: 13px; }
+  .pkg-toggle { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-muted); cursor: pointer; }
+  .pkg-toggle input { width: 15px; height: 15px; accent-color: var(--button); margin: 0; }
+  .pkg-all { color: var(--accent-text); text-decoration: none; font-weight: 500; }
+  .pkg-all:hover { text-decoration: underline; }
+  .pkg-err { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--warning-text); }
+  .vuln-note { color: var(--critical); font-weight: 600; }
+  .pkg-badges { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .gap { font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 5px; text-transform: uppercase; letter-spacing: 0.03em; }
+  .gap.major { background: color-mix(in srgb, var(--critical) 16%, transparent); color: var(--critical); }
+  .gap.minor { background: var(--chip); color: var(--chip-text); }
+  .gap.patch { background: var(--line); color: var(--ink-muted); }
+  .adv { font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 5px; text-decoration: none; background: color-mix(in srgb, var(--critical) 16%, transparent); color: var(--critical); }
+  .adv:hover { text-decoration: underline; }
+  .adv.moderate, .adv.low, .adv.unknown { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--warning-text); }
   .skeleton { height: 420px; background: linear-gradient(90deg, var(--surface), var(--row-tint), var(--surface)); background-size: 200% 100%; }
   @media (prefers-reduced-motion: no-preference) { .skeleton { animation: shimmer 1.2s linear infinite; } }
   @keyframes shimmer { to { background-position: -200% 0; } }

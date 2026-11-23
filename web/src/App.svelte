@@ -87,7 +87,7 @@
     }
     const loc = parseHash(location.hash);
     const anchor = location.hash === '#attention-title';
-    if (loc.route !== route || loc.arg !== routeArg) {
+    if (loc.route !== route || loc.arg !== routeArg || loc.params.toString() !== routeParams.toString()) {
       route = loc.route;
       routeArg = loc.arg;
       routeParams = loc.params;
@@ -103,18 +103,48 @@
       if (el) { el.style.animation = 'none'; void el.offsetWidth; el.style.animation = ''; }
     }
   }
-  const NAV_ALL: { route: Route; href: string; label: string; icon: IconName; multiOnly?: boolean; packagesOnly?: boolean }[] = [
-    { route: 'accounts', href: '#/accounts', label: 'Accounts', icon: 'grid', multiOnly: true },
-    { route: 'overview', href: '#/', label: 'Overview', icon: 'overview' },
-    { route: 'analytics', href: '#/analytics', label: 'Analytics', icon: 'chart' },
-    { route: 'findings', href: '#/findings', label: 'Findings', icon: 'inbox' },
-    { route: 'timeline', href: '#/timeline', label: 'Timeline', icon: 'timeline' },
-    { route: 'resources', href: '#/resources', label: 'Resources', icon: 'zombies' },
-    { route: 'packages', href: '#/packages', label: 'Packages', icon: 'list', packagesOnly: true },
-    { route: 'settings', href: '#/settings', label: 'Settings', icon: 'settings' },
+  type NavItem = { route: Route; href: string; label: string; icon: IconName; group: 'monitor' | 'track' | 'config'; multiOnly?: boolean };
+  const NAV_ALL: NavItem[] = [
+    { route: 'accounts', href: '#/accounts', label: 'Accounts', icon: 'grid', group: 'monitor', multiOnly: true },
+    { route: 'overview', href: '#/', label: 'Overview', icon: 'overview', group: 'monitor' },
+    { route: 'analytics', href: '#/analytics', label: 'Analytics', icon: 'chart', group: 'monitor' },
+    { route: 'timeline', href: '#/timeline', label: 'Timeline', icon: 'timeline', group: 'monitor' },
+    { route: 'findings', href: '#/findings', label: 'Findings', icon: 'inbox', group: 'track' },
+    { route: 'packages', href: '#/packages', label: 'Packages', icon: 'package', group: 'track' },
+    { route: 'resources', href: '#/resources', label: 'Resources', icon: 'zombies', group: 'track' },
+    { route: 'settings', href: '#/settings', label: 'Settings', icon: 'settings', group: 'config' },
   ];
 
-  const NAV = $derived(NAV_ALL.filter((n) => (!n.multiOnly || multi) && (!n.packagesOnly || config?.modules.packages)));
+  const NAV = $derived(NAV_ALL.filter((n) => !n.multiOnly || multi));
+  const NAV_GROUPS = $derived([
+    { id: 'monitor' as const, label: 'Monitor', items: NAV.filter((n) => n.group === 'monitor') },
+    { id: 'track' as const, label: 'Track', items: NAV.filter((n) => n.group === 'track') },
+    { id: 'config' as const, label: '', items: NAV.filter((n) => n.group === 'config') },
+  ]);
+
+  const navBadge = $derived.by((): Partial<Record<Route, { text: string; tone: 'crit' | 'warn' | 'muted'; title: string }>> => {
+    const out: Partial<Record<Route, { text: string; tone: 'crit' | 'warn' | 'muted'; title: string }>> = {};
+    const open = data?.findings ?? [];
+    const attention = open.filter((f) => f.severity === 'critical' || f.severity === 'warning');
+    if (attention.length) {
+      const hasCrit = attention.some((f) => f.severity === 'critical');
+      out.findings = { text: String(attention.length), tone: hasCrit ? 'crit' : 'warn', title: `${attention.length} critical or warning findings` };
+    }
+    const pkgFindings = open.filter((f) => f.module === 'packages');
+    if (config && !config.modules.packages) {
+      out.packages = { text: 'off', tone: 'muted', title: 'Packages check is off — open to set up' };
+    } else if (pkgFindings.length) {
+      const scripts = new Set(pkgFindings.map((f) => f.script)).size;
+      const hasCrit = pkgFindings.some((f) => f.severity === 'critical');
+      const hasWarn = pkgFindings.some((f) => f.severity === 'warning');
+      out.packages = {
+        text: String(scripts),
+        tone: hasCrit ? 'crit' : hasWarn ? 'warn' : 'muted',
+        title: `${scripts} ${scripts === 1 ? 'Worker has' : 'Workers have'} package updates or security advisories`,
+      };
+    }
+    return out;
+  });
 
   function toggleTheme() {
     theme = theme === 'dark' ? 'light' : 'dark';
@@ -285,7 +315,7 @@
   let palette = $state(false);
   const goKey = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? '⌘K' : 'Ctrl K';
   let pendingG = 0;
-  const GO: Record<string, string> = { o: '#/', a: '#/analytics', f: '#/findings', t: '#/timeline', r: '#/resources', s: '#/settings' };
+  const GO: Record<string, string> = { o: '#/', a: '#/analytics', f: '#/findings', t: '#/timeline', r: '#/resources', p: '#/packages', s: '#/settings' };
   const commands = $derived.by((): Command[] => [
     ...NAV.map((n) => ({ id: `page-${n.route}`, label: n.label, hint: 'Page', icon: n.icon, run: () => (location.hash = n.href) })),
     ...(data?.workers ?? []).map((w) => ({
@@ -390,11 +420,7 @@
           <Icon name="chevron" size={14} />
         </label>
       {/if}
-      <nav class="nav" aria-label="Main">
-        {#each NAV as n (n.route)}
-          <a href={n.href} aria-label={n.label} title={n.label} aria-current={route === n.route ? 'page' : undefined}><Icon name={n.icon} size={16} /><span>{n.label}</span></a>
-        {/each}
-      </nav>
+      <span class="spacer" aria-hidden="true"></span>
 
       {#if searchable}
         <div class="search" class:filled={!!query}>
@@ -431,6 +457,25 @@
         <span class="opt" class:on={theme === 'dark'} aria-hidden="true"><Icon name="moon" size={14} /></span>
       </button>
       <button type="button" class="icon-btn" onclick={signOut} aria-label="Sign out" title="Sign out"><Icon name="logout" size={16} /></button>
+    </div>
+
+    <div class="nav-bar">
+      <nav class="nav-inner" aria-label="Main">
+        {#each NAV_GROUPS as g, gi (g.id)}
+          {#if gi > 0 && g.id !== 'config'}<span class="nav-sep" aria-hidden="true"></span>{/if}
+          <div class="nav-group" class:push={g.id === 'config'} role="group" aria-label={g.label || 'Configuration'}>
+            {#if g.label}<span class="nav-group-label" aria-hidden="true">{g.label}</span>{/if}
+            {#each g.items as n (n.route)}
+              {@const badge = navBadge[n.route]}
+              <a href={n.href} aria-label={n.label} title={badge?.title ?? n.label} aria-current={route === n.route ? 'page' : undefined}>
+                <Icon name={n.icon} size={15} />
+                <span>{n.label}</span>
+                {#if badge}<span class="nav-badge {badge.tone}">{badge.text}</span>{/if}
+              </a>
+            {/each}
+          </div>
+        {/each}
+      </nav>
     </div>
   </header>
 
@@ -499,6 +544,7 @@
       <Packages {query} account={selected} onUnauthorized={() => signedOut()} />
     {:else if route === 'settings'}
       <Settings
+        params={routeParams}
         workers={data.workers.map((w) => w.name)}
         groups={data.groups ?? []}
         account={selected}
@@ -622,16 +668,37 @@
   @media (prefers-reduced-motion: no-preference) { .spin { animation: spin 900ms linear infinite; } }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* Navigation */
-  .nav { display: flex; align-items: center; gap: 2px; margin-left: 20px; flex: 1; }
-  .nav a {
-    display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 12px; border-radius: 999px;
-    font-size: 14px; font-weight: 500; color: var(--ink-muted); text-decoration: none; transition: color 150ms, background 150ms;
-  }
-  .nav a:hover { color: var(--ink); background: color-mix(in srgb, var(--ink-muted) 10%, transparent); }
-  .nav a[aria-current='page'] { color: var(--ink); background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); }
-  .nav a[aria-current='page'] :global(svg) { color: var(--accent); }
+  /* Navigation bar: grouped into Monitor / Track / Settings so every page keeps its label. */
+  .spacer { flex: 1; }
   .brand { flex: none; text-decoration: none; color: var(--ink); }
+  .nav-bar { border-top: 1px solid color-mix(in srgb, var(--line) 75%, transparent); }
+  .nav-inner {
+    max-width: 1200px; margin: 0 auto; padding: 6px 24px; display: flex; align-items: center; gap: 6px;
+    overflow-x: auto; scrollbar-width: none;
+  }
+  .nav-inner::-webkit-scrollbar { display: none; }
+  .nav-group { display: flex; align-items: center; gap: 2px; flex: none; }
+  .nav-group.push { margin-left: auto; }
+  .nav-group-label {
+    font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--ink-muted); opacity: 0.72; padding: 0 6px 0 2px; user-select: none;
+  }
+  .nav-sep { width: 1px; height: 18px; margin: 0 6px; background: var(--line); flex: none; }
+  .nav-group a {
+    display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 11px; border-radius: 999px;
+    font-size: 13px; font-weight: 500; color: var(--ink-muted); text-decoration: none; white-space: nowrap;
+    transition: color 150ms, background 150ms;
+  }
+  .nav-group a:hover { color: var(--ink); background: color-mix(in srgb, var(--ink-muted) 10%, transparent); }
+  .nav-group a[aria-current='page'] { color: var(--ink); background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); }
+  .nav-group a[aria-current='page'] :global(svg) { color: var(--accent); }
+  .nav-badge {
+    font-size: 11px; font-weight: 600; line-height: 1; padding: 2px 6px; border-radius: 999px;
+    font-variant-numeric: tabular-nums;
+  }
+  .nav-badge.crit { background: color-mix(in srgb, var(--critical) 16%, transparent); color: var(--critical); }
+  .nav-badge.warn { background: var(--chip); color: var(--chip-text); }
+  .nav-badge.muted { background: var(--line); color: var(--ink-muted); font-weight: 500; }
 
   /* Banners under the header */
   .banner { max-width: 1200px; margin: 16px auto 0; padding: 0 24px; }
@@ -647,46 +714,18 @@
   .banner-text a { font-weight: 600; }
   .banner .icon-btn { width: 30px; height: 30px; border-color: transparent; background: transparent; }
 
-  /* With the account switcher in the header (max 1200 px wide), the nav is icon-only. */
-  .multi .nav a span { display: none; }
-  .multi .nav a { padding: 0 10px; }
-  .multi .nav { margin-left: 8px; }
-  /* The last-scan time is also in the footer: it gives way first. */
-  @media (max-width: 1100px) {
+  @media (max-width: 1020px) {
     .scanned { display: none; }
-    .multi .acct-switch select { max-width: 150px; }
+    .search input { width: 140px; }
+    .search:focus-within input, .search.filled input { width: 190px; }
+    .acct-switch select { max-width: 160px; }
   }
-  /* With the account switcher and eight pages, the last-scan time gives way first (it is in the footer too). */
-  @media (max-width: 1500px) {
-    .multi .scanned { display: none; }
-  }
-  @media (max-width: 1180px) {
-    .multi { flex-wrap: wrap; }
-    .multi .search { order: 3; width: 100%; margin: 0; }
-    .multi .search-field { flex: 1; }
-    .multi .search input, .multi .search:focus-within input, .multi .search.filled input { width: 100%; }
-  }
-  /* Eight pages: below 1400 px only the current page keeps its label; the others are icons with a tooltip. */
-  @media (max-width: 1400px) {
-    .nav a:not([aria-current='page']) span { display: none; }
-    .nav a:not([aria-current='page']) { padding: 0 10px; }
-  }
-  @media (max-width: 1320px) {
-    .search input { width: 150px; }
-    .search:focus-within input, .search.filled input { width: 200px; }
-    .acct-switch select { max-width: 180px; }
-  }
-  @media (max-width: 1100px) {
-    .search input { width: 130px; }
-    .search:focus-within input, .search.filled input { width: 180px; }
-    .nav a { padding: 0 10px; }
-  }
-  @media (max-width: 900px) {
-    .nav a span { display: none; }
-    .nav { margin-left: 8px; }
+  @media (max-width: 820px) {
+    .nav-group-label { display: none; }
   }
   @media (max-width: 760px) {
     .top-inner { flex-wrap: wrap; padding: 10px 16px; }
+    .nav-inner { padding: 6px 16px; }
     .acct-switch { order: 2; margin-left: 0; width: 100%; }
     .acct-switch select { max-width: none; width: 100%; }
     .scanned, .divider { display: none; }

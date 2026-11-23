@@ -1,14 +1,21 @@
 // The optional Packages check: lockfile parsing, version gaps, config validation, the scan step
 // (budget, caching, token handling) and the findings.
 // SPDX-License-Identifier: AGPL-3.0-only
+/// <reference types="node" />
+import { timingSafeEqual } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ConfigError, parseConfig } from '../src/shared/config';
+import { buildWorkerDetail } from '../src/worker/analytics';
 import { setSettings, upsertAccount } from '../src/worker/db';
 import type { Env } from '../src/worker/env';
-import { buildPackages, lockfileUrl, LockfileError, npmLatest, parseLockfile, REPO_NOT_ALLOWED, repoAllowed, repoAllowlist, semverGap } from '../src/worker/packages';
+import { buildPackages, fetchOsvBatch, listGithubRepos, lockfileUrl, LockfileError, npmLatest, parseBunLock, parseLockfile, parsePnpmLock, parseYarnLock, REPO_NOT_ALLOWED, repoAllowed, repoAllowlist, semverGap } from '../src/worker/packages';
 import { runScan } from '../src/worker/scan';
+import { plainWorker } from '../src/worker/tokenView';
 import { createD1 } from './d1';
 import { fakeFetch, NOW, type FakeOptions } from './fixtures';
+
+const subtle = crypto.subtle as unknown as { timingSafeEqual?: (a: ArrayBuffer, b: ArrayBuffer) => boolean };
+subtle.timingSafeEqual ??= (a, b) => timingSafeEqual(new Uint8Array(a), new Uint8Array(b));
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -159,7 +166,7 @@ describe('npmLatest', () => {
 
 const newEnv = (token?: string): Env => ({ DB: createD1(), ASSETS: {} as Fetcher, CF_API_TOKEN: 't', ADMIN_PASSPHRASE: 'correct horse battery staple', ...(token ? { GITHUB_TOKEN: token } : {}) });
 
-async function setup(opts: { token?: string; on?: boolean; repos?: Record<string, unknown>; plan?: 'free' | 'paid' } = {}) {
+async function setup(opts: { token?: string; on?: boolean; osv?: boolean; repos?: Record<string, unknown>; plan?: 'free' | 'paid' } = {}) {
   const e = newEnv(opts.token ?? 'ghtok');
   await e.DB.batch([
     upsertAccount(e.DB, { id: 'acc1' }, NOW),
@@ -167,7 +174,7 @@ async function setup(opts: { token?: string; on?: boolean; repos?: Record<string
       config: JSON.stringify({
         version: 1,
         plan: opts.plan ?? 'paid',
-        modules: { packages: opts.on ?? true },
+        modules: { packages: opts.on ?? true, packagesOsv: opts.osv ?? false },
         packageRepos: opts.repos ?? { api: { repo: 'acme/api' }, 'cron-job': { repo: 'acme/jobs', dir: 'cron' } },
       }),
     }),
@@ -394,5 +401,357 @@ describe('scan with the Packages check', () => {
     const e = await setup({ repos, plan: 'free' });
     const r = await runScan(e, NOW, { account: 'acc1' });
     expect(r.subrequests).toBeLessThanOrEqual(42);
+  });
+
+  it('keeps dev-only major updates as info while runtime major updates stay warning', async () => {
+    const devMajorOnly = lock({ zod: '3.23.8' }, { wrangler: '3.80.0' });
+    stub({ lockfiles: { 'acme/api/package-lock.json': devMajorOnly }, npm: { zod: '3.23.8', wrangler: '4.12.0' } });
+    const e = await setup({ repos: { api: { repo: 'acme/api' } } });
+    await runScan(e, NOW, { account: 'acc1' });
+    const row = await e.DB.prepare(`SELECT severity, message, evidence FROM findings WHERE module = 'packages' AND code = 'outdated'`).first<{ severity: string; message: string; evidence: string }>();
+    expect(row!.severity).toBe('info');
+    expect(row!.message).toContain('dev dependency by a major version');
+    expect(JSON.parse(row!.evidence)).toMatchObject({ outdated: 1, major: 1, runtimeMajor: 0, total: 2 });
+  });
+
+  it('lists unmapped in-scope Workers in buildPackages and attaches packages to WorkerDetail with plainWorker redaction', async () => {
+    stub({ lockfiles: LOCKS, npm: NPM });
+    const e = await setup({ repos: { api: { repo: 'acme/api' } } });
+    await runScan(e, NOW, { account: 'acc1' });
+    const view = await buildPackages(e.DB, 'acc1', await configOf(e), true);
+    expect(view.unmappedWorkers).toEqual(['cron-job', 'draft', 'legacy']);
+
+    const detail = await buildWorkerDetail(e, 'acc1', 'api', '7d', NOW);
+    expect(detail.packages?.repo).toBe('acme/api');
+    expect(detail.packages?.packages.find((p) => p.name === 'hono')).toMatchObject({ locked: '3.12.0', latest: '4.6.0', gap: 'major' });
+
+    const plain = plainWorker(detail);
+    expect(plain.packages?.repo).toBeUndefined();
+    expect(plain.packages?.packages.length).toBe(3);
+
+    const unmappedDetail = await buildWorkerDetail(e, 'acc1', 'draft', '7d', NOW);
+    expect(unmappedDetail.packages).toBeUndefined();
+  });
+
+  it('deduplicates shared monorepo lockfile fetches in one scan', async () => {
+    const monorepoLock = JSON.stringify({
+      lockfileVersion: 3,
+      packages: {
+        '': { workspaces: ['workers/*'] },
+        'workers/api': { dependencies: { hono: '^3.12.0' } },
+        'workers/cron': { dependencies: { zod: '^3.22.0' } },
+        'node_modules/hono': { version: '3.12.0', resolved: 'https://registry.npmjs.org/hono/-/hono-3.12.0.tgz' },
+        'node_modules/zod': { version: '3.22.0', resolved: 'https://registry.npmjs.org/zod/-/zod-3.22.0.tgz' },
+        'workers/cron/node_modules/zod': { version: '3.21.0', resolved: 'https://registry.npmjs.org/zod/-/zod-3.21.0.tgz' },
+      },
+    });
+    const f = stub({ lockfiles: { 'acme/mono/package-lock.json': monorepoLock }, npm: NPM });
+    const e = await setup({
+      repos: {
+        api: { repo: 'acme/mono', workspace: 'workers/api' },
+        'cron-job': { repo: 'acme/mono', workspace: 'workers/cron' },
+      },
+    });
+    await runScan(e, NOW, { account: 'acc1' });
+    // Two Workers in one monorepo -> only one GitHub contents request.
+    expect(f.calls.filter((c) => c.includes('/contents/'))).toEqual(['GET api.github.com/repos/acme/mono/contents/package-lock.json']);
+    const view = await buildPackages(e.DB, 'acc1', await configOf(e), true);
+    expect(view.workers.find((w) => w.name === 'api')!.packages).toEqual([
+      { name: 'hono', locked: '3.12.0', latest: '4.6.0', gap: 'major', dev: false, compared: true },
+    ]);
+    // Non-hoisted workspace dependency wins over hoisted copy.
+    expect(view.workers.find((w) => w.name === 'cron-job')!.packages).toEqual([
+      { name: 'zod', locked: '3.21.0', latest: '3.23.8', gap: 'minor', dev: false, compared: true },
+    ]);
+  });
+
+  it('checks OSV.dev vulnerabilities when enabled, skips private packages, and caches daily', async () => {
+    const f = stub({
+      lockfiles: { 'acme/api/package-lock.json': mixed },
+      npm: { hono: '4.6.0' },
+      osv: {
+        batch: { 'hono@3.12.0': ['GHSA-test-1234'], '@acme/internal@1.0.0': ['GHSA-private-9999'] },
+        vulns: { 'GHSA-test-1234': { severity: 'HIGH', summary: 'Prototype pollution in router', fixed: { hono: '4.0.0' } } },
+      },
+    });
+    const e = await setup({ osv: true, repos: { api: { repo: 'acme/api' } } });
+    await runScan(e, NOW, { account: 'acc1' });
+
+    expect(f.calls.filter((c) => c.includes('api.osv.dev'))).toEqual([
+      'POST api.osv.dev/v1/querybatch',
+      'GET api.osv.dev/v1/vulns/GHSA-test-1234',
+    ]);
+    // No credentials ever sent to OSV.
+    expect(f.auth.some((a) => a.startsWith('api.osv.dev'))).toBe(false);
+
+    const vuln = await e.DB.prepare(`SELECT severity, message, evidence FROM findings WHERE module = 'packages' AND code = 'vulnerable' AND status = 'open'`).first<{ severity: string; message: string; evidence: string }>();
+    expect(vuln!.severity).toBe('critical');
+    expect(vuln!.message).toContain('GHSA-test-1234');
+    expect(vuln!.message).toContain('fix 4.0.0');
+    expect(vuln!.message).not.toContain('internal');
+
+    const view = await buildPackages(e.DB, 'acc1', await configOf(e), true);
+    expect(view.osvEnabled).toBe(true);
+    expect(view.workers[0].packages.find((p) => p.name === 'hono')?.advisories).toEqual([
+      { id: 'GHSA-test-1234', severity: 'high', summary: 'Prototype pollution in router', fixed: '4.0.0' },
+    ]);
+    expect(view.workers[0].packages.find((p) => p.name === '@acme/internal')?.advisories).toBeUndefined();
+
+    // Cached for 24h: next hourly scan makes zero OSV requests.
+    const f2 = stub({ lockfiles: { 'acme/api/package-lock.json': mixed }, npm: { hono: '4.6.0' }, osv: { batch: {} } });
+    await runScan(e, new Date(NOW.getTime() + 3_600_000), { account: 'acc1' });
+    expect(f2.calls.filter((c) => c.includes('api.osv.dev'))).toEqual([]);
+  });
+
+  it('never contacts api.osv.dev when modules.packagesOsv is off', async () => {
+    const f = stub({ lockfiles: LOCKS, npm: NPM, osv: { batch: { 'hono@3.12.0': ['GHSA-test-1234'] } } });
+    const e = await setup({ osv: false });
+    await runScan(e, NOW, { account: 'acc1' });
+    expect(f.calls.filter((c) => c.includes('api.osv.dev'))).toEqual([]);
+  });
+});
+
+describe('multi-lockfile parsers', () => {
+  it('parses pnpm-lock.yaml v9 monorepo importers and flags non-registry entries', () => {
+    const yaml = `lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      root-only:
+        specifier: ^1.0.0
+        version: 1.0.0
+  workers/api:
+    dependencies:
+      hono:
+        specifier: ^4.6.0
+        version: 4.6.0
+      '@acme/ui':
+        specifier: ^1.2.0
+        version: 1.2.0(react@18.3.1)
+      local-lib:
+        specifier: workspace:*
+        version: link:../../packages/local-lib
+    devDependencies:
+      wrangler:
+        specifier: ^4.10.0
+        version: 4.10.0
+packages:
+  hono@4.6.0:
+    resolution: {integrity: sha512-abc}
+  '@acme/ui@1.2.0':
+    resolution: {tarball: https://npm.corp.example/@acme/ui/-/ui-1.2.0.tgz}
+  wrangler@4.10.0:
+    resolution: {integrity: sha512-def}
+`;
+    expect(parsePnpmLock(yaml, 'workers/api')).toEqual([
+      { name: '@acme/ui', locked: '1.2.0', dev: false, source: 'other' },
+      { name: 'hono', locked: '4.6.0', dev: false, source: 'registry' },
+      { name: 'wrangler', locked: '4.10.0', dev: true, source: 'registry' },
+    ]);
+    expect(() => parsePnpmLock(yaml, 'workers/missing')).toThrow(LockfileError);
+  });
+
+  it('parses bun.lock JSONC with comments, trailing commas, and workspaces', () => {
+    const bun = `{
+  // Bun text lockfile
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": { "name": "mono" },
+    "workers/api": {
+      "dependencies": {
+        "hono": "^4.6.0",
+        "aliased": "npm:real-pkg@^1.0.0",
+        "corp": "^2.0.0",
+      },
+      "devDependencies": {
+        "wrangler": "^4.10.0",
+      },
+    },
+  },
+  "packages": {
+    "hono": ["hono@4.6.0", "", {}, "sha512-abc"],
+    "aliased": ["real-pkg@1.0.0", "", {}, "sha512-def"],
+    "corp": ["corp@2.0.0", "https://npm.corp.example/corp/-/corp-2.0.0.tgz", {}, "sha512-ghi"],
+    "wrangler": ["wrangler@4.10.0", "", {}, "sha512-jkl"],
+  },
+}`;
+    expect(parseBunLock(bun, 'workers/api')).toEqual([
+      { name: 'aliased', locked: '1.0.0', dev: false, source: 'other' },
+      { name: 'corp', locked: '2.0.0', dev: false, source: 'other' },
+      { name: 'hono', locked: '4.6.0', dev: false, source: 'registry' },
+      { name: 'wrangler', locked: '4.10.0', dev: true, source: 'registry' },
+    ]);
+  });
+
+  it('parses yarn.lock Classic v1 and Berry v2+ paired with package.json', () => {
+    const pkg = JSON.stringify({
+      dependencies: { hono: '^4.6.0', privatepkg: '^1.0.0' },
+      devDependencies: { wrangler: '^4.10.0' },
+    });
+    const classic = `# yarn lockfile v1
+hono@^4.6.0:
+  version "4.6.1"
+  resolved "https://registry.yarnpkg.com/hono/-/hono-4.6.1.tgz#abc"
+
+privatepkg@^1.0.0:
+  version "1.0.2"
+  resolved "https://npm.corp.example/privatepkg/-/privatepkg-1.0.2.tgz"
+
+wrangler@^4.10.0:
+  version "4.10.3"
+  resolved "https://registry.npmjs.org/wrangler/-/wrangler-4.10.3.tgz"
+`;
+    expect(parseYarnLock(classic, pkg)).toEqual([
+      { name: 'hono', locked: '4.6.1', dev: false, source: 'registry' },
+      { name: 'privatepkg', locked: '1.0.2', dev: false, source: 'other' },
+      { name: 'wrangler', locked: '4.10.3', dev: true, source: 'registry' },
+    ]);
+
+    const berry = `__metadata:
+  version: 8
+
+"hono@npm:^4.6.0":
+  version: 4.6.2
+  resolution: "hono@npm:4.6.2"
+
+"privatepkg@npm:^1.0.0":
+  version: 1.0.3
+  resolution: "privatepkg@https://npm.corp.example/privatepkg.tgz"
+
+"wrangler@npm:^4.10.0":
+  version: 4.10.4
+  resolution: "wrangler@npm:4.10.4"
+`;
+    expect(parseYarnLock(berry, pkg)).toEqual([
+      { name: 'hono', locked: '4.6.2', dev: false, source: 'registry' },
+      { name: 'privatepkg', locked: '1.0.3', dev: false, source: 'other' },
+      { name: 'wrangler', locked: '4.10.4', dev: true, source: 'registry' },
+    ]);
+  });
+
+  it('validates lockfile format and workspace in config and builds the right GitHub URL', () => {
+    const c = parseConfig({ version: 1, packageRepos: { api: { repo: 'acme/mono', lockfile: 'pnpm', workspace: 'workers/api' } } });
+    expect(c.packageRepos.api).toEqual({ repo: 'acme/mono', lockfile: 'pnpm', workspace: 'workers/api' });
+    expect(lockfileUrl(c.packageRepos.api)).toBe('https://api.github.com/repos/acme/mono/contents/pnpm-lock.yaml');
+    expect(() => parseConfig({ version: 1, packageRepos: { api: { repo: 'acme/mono', lockfile: 'pip' } } })).toThrow(ConfigError);
+    expect(() => parseConfig({ version: 1, packageRepos: { api: { repo: 'acme/mono', workspace: '../escape' } } })).toThrow(ConfigError);
+  });
+
+  it('invalidates cached overview and packages views as soon as GITHUB_TOKEN is added', async () => {
+    const { default: worker } = await import('../src/worker/index');
+    const e = await setup({ token: '', on: false });
+    const login = await worker.fetch(new Request('https://app.test/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'same-origin' },
+      body: JSON.stringify({ passphrase: e.ADMIN_PASSPHRASE }),
+    }), e);
+    const cookie = login.headers.get('Set-Cookie')!.split(';')[0];
+    const req = (path: string, env: Env) => worker.fetch(new Request(`https://app.test${path}`, { headers: { Cookie: cookie } }), env);
+
+    const before = (await (await req('/api/overview?account=acc1', e)).json()) as { features: { github: boolean } };
+    expect(before.features.github).toBe(false);
+    // Secret added on the Worker without a scan or data_rev bump.
+    const withToken: Env = { ...e, GITHUB_TOKEN: 'ghp_added' };
+    const after = (await (await req('/api/overview?account=acc1', withToken)).json()) as { features: { github: boolean } };
+    expect(after.features.github).toBe(true);
+    const pkg = (await (await req('/api/packages?account=acc1', withToken)).json()) as { github: boolean };
+    expect(pkg.github).toBe(true);
+  });
+
+  it('hardens parsers against nested JSON spoofing, multi-line pnpm resolutions, oversized package.json, OSV control chars, and GitHub redirects', async () => {
+    // 1. npm lockfile: nested "api" key inside another package must not shadow the real top-level "api" workspace.
+    const spoofedNpm = JSON.stringify({
+      lockfileVersion: 3,
+      packages: {
+        '': { name: 'mono', api: { dependencies: { evil: '1.0.0' } } },
+        api: { dependencies: { hono: '^4.6.0' } },
+        'node_modules/hono': { version: '4.6.0', resolved: 'https://registry.npmjs.org/hono/-/hono-4.6.0.tgz' },
+        'node_modules/evil': { version: '1.0.0', resolved: 'https://registry.npmjs.org/evil/-/evil-1.0.0.tgz' },
+      },
+    });
+    expect(parseLockfile(spoofedNpm, 'api')).toEqual([
+      { name: 'hono', locked: '4.6.0', dev: false, source: 'registry' },
+    ]);
+
+    // 2. bun.lock: nested "os": [...] inside another package must not shadow the real top-level "os" package tuple.
+    const spoofedBun = `{
+      "lockfileVersion": 1,
+      "workspaces": { "": { "dependencies": { "os": "^1.0.0" } } },
+      "packages": {
+        "first": ["first@1.0.0", "", { "os": ["linux@9.9.9", "", {}, "sha512-fake"] }, "sha512-a"],
+        "os": ["os@1.0.0", "https://npm.corp.example/os/-/os-1.0.0.tgz", {}, "sha512-b"]
+      }
+    }`;
+    expect(parseBunLock(spoofedBun)).toEqual([
+      { name: 'os', locked: '1.0.0', dev: false, source: 'other' },
+    ]);
+
+    // 3. pnpm-lock.yaml: multi-line resolution blocks with non-npmjs tarball, git, or directory are marked source: 'other'.
+    const multiLinePnpm = `lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      pub:
+        specifier: ^1.0.0
+        version: 1.0.0
+      corp:
+        specifier: ^2.0.0
+        version: 2.0.0
+      gitpkg:
+        specifier: ^3.0.0
+        version: 3.0.0
+      dirpkg:
+        specifier: ^4.0.0
+        version: 4.0.0
+packages:
+  pub@1.0.0:
+    resolution:
+      integrity: sha512-ok
+  corp@2.0.0:
+    resolution:
+      tarball: https://npm.corp.example/corp/-/corp-2.0.0.tgz
+  gitpkg@3.0.0:
+    resolution:
+      type: git
+      repo: https://github.com/acme/private.git
+  dirpkg@4.0.0:
+    resolution:
+      directory: packages/local
+`;
+    expect(parsePnpmLock(multiLinePnpm)).toEqual([
+      { name: 'corp', locked: '2.0.0', dev: false, source: 'other' },
+      { name: 'dirpkg', locked: '4.0.0', dev: false, source: 'other' },
+      { name: 'gitpkg', locked: '3.0.0', dev: false, source: 'other' },
+      { name: 'pub', locked: '1.0.0', dev: false, source: 'registry' },
+    ]);
+
+    // 4. yarn.lock rejects oversized package.json (> 1 MB).
+    const hugePkg = `{"dependencies":{"a":"${'1'.repeat(1_000_005)}"}}`;
+    expect(() => parseYarnLock('# yarn lockfile v1\n', hugePkg)).toThrow(LockfileError);
+
+    // 5. OSV hydration strips control chars and newlines from summary.
+    stub({
+      osv: {
+        batch: { 'hono@3.12.0': ['GHSA-ctrl-1234'] },
+        vulns: { 'GHSA-ctrl-1234': { severity: 'HIGH', summary: 'Bad\r\ninjection\t\u0000line' } },
+      },
+    });
+    const osvRes = await fetchOsvBatch([{ name: 'hono', version: '3.12.0' }]);
+    expect(osvRes[0].advisories[0].summary).toBe('Bad injection line');
+
+    // 6. listGithubRepos refuses 3xx redirects without following them and enforces GITHUB_REPO_ALLOWLIST.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 302, headers: { Location: 'https://evil.example/' } })));
+    const redir = await listGithubRepos('ghtok');
+    expect(redir.repos).toEqual([]);
+    expect(redir.error).toContain('redirected');
+
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify([
+      { full_name: 'acme/allowed' },
+      { full_name: 'other/blocked' },
+      { full_name: '../bad/name' },
+    ]), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+    const filtered = await listGithubRepos('ghtok', repoAllowlist('acme'));
+    expect(filtered.repos).toEqual(['acme/allowed']);
+    expect(filtered.owner).toBe('acme');
   });
 });

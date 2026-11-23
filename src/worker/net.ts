@@ -7,7 +7,12 @@
 const FIXED = ['api.cloudflare.com', 'api.github.com'];
 
 /** Hosts that only some features contact, and only when the user switched them on. */
-export const OPTIONAL_HOSTS = { incidents: 'www.cloudflarestatus.com', turnstile: 'challenges.cloudflare.com', packages: 'registry.npmjs.org' } as const;
+export const OPTIONAL_HOSTS = {
+  incidents: 'www.cloudflarestatus.com',
+  turnstile: 'challenges.cloudflare.com',
+  packages: 'registry.npmjs.org',
+  osv: 'api.osv.dev',
+} as const;
 
 export function allowedFetch(url: string, init: RequestInit, webhookUrl?: string, extra: string[] = []): Promise<Response> {
   const host = new URL(url).hostname;

@@ -24,7 +24,7 @@ import { accountChoice, authorizeToken, createToken, DEFAULT_TOKEN_DAYS, listTok
 import { plainFinding, plainPackages, plainTimeline, plainWorker, tokenAccounts, tokenOverview, tokenSelfCost } from './tokenView';
 import { sendTest, watchedAccountIds } from './notify';
 import { buildAccounts, buildOverview, buildSelfCost, buildTimeline, pickAccount } from './overview';
-import { buildPackages, repoAllowlist } from './packages';
+import { buildPackages, listGithubRepos, repoAllowlist } from './packages';
 import { buildResources } from './resources';
 import { safeError } from './redact';
 import { reportHtml } from './report';
@@ -206,14 +206,19 @@ function timelineDays(value: string | undefined): number {
  * a tag made from the body it receives instead, and never sees the counter or when others change.
  * `narrow` cuts the stored body down for this request, after the cache.
  */
+/** Presence of optional bindings/secrets (never secret values), folded into cache hashes so adding one invalidates views immediately. */
+const envCacheKey = (env: Env) =>
+  `${Number(Boolean(env.SCAN_QUEUE))}${Number(Boolean(env.AI))}${Number(Boolean(env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET))}${Number(Boolean(env.GITHUB_TOKEN))}|${env.GITHUB_REPO_ALLOWLIST ?? ''}`;
+
 async function cachedJson(c: Context<AppEnv>, view: string, key: string, build: () => Promise<unknown>, narrow?: (body: string) => string) {
   const db = c.env.DB;
   const rev = (await db.prepare(`SELECT value FROM settings WHERE key = 'data_rev'`).first<string>('value')) ?? '0';
   const stamp = `${VERSION}.${rev}.${new Date().toISOString().slice(0, 13)}`;
-  const etag = `W/"${stamp}.${hashText(`${view}|${key}`)}"`;
+  const envKey = envCacheKey(c.env);
+  const etag = `W/"${stamp}.${hashText(`${view}|${key}|${envKey}`)}"`;
   const viaToken = c.get('viaToken') === true;
   const grant = c.get('grant');
-  const scope = grant ? `${view}|${key}|${grant.people ? 'people' : 'plain'}|${grant.accounts?.join(',') ?? '*'}` : '';
+  const scope = grant ? `${view}|${key}|${grant.people ? 'people' : 'plain'}|${grant.accounts?.join(',') ?? '*'}|${envKey}` : '';
   const limited = Boolean(grant?.accounts);
   const clientTag = grant ? `W/"${stamp}.${hashText(scope)}"` : etag;
   const headersFor = (tag: string): Record<string, string> => (viaToken ? { ETag: tag, 'Cache-Control': 'private, no-cache' } : { 'Cache-Control': 'no-store' });
@@ -285,6 +290,16 @@ app.get('/api/timeline', async (c) => {
 app.get('/api/packages', async (c) => {
   const account = await accountOf(c, c.req.query('account'));
   return peopleView(c, 'packages', account, async () => buildPackages(c.env.DB, account, configFrom(await getSettings(c.env.DB)), Boolean(c.env.GITHUB_TOKEN), repoAllowlist(c.env.GITHUB_REPO_ALLOWLIST)), plainPackages);
+});
+app.get('/api/github-repos', async (c) => {
+  if (c.get('viaToken')) return c.json({ error: 'Dashboard session required.' }, 403);
+  if (!c.env.GITHUB_TOKEN) return c.json({ repos: [], owner: null });
+  const result = await listGithubRepos(c.env.GITHUB_TOKEN, repoAllowlist(c.env.GITHUB_REPO_ALLOWLIST)).catch(() => ({
+    repos: [] as string[],
+    owner: null,
+    error: 'Could not reach GitHub to list repositories.',
+  }));
+  return c.json(result);
 });
 app.get('/api/resources', async (c) => {
   const account = await accountOf(c, c.req.query('account'));

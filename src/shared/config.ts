@@ -56,14 +56,24 @@ export interface ModuleSwitches {
   incidents: boolean;
   /** npm dependencies of mapped Workers, read from GitHub (needs GITHUB_TOKEN). Off by default. */
   packages: boolean;
+  /** Known vulnerability check via api.osv.dev for public-registry packages. Off by default. */
+  packagesOsv: boolean;
 }
 
-/** Where a Worker's package-lock.json lives on GitHub. */
+/** Supported lockfile formats for the Packages check. */
+export type LockfileKind = 'npm' | 'pnpm' | 'yarn' | 'bun';
+export const LOCKFILE_KINDS: readonly LockfileKind[] = ['npm', 'pnpm', 'yarn', 'bun'];
+
+/** Where a Worker's lockfile lives on GitHub. */
 export interface PackageRepo {
   /** "owner/name". */
   repo: string;
-  /** Folder inside the repository, e.g. "workers/api". Empty = the repository root. */
+  /** Folder inside the repository that holds the lockfile, e.g. "workers/api". Empty = the repository root. */
   dir?: string;
+  /** Workspace folder inside a monorepo lockfile, e.g. "workers/api". Empty = the root package. */
+  workspace?: string;
+  /** Lockfile format. Omitted = 'npm' (package-lock.json). */
+  lockfile?: LockfileKind;
   /** Branch, tag or commit. Empty = the default branch. */
   ref?: string;
 }
@@ -160,7 +170,7 @@ export function defaultConfig(): Config {
     scanIntervalMinutes: 60,
     inventoryIntervalHours: 24,
     inventoryHourUtc: 3,
-    modules: { usage: true, cron: true, errors: true, deprecation: true, exposure: true, zombies: true, timeline: true, access: false, cost: true, cfAlerts: true, pages: true, security: true, drift: true, incidents: false, packages: false },
+    modules: { usage: true, cron: true, errors: true, deprecation: true, exposure: true, zombies: true, timeline: true, access: false, cost: true, cfAlerts: true, pages: true, security: true, drift: true, incidents: false, packages: false, packagesOsv: false },
     mutedChecks: [],
     thresholds: { ...DEFAULT_THRESHOLDS },
     overrides: {},
@@ -349,6 +359,16 @@ export function parseConfig(input: unknown): Config {
     if (r.dir != null && r.dir !== '') {
       if (typeof r.dir !== 'string' || !GH_DIR.test(r.dir) || dots(r.dir)) throw new ConfigError(`packageRepos.${name}.dir must be a folder such as workers/api.`);
       out.dir = r.dir;
+    }
+    if (r.workspace != null && r.workspace !== '') {
+      if (typeof r.workspace !== 'string' || !GH_DIR.test(r.workspace) || dots(r.workspace)) throw new ConfigError(`packageRepos.${name}.workspace must be a folder such as workers/api.`);
+      out.workspace = r.workspace;
+    }
+    if (r.lockfile != null && r.lockfile !== '') {
+      if (typeof r.lockfile !== 'string' || !LOCKFILE_KINDS.includes(r.lockfile as LockfileKind)) {
+        throw new ConfigError(`packageRepos.${name}.lockfile must be one of ${LOCKFILE_KINDS.join(', ')}.`);
+      }
+      if (r.lockfile !== 'npm') out.lockfile = r.lockfile as LockfileKind;
     }
     if (r.ref != null && r.ref !== '') {
       if (typeof r.ref !== 'string' || !GH_REF.test(r.ref) || dots(r.ref)) throw new ConfigError(`packageRepos.${name}.ref must be a branch, tag or commit.`);

@@ -26,11 +26,17 @@ You have a dozen Workers, maybe fifty. One is quietly burning through the free p
 
 The Cloudflare dashboard shows you each Worker on its own. **Ambersight shows you the fleet** and tells you which Workers need attention, and why, in plain sentences.
 
-It runs as **one Worker in your own Cloudflare account**. Every hour it reads your Workers' settings and metrics with a read-only API token, runs 91 checks, and gives you a ranked list of what to fix. One install can watch every account the token can see. Alerts go to e-mail, Slack, Discord, Telegram or any webhook.
+It runs as **one Worker in your own Cloudflare account**. Every hour it reads your Workers' settings and metrics with a read-only API token, runs 92 checks, and gives you a ranked list of what to fix. One install can watch every account the token can see. Alerts go to e-mail, Slack, Discord, Telegram or any webhook.
 
 - **On the Free plan**, the risk is an outage. Past 100,000 requests in a day, your Workers answer with Error 1027 until midnight UTC (only a route set to fail open skips its Worker instead), and the same goes for 1,000 KV writes, 5 million D1 rows read and the other daily limits. Ambersight warns you at 70% and again at 90% of each one, with the time you will hit it at today's pace.
 - **On Workers Paid**, the risk is the bill. Cloudflare's spending limit covers only requests and CPU time, and it is not an exact maximum: usage goes on while the block catches up, and when it lands, every Worker in the account stops. Until then, a loop, a retry storm or a crawler is billed for every hour it runs. Ambersight compares each Worker's last hour with its usual hour and alerts you at 5x, for requests, CPU time, subrequests and D1, KV, R2, Queues and Durable Object operations. It also catches Durable Object or Queue work that runs while nobody uses the app, and shows the estimated bill in dollars.
 
+> **New in 1.1.4**
+> - **Multi-lockfile & monorepo Packages**: track direct npm dependencies across `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock` (v1 & Berry) and `bun.lock`, including monorepo workspaces.
+> - **Vulnerability alerts (opt-in, OSV.dev)**: flag known CVEs/GHSAs in public npm dependencies with severity badges, advisory links and fixed versions — no API key required.
+> - **Redesigned Packages & Settings UX**: **By Worker** / **By Package** views, filter explanations, CSV/Markdown exports, a per-Worker Packages card, grouped navigation with live count badges, and a tabbed Settings page with a GitHub repo picker, one-click **Auto-map**, and a compact table built for 50+ Workers.
+> - **Updated Cloudflare limits & security updates**: aligned Paid plan limits (Cron Triggers, variables/secrets, Cron CPU) and included security updates. See the [changelog](CHANGELOG.md#114-2026-11-23).
+>
 > **New in 1.1.3: a security and privacy release.** Tokens limited to chosen accounts, safer sign-in, client digests that hold only that client's data, and tools to stop recording or remove people's names. Read the [upgrade notes](CHANGELOG.md#113-2026-11-18) before you deploy.
 
 > **New in 1.1.2**
@@ -77,7 +83,7 @@ It runs as **one Worker in your own Cloudflare account**. Every hour it reads yo
 | **Exposure** | preview URLs are public, a forgotten `workers.dev` hostname still answers, or (optional) a URL is not behind Cloudflare Access. |
 | **Zombies and orphans** | Workers with no traffic or never deployed; KV, D1, R2 and Queues bound to nothing or bound but never used, with when each was last used; routes and service bindings that point at deleted Workers. Each one comes with the exact command or dashboard step to remove it. |
 | **Log costs** | a busy Worker logs every request at 100% sampling (logs are billed per GB from 1 December 2026), the Free plan's 0.5 GB a day will run out, Logpush is still on, or a D1 query reads millions of rows to return a few. |
-| **Packages** (opt-in) | a Worker's direct npm dependency is a major version behind the latest release, read from `package-lock.json` in its GitHub repository. |
+| **Packages** (opt-in) | a Worker's direct npm dependency is behind the latest release or has a known vulnerability (optional OSV.dev check), read from its npm, pnpm, Yarn or Bun lockfile on GitHub. |
 | **Ambersight itself** | its API token is about to expire, or scans keep failing. |
 
 The [full list of checks](docs/checks.md) has every threshold, ID and fix.
@@ -96,7 +102,7 @@ Also included: several accounts in one install with an "All accounts" view, grou
 
 **Optional and free**, each off until you uncomment it in `wrangler.jsonc`: a scan queue that scans every account on time, a plain-language digest summary from Workers AI, and Cloudflare Turnstile on the sign-in page. See [configuration.md](docs/configuration.md#optional-bindings).
 
-**Packages (opt-in)**: map a Worker to its GitHub repository and Ambersight shows each direct npm dependency as *locked version → latest*, with a finding when one falls a major version behind. It needs a separate read-only `GITHUB_TOKEN` and is the only feature that reads your source code (`package-lock.json` only). See [checks.md](docs/checks.md#packages).
+**Packages (opt-in)**: map a Worker to its GitHub repository and Ambersight shows each direct npm dependency as *locked version → latest* (with optional OSV.dev vulnerability checks — no API key needed), raising a finding when a runtime dependency falls a major version behind or has a known advisory. It needs a separate read-only `GITHUB_TOKEN` and is the only feature that reads your source code (lockfiles only: npm, pnpm, Yarn or Bun). See [checks.md](docs/checks.md#packages).
 
 ## Screenshots
 
@@ -413,7 +419,7 @@ No. It is an independent open-source project built on Cloudflare's public APIs. 
 
 ## Documentation
 
-- [Checks](docs/checks.md): all 91 checks, with thresholds, IDs and fixes
+- [Checks](docs/checks.md): all 92 checks, with thresholds, IDs and fixes
 - [How it works](docs/how-it-works.md): what one scan does, what it stores and how it stays inside the free plan
 - [Alerts](docs/alerts.md): channels, defaults, the digest and message formats
 - [Configuration](docs/configuration.md): `wrangler.jsonc`, secrets and every `config.json` field

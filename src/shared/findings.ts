@@ -104,6 +104,9 @@ export const CHECK_TITLES: Record<string, string> = {
   'zombies:bound-idle-d1': 'D1 databases bound but not used',
   'zombies:bound-idle-r2': 'R2 buckets bound but not used',
   'zombies:bound-idle-queues': 'Queues bound but not used',
+  'packages:outdated': 'Outdated npm packages',
+  'packages:lockfile-unreadable': 'Package lockfile unreadable',
+  'packages:vulnerable': 'Vulnerable npm packages',
 };
 
 /** One fix for the whole group, where Cloudflare offers one. */

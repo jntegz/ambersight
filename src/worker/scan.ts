@@ -25,7 +25,7 @@ import { allowedFetch } from './net';
 import { sendAlerts } from './notify';
 import { safeError, sqlShape } from './redact';
 import { isNewer, REPO, VERSION } from './version';
-import { COMPARED_LATEST, fetchLockfile, LockfileError, npmLatest, packageFindings, REPO_NOT_ALLOWED, repoAllowed, repoAllowlist, type LockedDep, type PackageRow } from './packages';
+import { fetchLockfile, fetchOsvBatch, LockfileError, npmLatest, packageFindings, packagesQuerySql, parseAdvisories, REPO_NOT_ALLOWED, repoAllowed, repoAllowlist, type LockedDep, type PackageRow, type RawPackageDbRow } from './packages';
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -521,10 +521,12 @@ export async function runScan(
   }
   if (detailRemaining) warnings.push(`${detailRemaining} Workers will get their details on the next runs.`);
 
-  // 6b. Packages (optional, off by default): each mapped Worker's package-lock.json from GitHub once
-  // a day, then the latest version of each package from npm, with whatever budget is left.
+  // 6b. Packages (optional, off by default): each mapped Worker's lockfile from GitHub once
+  // a day, then the latest version of each package from npm (and optional OSV advisories),
+  // with whatever budget is left.
   const lockfiles: { script: string; deps: LockedDep[] | null; error: string | null }[] = [];
   const latest: { name: string; latest: string | null }[] = [];
+  const advisories: { name: string; version: string; advisories: string }[] = [];
   if (!light && config.modules.packages) {
     if (!env.GITHUB_TOKEN) {
       warnings.push('The Packages check is on, but GITHUB_TOKEN is not set (wrangler secret put GITHUB_TOKEN).');
@@ -543,15 +545,18 @@ export async function runScan(
         .filter((w) => !pkgAt.get(w.name) || pkgError.get(w.name) === REPO_NOT_ALLOWED || now.getTime() - new Date(pkgAt.get(w.name)!).getTime() > PACKAGES_MAX_AGE)
         .sort((a, b) => (pkgAt.get(a.name) ?? '').localeCompare(pkgAt.get(b.name) ?? ''));
       let pkgRemaining = 0;
+      // Deduplicate lockfile fetches within this scan (monorepo Workers sharing one lockfile cost 1 request).
+      const fileCache = new Map<string, string>();
       for (const w of pkgDue) {
-        // Keep a couple of calls for npm, so new packages get their latest version soon.
-        if (left() < 3) {
+        const repo = repoFor(config, accountId, w.name)!;
+        // Keep a couple of calls for npm/OSV, so new packages get their latest version soon.
+        const need = repo.lockfile === 'yarn' ? 4 : 3;
+        if (left() < need) {
           pkgRemaining = pkgDue.length - (lockfiles.length - refusedNow);
           break;
         }
-        pkgCalls++;
         try {
-          lockfiles.push({ script: w.name, deps: await fetchLockfile(env.GITHUB_TOKEN, repoFor(config, accountId, w.name)!), error: null });
+          lockfiles.push({ script: w.name, deps: await fetchLockfile(env.GITHUB_TOKEN, repo, fileCache, () => pkgCalls++), error: null });
         } catch (e) {
           // Only a known problem (no access, no file, unsupported format) is stored and becomes a finding.
           // Anything else (GitHub down) is retried on the next scan.
@@ -562,24 +567,50 @@ export async function runScan(
       if (pkgRemaining) warnings.push(`${pkgRemaining} Workers will get their packages read on the next scans.`);
       // Only packages whose lockfile entry shows they came from the public registry are looked up
       // there. Any other name may be private, and must not leave the install.
-      const fresh = [...new Set(lockfiles.flatMap((l) => (l.deps ?? []).filter((d) => d.source === 'registry').map((d) => d.name)))];
-      if (left() > 0) {
+      const freshDeps = lockfiles.flatMap((l) => (l.deps ?? []).filter((d) => d.source === 'registry'));
+      const fresh = [...new Set(freshDeps.map((d) => d.name))];
+      const osvReserve = config.modules.packagesOsv ? 1 : 0;
+      if (left() > osvReserve) {
         const { results: stale } = await db
           .prepare(
             `SELECT p.name FROM (SELECT name FROM worker_packages WHERE account = ?1 AND source = 'registry' UNION SELECT value FROM json_each(?2)) AS p
              LEFT JOIN npm_latest n ON n.name = p.name WHERE n.checked_at IS NULL OR n.checked_at < ?3
              ORDER BY n.checked_at IS NOT NULL, n.checked_at LIMIT ?4`,
           )
-          .bind(accountId, JSON.stringify(fresh), new Date(now.getTime() - PACKAGES_MAX_AGE).toISOString(), left())
+          .bind(accountId, JSON.stringify(fresh), new Date(now.getTime() - PACKAGES_MAX_AGE).toISOString(), left() - osvReserve)
           .all<{ name: string }>();
         for (const { name } of stale) {
-          if (left() < 1) break;
+          if (left() <= osvReserve) break;
           pkgCalls++;
           try {
             latest.push({ name, latest: await npmLatest(name) });
           } catch (e) {
             warnings.push(`npm registry unavailable: ${(e as Error).message}`);
             break;
+          }
+        }
+      }
+      // Optional OSV.dev batch check: 1 batch request for all stale (name, version) pairs from the public registry.
+      if (config.modules.packagesOsv && left() >= 1) {
+        const freshPairs = [...new Map(freshDeps.map((d) => [`${d.name}@${d.locked}`, { name: d.name, version: d.locked }])).values()];
+        const { results: staleOsv } = await db
+          .prepare(
+            `SELECT p.name, p.version FROM (
+               SELECT name, locked AS version FROM worker_packages WHERE account = ?1 AND source = 'registry'
+               UNION SELECT json_extract(value,'$.name'), json_extract(value,'$.version') FROM json_each(?2)
+             ) AS p
+             LEFT JOIN npm_advisories a ON a.name = p.name AND a.version = p.version
+             WHERE a.checked_at IS NULL OR a.checked_at < ?3
+             ORDER BY a.checked_at IS NOT NULL, a.checked_at LIMIT 200`,
+          )
+          .bind(accountId, JSON.stringify(freshPairs), new Date(now.getTime() - PACKAGES_MAX_AGE).toISOString())
+          .all<{ name: string; version: string }>();
+        if (staleOsv.length) {
+          try {
+            const batch = await fetchOsvBatch(staleOsv, Math.max(0, left() - 1), () => pkgCalls++);
+            for (const item of batch) advisories.push({ name: item.name, version: item.version, advisories: JSON.stringify(item.advisories) });
+          } catch (e) {
+            warnings.push(`OSV vulnerability check unavailable: ${(e as Error).message}`);
           }
         }
       }
@@ -724,6 +755,15 @@ export async function runScan(
          SELECT json_extract(value,'$.name'), json_extract(value,'$.latest'), ?2 FROM json_each(?1) WHERE true
          ON CONFLICT(name) DO UPDATE SET latest = excluded.latest, checked_at = excluded.checked_at`,
       ).bind(j(latest), stamp),
+    );
+  }
+  if (advisories.length) {
+    writes.push(
+      db.prepare(
+        `INSERT INTO npm_advisories (name, version, advisories, checked_at)
+         SELECT json_extract(value,'$.name'), json_extract(value,'$.version'), json_extract(value,'$.advisories'), ?2 FROM json_each(?1) WHERE true
+         ON CONFLICT(name, version) DO UPDATE SET advisories = excluded.advisories, checked_at = excluded.checked_at`,
+      ).bind(j(advisories), stamp),
     );
   }
   if (cronRuns) {
@@ -899,6 +939,9 @@ export async function runScan(
       // Registry answers no package row can use any more, such as a private name looked up by an
       // older version once its lockfile shows where it comes from. Rows with no source yet still use theirs.
       db.prepare(`DELETE FROM npm_latest WHERE name NOT IN (SELECT name FROM worker_packages WHERE source IS NOT 'other')`),
+      ...(config.modules.packages
+        ? [db.prepare(`DELETE FROM npm_advisories WHERE NOT EXISTS (SELECT 1 FROM worker_packages p WHERE p.name = npm_advisories.name AND p.locked = npm_advisories.version AND p.source IS NOT 'other')`)]
+        : []),
       upsertAccount(db, { id: A, detectedPlan }, now),
     );
   }
@@ -1029,14 +1072,20 @@ async function monthBudget(db: D1Database, account: string, now: Date, storage: 
 
 async function loadPackageFindings(db: D1Database, account: string, config: Config, scoped: Set<string>): Promise<Finding[]> {
   const [rowsR, errR] = await db.batch([
-    db.prepare(
-      `SELECT p.script, p.name, p.locked, p.dev, p.source, ${COMPARED_LATEST} FROM worker_packages p LEFT JOIN npm_latest n ON n.name = p.name WHERE p.account = ?1`,
-    ).bind(account),
+    db.prepare(packagesQuerySql(config.modules.packagesOsv, false)).bind(account),
     db.prepare('SELECT name, packages_error FROM workers WHERE account = ?1 AND packages_error IS NOT NULL').bind(account),
   ]);
-  const rows = (rowsR.results as { script: string; name: string; locked: string; dev: number; latest: string | null; source: string | null }[]).map((r) => ({ ...r, dev: r.dev === 1 }));
+  const rows: PackageRow[] = (rowsR.results as (RawPackageDbRow & { script: string })[]).map((r) => ({
+    script: r.script,
+    name: r.name,
+    locked: r.locked,
+    latest: r.latest,
+    dev: r.dev === 1,
+    source: r.source,
+    ...(config.modules.packagesOsv ? { advisories: parseAdvisories(r.advisories) } : {}),
+  }));
   const errors = new Map((errR.results as { name: string; packages_error: string }[]).map((r) => [r.name, r.packages_error]));
-  return packageFindings(config, account, rows as PackageRow[], errors, scoped);
+  return packageFindings(config, account, rows, errors, scoped);
 }
 
 /**

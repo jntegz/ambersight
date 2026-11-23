@@ -241,6 +241,38 @@ export const SEVERITY_WEIGHT: Record<Severity, number> = { critical: 10, warning
 /** How far a locked package version is behind the latest release on npm. */
 export type Gap = 'major' | 'minor' | 'patch' | 'none' | 'unknown';
 
+/** Qualitative severity reported by an OSV security advisory. */
+export type AdvisorySeverity = 'critical' | 'high' | 'moderate' | 'low' | 'unknown';
+
+export interface PackageAdvisory {
+  id: string;
+  severity: AdvisorySeverity;
+  summary: string | null;
+  fixed: string | null;
+}
+
+export interface PackageItem {
+  name: string;
+  locked: string;
+  latest: string | null;
+  gap: Gap;
+  dev: boolean;
+  /** False for a package whose last lockfile read did not show it coming from the public npm registry. */
+  compared: boolean;
+  /** Present when known security advisories apply to this locked version (opt-in OSV check). */
+  advisories?: PackageAdvisory[];
+}
+
+export interface WorkerPackages {
+  repo: string;
+  dir: string | null;
+  workspace?: string | null;
+  lockfile?: 'npm' | 'pnpm' | 'yarn' | 'bun';
+  checkedAt: string | null;
+  error: string | null;
+  packages: PackageItem[];
+}
+
 /** The Resources page: every KV namespace, D1 database, R2 bucket and queue, and who uses it. */
 export interface ResourcesView {
   /** False until the first inventory refresh and every Worker's bindings are in. */
@@ -267,15 +299,10 @@ export interface ResourcesView {
 export interface PackagesView {
   enabled: boolean;
   github: boolean;
-  workers: {
-    name: string;
-    repo: string;
-    dir: string | null;
-    checkedAt: string | null;
-    error: string | null;
-    /** `compared` is false for a package whose last lockfile read did not show it coming from the public npm registry. */
-    packages: { name: string; locked: string; latest: string | null; gap: Gap; dev: boolean; compared: boolean }[];
-  }[];
+  osvEnabled?: boolean;
+  /** In-scope Workers in this account that have no repository mapping yet. */
+  unmappedWorkers?: string[];
+  workers: ({ name: string } & WorkerPackages)[];
 }
 
 /** Time ranges the charts offer. 24h and 7d are drawn by hour, the others by day. */
@@ -384,6 +411,8 @@ export interface WorkerDetail {
   changes: { at: string; kind: string; detail: string | null }[];
   /** List price of this Worker's requests and CPU time in the range, before included usage. Paid only. */
   cost: { amount: number; perMillion: number | null } | null;
+  /** Direct npm dependencies of this Worker when the Packages check is on and it is mapped to a repository. */
+  packages?: WorkerPackages | null;
 }
 
 /** "Since your last visit" on the overview. */

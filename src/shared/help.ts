@@ -609,21 +609,30 @@ export const CHECK_HELP: Record<string, CheckHelp> = {
   // ---- Packages
   'packages:outdated': {
     what: 'Some of the npm packages this Worker\'s code uses have newer versions available. The Packages page lists each one as locked version → latest.',
-    why: 'Old packages miss bug and security fixes. A major version behind usually means a bigger change, which is harder the longer you wait.',
+    why: 'Old packages miss bug and security fixes. A major version behind in a runtime dependency usually means a bigger change, which is harder the longer you wait.',
     steps: [
-      'In the project folder, run npm outdated to see the same list.',
-      'Update small changes (patch and minor) with npm update, then test with npx wrangler dev.',
-      'For a major version, read the package\'s changelog or migration guide first, update with npm install <package>@latest, and test.',
-      'Commit the updated package-lock.json and deploy.',
+      'In the project folder, run npm outdated (or pnpm outdated / yarn outdated / bun outdated) to see the same list.',
+      'Update small changes (patch and minor) first, then test with npx wrangler dev.',
+      'For a major version, read the package\'s changelog or migration guide first, update it, and test.',
+      'Commit the updated lockfile and deploy.',
     ],
   },
   'packages:lockfile-unreadable': {
-    what: 'Ambersight could not read package-lock.json for this Worker from GitHub.',
+    what: 'Ambersight could not read the lockfile for this Worker from GitHub.',
     why: 'Without it, Ambersight cannot tell you which package versions you use.',
     steps: [
-      'In Settings › Checks › Packages, check the repository (owner/name), the folder that holds package-lock.json, and the branch.',
+      'In Settings › Checks › Packages, check the repository (owner/name), the lockfile format (npm, pnpm, yarn or bun), the folder that holds the lockfile, any monorepo workspace folder, and the branch.',
       'Check that GITHUB_TOKEN has Contents: Read access to that repository, and that GITHUB_REPO_ALLOWLIST (if you set one) includes it.',
-      'If the project uses pnpm or yarn, or an old npm (before version 7), the lockfile cannot be read yet.',
+      'For npm, lockfileVersion 2 or 3 (npm 7 or later) is required. For pnpm, lockfile v6 or v9. For Bun, the text bun.lock file.',
+    ],
+  },
+  'packages:vulnerable': {
+    what: 'One or more locked npm packages in this Worker match known security advisories reported by OSV.dev.',
+    why: 'Known vulnerabilities can be exploited if the affected code path is reachable. Runtime dependencies carry higher risk than dev-only tools.',
+    steps: [
+      'Open the Packages page (or this Worker\'s page) to see the advisory IDs, severities and fixed versions.',
+      'Click an advisory ID to check whether the vulnerability affects how your Worker uses the package.',
+      'Update the affected package to the fixed version (or latest), test with npx wrangler dev, commit the lockfile and deploy.',
     ],
   },
 };

@@ -113,6 +113,7 @@ export const api = {
   scan: (account?: string) => call<ScanResult>('/api/scan', { method: 'POST', body: JSON.stringify(account ? { account } : {}) }),
   timeline: (days: number, account?: string) => call<TimelineEntry[]>(`/api/timeline?days=${days}${account ? `&account=${encodeURIComponent(account)}` : ''}`),
   packages: (account?: string) => call<PackagesView>(`/api/packages${q(account)}`),
+  githubRepos: () => call<{ repos: string[]; owner: string | null; error?: string }>('/api/github-repos'),
   resources: (account?: string) => call<ResourcesView>(`/api/resources${q(account)}`),
   selfCost: (account?: string) => call<SelfCost>(`/api/self-cost${q(account)}`),
   setup: (account?: string) => call<SetupStatus>(account ? `/api/setup?account=${encodeURIComponent(account)}` : '/api/setup'),

@@ -5,7 +5,7 @@
     | 'worker' | 'cron' | 'budget' | 'errors' | 'runaway' | 'critical' | 'warning' | 'info'
     | 'healthy' | 'search' | 'refresh' | 'logout' | 'external' | 'snooze' | 'check' | 'sun' | 'moon' | 'grid' | 'list' | 'close'
     | 'usage' | 'deprecation' | 'exposure' | 'zombies' | 'timeline' | 'settings' | 'chevron' | 'download' | 'upload'
-    | 'mail' | 'webhook' | 'shield' | 'plus' | 'trash' | 'overview' | 'key' | 'arrow' | 'chart' | 'inbox' | 'command' | 'undo';
+    | 'mail' | 'webhook' | 'shield' | 'plus' | 'trash' | 'overview' | 'key' | 'arrow' | 'chart' | 'inbox' | 'command' | 'undo' | 'package';
 </script>
 
 <script lang="ts">
@@ -53,6 +53,7 @@
     inbox: 'M4 13L6.5 5H17.5L20 13V19H4ZM4 13H9L10 15.5H14L15 13H20',
     command: 'M9 6A3 3 0 1 0 6 9H18A3 3 0 1 0 15 6V18A3 3 0 1 0 18 15H6A3 3 0 1 0 9 18Z',
     undo: 'M9 14L4 9L9 4M4 9H15A5 5 0 0 1 15 19H11',
+    package: 'M12 2.5L20.5 7.2V16.8L12 21.5L3.5 16.8V7.2ZM3.5 7.2L12 12L20.5 7.2M12 12V21.5M7.8 4.8L16.2 9.6',
   };
 </script>
 

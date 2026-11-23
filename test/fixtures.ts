@@ -66,6 +66,12 @@ export interface FakeOptions {
   lockfiles?: Record<string, string | number>;
   /** Packages check: npm package -> latest version, or an HTTP status. */
   npm?: Record<string, string | number>;
+  /** Packages OSV check: "name@version" -> vuln IDs, and vuln ID -> details. */
+  osv?: {
+    batch?: Record<string, string[]>;
+    vulns?: Record<string, { severity?: string; summary?: string; fixed?: Record<string, string> }>;
+    status?: number;
+  };
   /** KV operations per namespace and hour (kvOperationsAdaptiveGroups). Default: the dataset is unavailable. */
   kvOps?: { namespaceId: string; datetimeHour: string; requests: number; actionType?: string }[];
   /** Reject the CPU p50 and wall-time quantiles like an older schema would. */
@@ -95,6 +101,32 @@ export function fakeFetch(opts: FakeOptions = {}) {
       const name = decodeURIComponent(path.slice(1).replace(/\/latest$/, ''));
       const v = opts.npm?.[name] ?? 404;
       return typeof v === 'number' ? new Response('{}', { status: v }) : new Response(JSON.stringify({ name, version: v }));
+    }
+    if (url.hostname === 'api.osv.dev') {
+      if (opts.osv?.status) return new Response('{}', { status: opts.osv.status });
+      if (path === '/v1/querybatch') {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { queries?: { package?: { name?: string }; version?: string }[] };
+        const results = (body.queries ?? []).map((q) => {
+          const ids = opts.osv?.batch?.[`${q.package?.name}@${q.version}`] ?? [];
+          return { vulns: ids.map((id) => ({ id })) };
+        });
+        return new Response(JSON.stringify({ results }), { headers: { 'Content-Type': 'application/json' } });
+      }
+      const vm = path.match(/^\/v1\/vulns\/(.+)$/);
+      if (vm) {
+        const id = decodeURIComponent(vm[1]);
+        const v = opts.osv?.vulns?.[id];
+        if (!v) return new Response('{}', { status: 404 });
+        return new Response(JSON.stringify({
+          id,
+          summary: v.summary,
+          database_specific: v.severity ? { severity: v.severity } : undefined,
+          affected: Object.entries(v.fixed ?? {}).map(([pkg, fixed]) => ({
+            package: { ecosystem: 'npm', name: pkg },
+            ranges: [{ events: [{ fixed }] }],
+          })),
+        }), { headers: { 'Content-Type': 'application/json' } });
+      }
     }
     if (url.hostname === 'api.github.com') return new Response(JSON.stringify({ tag_name: NEXT_RELEASE, html_url: `https://github.com/x/releases/${NEXT_RELEASE}` }));
     if (url.hostname === 'hooks.slack.com') return new Response('ok');

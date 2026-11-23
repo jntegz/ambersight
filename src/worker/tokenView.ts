@@ -21,15 +21,15 @@ export const PERSON_EVIDENCE = new Set([...DASHBOARD_ONLY_EVIDENCE, 'branch', 'r
  * fails when a check emits a key that is in neither list.
  */
 export const PLAIN_EVIDENCE = new Set([
-  '_cleanup', 'action', 'ageMonths', 'alsoOn', 'at', 'averageSubrequests', 'binding', 'boundTo', 'budget', 'changedAt', 'compatibilityDate',
+  '_cleanup', 'action', 'advisories', 'ageMonths', 'alsoOn', 'at', 'averageSubrequests', 'binding', 'boundTo', 'budget', 'changedAt', 'compatibilityDate',
   'cpuMaxMs', 'cpuP99Ms', 'd1', 'database', 'days', 'deployId', 'deployed', 'deployedAt', 'domain', 'error', 'errors', 'estimatedGbPerDay',
   'estimatedGbPerMonth', 'exceeded', 'expected', 'expiresOn', 'extraPerHour', 'failures', 'flags', 'forecast', 'format', 'freeAllocation',
   'freeGbPerDay', 'historyHours', 'hosts', 'inARow', 'keys', 'kv', 'largest', 'lastHour', 'lastUsed', 'leavesBehind', 'limit', 'limitMonths',
   'limitMs', 'logpush', 'major', 'missingInOther', 'missingInProduction', 'monthToDate', 'noticed', 'objects', 'observed', 'opsPerHour', 'other',
   'outdated', 'pagesDev', 'permissions', 'previews', 'production', 'project', 'projectedLimitAt', 'query', 'queues', 'r2', 'record', 'requests',
-  'requests24h', 'requestsInThoseHours', 'resource', 'route', 'rowsRead', 'runs', 'samplingRate', 'since', 'size', 'split', 'stage', 'status',
+  'requests24h', 'requestsInThoseHours', 'resource', 'route', 'rowsRead', 'runs', 'runtimeCriticalHigh', 'runtimeMajor', 'samplingRate', 'since', 'size', 'split', 'stage', 'status',
   'stillUsed', 'stored', 'tailConsumer', 'target', 'threshold', 'total', 'type', 'uncovered', 'usageModel', 'used', 'usedToday', 'usualHour',
-  'usualRate', 'variables', 'worker', 'workersDev', 'zone',
+  'usualRate', 'variables', 'vulnerable', 'worker', 'workersDev', 'zone',
 ]);
 /** The one kind of change note that comes from Ambersight's own facts and not from the audit log. */
 const BINDING_CHANGE = /^binding .* was removed$/;
@@ -133,6 +133,7 @@ export const plainWorker = (w: WorkerDetail): WorkerDetail => ({
   deploys: w.deploys.map((d) => without(without(d, 'author'), 'message')),
   findings: w.findings.map(plainFinding),
   changes: w.changes.map((c) => (c.kind === 'audit' ? without(c, 'detail') : c)),
+  ...(w.packages ? { packages: { ...without(w.packages, 'repo'), error: w.packages.error && PACKAGES_UNREADABLE } } : {}),
 });
 
 export const plainPackages = (v: PackagesView): PackagesView => ({
