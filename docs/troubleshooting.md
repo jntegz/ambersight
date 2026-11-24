@@ -30,9 +30,17 @@ The daily check found a permission outside the [list Ambersight expects](checks.
 
 Ambersight detects Free or Paid with *Billing Read*. Without that permission, it uses `PLAN` from `wrangler.jsonc`, which is `free` by default. Set the plan directly in **Settings › General** to override both.
 
-### I forgot my passphrase
+### I forgot my passphrase, or lost my passkeys
 
 See the [FAQ in the README](../README.md#faq).
+
+### "The passkey belongs to a different site" or the browser offers no passkey
+
+Passkeys are tied to the host they were added on. One added on `ambersight.<subdomain>.workers.dev` does not work on your custom domain, and the other way round. Sign in on the address you added it on, or add a passkey on each address you use.
+
+### "This link only works in the browser where it was asked for"
+
+Open the e-mailed link in the same browser (and profile) where you pressed **E-mail me a sign-in link**. A link opened anywhere else is spent; ask for a new one.
 
 ## Scan warnings
 

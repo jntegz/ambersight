@@ -187,7 +187,7 @@ export async function buildAnalytics(env: Env, requested: string | undefined, ra
   }
   const workers = (perWorker.results as (Agg & { k: string })[])
     .map((r) => ({ name: r.k, groups: groupsFor(config, r.k, tags.get(r.k) ?? []) }))
-    .filter((x) => !tags.has(x.name) || inScope(config, x.name, x.groups))
+    .filter((x) => inScope(config, x.name, x.groups))
     .map((x) => {
       const r = (perWorker.results as (Agg & { k: string })[]).find((y) => y.k === x.name);
       const s = spark.get(x.name);
@@ -354,9 +354,10 @@ export async function buildWorkerDetail(env: Env, requested: string | undefined,
   const w = windowOf(range, now);
   const hourly = w.granularity === 'hour';
   const { rolled, start: historyStart } = await historyBounds(db, A);
-  // Out of scope means not shown: the page answers as it does for a Worker that does not exist.
+  // Out of scope means not shown: the page answers as it does for a Worker that does not exist. A
+  // Worker that is gone has no tags left, but its name still decides, so its history stays hidden too.
   const row = await db.prepare('SELECT tags FROM workers WHERE account = ?1 AND name = ?2').bind(A, name).first<{ tags: string | null }>();
-  if (row && !inScope(config, name, groupsFor(config, name, row.tags ? (JSON.parse(row.tags) as string[]) : []))) {
+  if (!inScope(config, name, groupsFor(config, name, row?.tags ? (JSON.parse(row.tags) as string[]) : []))) {
     return {
       name, exists: false, range, granularity: w.granularity, from: new Date(w.start).toISOString(), to: new Date(w.end).toISOString(), historyStart,
       groups: [], handlers: [], deployedOn: null, createdOn: null, compatibilityDate: null, usageModel: null, workersDev: null, previewsEnabled: null, logsEnabled: null,

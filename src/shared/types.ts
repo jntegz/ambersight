@@ -176,6 +176,8 @@ export interface SetupStatus {
   passphraseFromSettings: boolean;
   /** The ADMIN_PASSPHRASE secret is in use and easy to guess; the wizard asks for a better one. */
   passphraseWeak: boolean;
+  /** Passkeys registered. Any at all turns passphrase sign-in off. */
+  passkeys: number;
   /** Every account the token can see (up to 20); the wizard offers a choice when there are several. */
   accounts: { id: string; name: string }[];
   /** Accounts already watched (chosen at setup or pinned). */

@@ -170,7 +170,7 @@ In **Settings › Accounts**, give an account one or more digest recipients. Eac
 
 A digest that fails for one address is retried for that address by later scans that day. The others are not sent again.
 
-For a one-off report, the overview links to a printable report of the account for the last 7 or 30 days. Your browser's Print saves it as a PDF. Client digests and reports leave out who deployed.
+For a one-off report, the overview links to a printable report of the account for the last 7 or 30 days. Your browser's Print saves it as a PDF. Client digests, group digests and reports leave the operators, so they hold what an API token without person-linked data gets: no deploy authors, no audit-log text ("A change was recorded shortly before."), no repository or branch names, and no e-mail addresses. The account is named by its label from **Settings › Accounts**, never by its Cloudflare name, which is often a person's; without a label it is `Account <first 8 characters of the id>`, so set one for each client.
 
 ### A digest per group
 

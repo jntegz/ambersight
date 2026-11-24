@@ -8,6 +8,7 @@
   import Logo from '../components/Logo.svelte';
   import NotifyChannels from '../components/settings/NotifyChannels.svelte';
   import PassphraseForm from '../components/settings/PassphraseForm.svelte';
+  import Passkeys from '../components/settings/Passkeys.svelte';
   import { api, ApiError, NOT_SIGNED_IN } from '../lib/api';
 
   let { onDone, onSignedOut, onUnauthorized }: {
@@ -52,6 +53,19 @@
   onMount(check);
 
   const tokenOk = $derived(!!status?.tokenActive && (status.writeScopes?.length === 0 || (status.writeScopes == null && confirmReadOnly)) && (status.accounts.length <= 1 || status.accountPinned || picked.length > 0));
+
+  /** Whether the deploy-time passphrase was too weak, before any passkey made that moot. */
+  let weakAtDeploy: boolean | null = null;
+  function passkeysChanged(count: number) {
+    if (!status) return;
+    weakAtDeploy ??= status.passphraseWeak;
+    status = { ...status, passkeys: count, passphraseWeak: count ? false : weakAtDeploy };
+    // The passphrase cannot be replaced once a passkey exists: it only recovers.
+    if (count) {
+      pending = null;
+      changePass = false;
+    }
+  }
 
   async function finish() {
     finishing = true;
@@ -189,10 +203,10 @@
     {:else if step === 1}
       <h1 id="step-title">Protect the dashboard</h1>
       {#if status?.behindAccess}
-        <p class="lead">The dashboard is behind a passphrase, and this visit came through <strong>Cloudflare Access</strong>. That is the setup we recommend.</p>
+        <p class="lead">This visit came through <strong>Cloudflare Access</strong>. That is the setup we recommend. Add a passkey too, so the dashboard's own sign-in is as strong as the gate in front of it.</p>
         <ul class="checks"><li class="ok"><Icon name="shield" size={20} /><div><p class="c-title">Protected by Cloudflare Access</p><p class="muted">This address is behind your Access policy. Make sure every other address of this Worker is too: turn off <code>workers_dev</code> in wrangler.jsonc if you use a custom domain.</p></div></li></ul>
       {:else}
-        <p class="lead">On a public address, one passphrase is all that stands between the internet and this dashboard. Add <strong>Cloudflare Access</strong> in front of it, so nobody reaches the sign-in page without passing your login first, with MFA or passkeys from your identity provider. It is free for small teams.</p>
+        <p class="lead">On a public address, anyone can reach the sign-in page. Add a passkey below, so a guessed or leaked passphrase no longer gets in. For more, put <strong>Cloudflare Access</strong> in front of it, so nobody reaches the sign-in page without passing your login first. It is free for small teams.</p>
 
         <ol class="guide">
           <li><span class="n">1</span><p>In the Cloudflare dashboard open <strong>Workers & Pages</strong>, then this Worker, then the <strong>Access</strong> tab.</p></li>
@@ -205,9 +219,20 @@
       <div class="pass-box">
         <div class="pass-head">
           <div>
+            <p class="c-title">Add a passkey</p>
+            <p class="muted">Recommended. Sign in with this device's fingerprint, face or PIN. The passphrase then stops signing in and is kept only for recovery.</p>
+          </div>
+        </div>
+        <Passkeys compact onChanged={passkeysChanged} />
+      </div>
+
+      {#if !status?.passkeys}
+      <div class="pass-box">
+        <div class="pass-head">
+          <div>
             <p class="c-title">Change the passphrase</p>
             {#if status?.passphraseWeak}
-              <p class="error-text">The passphrase set at deploy is too easy to guess. Choose a stronger one to continue.</p>
+              <p class="error-text">The passphrase set at deploy is too easy to guess. Add a passkey, or choose a stronger passphrase, to continue.</p>
             {:else}
               <p class="muted">Optional. Replaces the one from deploy. Applied when you finish, then you sign in again.</p>
             {/if}
@@ -220,6 +245,7 @@
           <PassphraseForm submitLabel="Use this passphrase" onSubmit={(current, next) => { pending = { current, next }; changePass = false; }} />
         {/if}
       </div>
+      {/if}
 
       <div class="actions">
         <button type="button" class="ghost" onclick={() => (step = 0)}>Back</button>

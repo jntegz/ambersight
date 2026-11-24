@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { passphraseProblem } from '../shared/passphrase';
+import { passkeyCount } from './auth';
 import type { SetupStatus } from '../shared/types';
 import { CfClient } from './cf';
 import { configFrom, getSettings, listAccounts, pinnedAccounts } from './db';
@@ -18,6 +19,7 @@ export function writeScopes(permissions: string[]): string[] {
 /** `accountId` previews another account the token can see; CF_ACCOUNT_ID always wins. */
 export async function setupStatus(env: Env, opts: { accountId?: string; behindAccess?: boolean } = {}): Promise<SetupStatus> {
   const settings = await getSettings(env.DB);
+  const passkeys = await passkeyCount(env.DB);
   const pinned = pinnedAccounts(env.CF_ACCOUNT_ID);
   const watched = pinned ?? (await listAccounts(env.DB)).map((a) => a.id);
   const recipients = allowedRecipients(env);
@@ -34,7 +36,9 @@ export async function setupStatus(env: Env, opts: { accountId?: string; behindAc
     webhook: { configured: Boolean(env.WEBHOOK_URL), kind: env.WEBHOOK_URL ? webhookKind(env.WEBHOOK_URL) : null },
     setupDone: settings.setup_done === '1',
     passphraseFromSettings: Boolean(settings.passphrase_hash),
-    passphraseWeak: !settings.passphrase_hash && Boolean(env.ADMIN_PASSPHRASE) && passphraseProblem(env.ADMIN_PASSPHRASE) !== null,
+    // With a passkey the deploy-time passphrase no longer signs in, so its strength stops mattering.
+    passphraseWeak: !passkeys && !settings.passphrase_hash && Boolean(env.ADMIN_PASSPHRASE) && passphraseProblem(env.ADMIN_PASSPHRASE) !== null,
+    passkeys,
     accounts: [],
     watched,
     accountPinned: Boolean(pinned),

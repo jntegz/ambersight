@@ -12,10 +12,13 @@
   import AdminLog from '../components/settings/AdminLog.svelte';
   import ApiTokens from '../components/settings/ApiTokens.svelte';
   import PassphraseForm from '../components/settings/PassphraseForm.svelte';
+  import Passkeys from '../components/settings/Passkeys.svelte';
   import PersonalData from '../components/settings/PersonalData.svelte';
   import SelfCost from '../components/settings/SelfCost.svelte';
   import Switch from '../components/Switch.svelte';
   import { api, ApiError } from '../lib/api';
+  import { auth } from '../lib/auth.svelte';
+  import { clearOfflineCopies } from '../lib/offline';
   import { mappingFrom, mappingProblem, suggestFor, type MappingProblem } from '../lib/repoMatch';
   import { setParam } from '../lib/route';
   import { fromDisplay, inputStep, rangeText, THRESHOLD_GROUPS, toDisplay, type ThresholdKey } from '../lib/thresholds';
@@ -128,6 +131,8 @@
     saving = true;
     try {
       const { attributionErasure, ...stored } = await api.saveConfig(valid, erasesNames ? 'erase' : resumesNames ? 'resume' : 'keep');
+      // The offline copies of views on this device still hold the names that were just erased.
+      if (erasesNames) await clearOfflineCopies();
       saved = stored;
       draft = clone(stored);
       version++;
@@ -1061,10 +1066,17 @@
             <p><strong>Not behind Cloudflare Access.</strong> Anyone who finds this URL can reach the sign-in page. In the Cloudflare dashboard open this Worker's <strong>Access</strong> tab and choose <strong>Protect this Worker behind Access</strong> (free for small teams, with MFA or passkeys from your identity provider). <a href="https://developers.cloudflare.com/workers/configuration/cloudflare-access/" target="_blank" rel="noopener noreferrer">How it works</a></p>
           {/if}
         </div>
-        {#if status?.passphraseFromSettings === false}
-          <p class="hint">The passphrase currently comes from the <span class="mono">ADMIN_PASSPHRASE</span> secret. Changing it here stores a new one that takes over until that secret is replaced.</p>
+        <h3 class="sub-h">Passkeys</h3>
+        <Passkeys />
+        <h3 class="sub-h">Passphrase</h3>
+        {#if auth.passkeys}
+          <p class="hint">The passphrase no longer signs in: it is kept for recovery. If you lose every passkey, replace the <span class="mono">ADMIN_PASSPHRASE</span> secret in Cloudflare (your Worker › Settings › Variables and Secrets, or <span class="mono">npx wrangler secret put ADMIN_PASSPHRASE</span>) and sign in with the new one. That works once, ends every session and API token, and tells the operators.</p>
+        {:else}
+          {#if status?.passphraseFromSettings === false}
+            <p class="hint">The passphrase currently comes from the <span class="mono">ADMIN_PASSPHRASE</span> secret. Changing it here stores a new one that takes over until that secret is replaced.</p>
+          {/if}
+          <PassphraseForm onSubmit={changePassphrase} note="Signs out every session, including this one, and stops every API token." />
         {/if}
-        <PassphraseForm onSubmit={changePassphrase} note="Signs out every session, including this one, and stops every API token." />
         <h3 class="sub-h">Read-only API tokens</h3>
         <ApiTokens />
         <h3 class="sub-h">Admin activity</h3>

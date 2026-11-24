@@ -212,7 +212,8 @@ describe('who gets all-account mail', () => {
     config.accounts = { acc1: { digestTo: ['client@example.com'] } };
     const warnings = await sendAlerts(env, NOW, config);
     expect(warnings).toContain(NO_OPERATOR);
-    expect(sent.map((m) => m.subject)).toEqual(['Ambersight · "Name of acc1": 1 Worker needs attention']);
+    // A client's mail never carries the account name from Cloudflare, which may be a person's.
+    expect(sent.map((m) => m.subject)).toEqual(['Ambersight · "Account acc1": 1 Worker needs attention']);
     expect(await sendSystemAlert(env, NOW, config, 'm', 'a')).toBe(false);
     await expect(sendTest(env, 'email', config)).rejects.toThrow('DIGEST_OPERATORS');
     expect(sent).toHaveLength(1);
@@ -966,10 +967,13 @@ describe('names from Cloudflare', () => {
   it('stays escaped and quoted in a client report', async () => {
     const { env } = setup();
     await env.DB.prepare(`INSERT INTO accounts (id, name, enabled, added_at) VALUES ('acc1', ?1, 1, 't')`).bind('Evil <script>alert(1)</script>').run();
+    await setSettings(env.DB, { config: JSON.stringify({ ...defaultConfig(), accounts: { acc1: { label: 'Shop & Co' } } }) }).run();
     await addFinding(env, 'a', { script: '*', message: row.message, evidence: row.evidence });
     const { html } = await reportHtml(env, 'acc1', 7, NOW);
     expect(html).not.toContain('<script');
     expect(html).not.toContain('<img');
-    expect(html).toContain('&quot;Evil &lt;script&gt;');
+    // The label from Settings, never the name from Cloudflare.
+    expect(html).toContain('Shop &amp; Co');
+    expect(html).not.toContain('Evil');
   });
 });

@@ -78,6 +78,7 @@ const TARGETS: readonly Target[] = [
   { cls: 'infrastructure', table: 'fleet_events', text: ['detail'], reportOnly: true },
   { cls: 'infrastructure', table: 'account_state', text: ['value'], where: `key = 'workers_subdomain'`, reportOnly: true },
   { cls: 'infrastructure', table: 'audit_events', text: ['resource_id'], context: AUDIT_CONTEXT, only: { resource_id: (row) => !isPersonRow(row) }, reportOnly: true },
+  { cls: 'passkeyNames', table: 'passkeys', text: ['name'] },
 ];
 
 export interface PersonMatcher {

@@ -185,13 +185,16 @@ export const isDashboardOnlyEvidence = (key: string) => DASHBOARD_ONLY_EVIDENCE.
 
 /**
  * A name chosen by someone in a Cloudflare account, as quoted data on one line. Quotes, line breaks,
- * and invisible or direction-changing characters inside it cannot make it look like our own text.
+ * and invisible or direction-changing characters inside it cannot make it look like our own text,
+ * and a URL inside it is broken ("https[:]//"), so mail clients and chat apps do not turn it into
+ * a link in a message that comes from the operators' own sender.
  */
 export function quoted(name: string, max = 100): string {
   const flat = name
     .replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ')
     .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, '')
     .replace(/"/g, "'")
+    .replace(/\b([a-z][a-z0-9+.-]*):\/\//gi, '$1[:]//')
     .trim();
   return `"${flat.length > max ? `${flat.slice(0, max - 1)}…` : flat}"`;
 }

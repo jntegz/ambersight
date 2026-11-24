@@ -65,8 +65,9 @@ export function adminEventStatements(db: D1Database, events: AdminEvent[], actor
         ).bind(at, e.action, target, actor, notice),
       ];
     }),
-    // The ids only grow, so this needs no count or scan of the table.
-    db.prepare('DELETE FROM admin_events WHERE id <= (SELECT MAX(id) FROM admin_events) - ?1').bind(MAX_ADMIN_EVENTS),
+    // The ids only grow, so this needs no count or scan of the table. A notice that has not gone out
+    // yet is kept: otherwise a burst of ordinary saves could push it out before the operators hear.
+    db.prepare(`DELETE FROM admin_events WHERE id <= (SELECT MAX(id) FROM admin_events) - ?1 AND notice IS NOT 'pending'`).bind(MAX_ADMIN_EVENTS),
     ...(events.some((e) => e.notice) ? [setSettings(db, { admin_notice_pending: '1', admin_notice_to: JSON.stringify(noticeTo) })] : []),
   ];
 }

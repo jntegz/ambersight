@@ -306,10 +306,13 @@ describe('person-linked data', () => {
   it('is seeded on every route that can carry it, so the walk above has something to find', async () => {
     const { e, session } = await install();
     const token = await mint(e, session, { accounts: 'all', people: true });
-    for (const route of ['overview', 'workers/api', 'findings?status=open', `changes?since=${since()}`, 'timeline?days=14', 'packages', 'report?days=7']) {
+    for (const route of ['overview', 'workers/api', 'findings?status=open', `changes?since=${since()}`, 'timeline?days=14', 'packages']) {
       const text = await (await asToken(e, token, withAccount(route, 'acc1'))).text();
       expect(PEOPLE.some((person) => text.includes(person)), route).toBe(true);
     }
+    // The client report is handed to clients, so it never carries it, whoever asks.
+    await expectNoPeople(await asToken(e, token, withAccount('report?days=7', 'acc1')), 'report with the grant');
+    await expectNoPeople(await asSession(e, session, withAccount('report?days=7', 'acc1')), 'report for a session');
   });
 
   it('leaves the operational facts in place', async () => {

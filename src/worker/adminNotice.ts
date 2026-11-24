@@ -47,7 +47,7 @@ const rowOf = (e: Pending): Row => ({
   script: '*',
   severity: 'warning',
   message: `${adminActionLabel(e.action)}${e.target ? `: ${e.target}` : ''}${e.count > 1 ? ` (${e.count} times)` : ''}. By ${e.actor} at ${e.at.slice(0, 16).replace('T', ' ')} UTC.`,
-  action: 'If this was not you, sign in, undo it, and change the passphrase in Settings › Security, which ends every session.',
+  action: 'If this was not you, sign in, undo it, and end every other session in Settings › Security. If a passkey was added that is not yours, remove it there; if you cannot sign in, replace the ADMIN_PASSPHRASE secret in Cloudflare, which ends every session and lets you recover.',
 });
 
 /** Sends what is waiting, at most once per cooldown. Never throws for a failed channel. */

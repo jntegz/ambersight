@@ -3,7 +3,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { AccountSummary } from '../../../../src/shared/types';
-  import { api, timeAgo, type TokenInfo } from '../../lib/api';
+  import { api, timeAgo, withProof, type TokenInfo } from '../../lib/api';
+  import { auth } from '../../lib/auth.svelte';
   import Icon from '../Icon.svelte';
 
   let tokens = $state<TokenInfo[]>([]);
@@ -32,7 +33,7 @@
     busy = true;
     error = '';
     try {
-      const r = await api.createToken(name, days, passphrase, allAccounts ? 'all' : picked, people);
+      const r = await withProof(auth.passkeys, passphrase, (proof) => api.createToken(name, days, proof, allAccounts ? 'all' : picked, people));
       created = r.token;
       tokens = [...tokens, r.info];
       name = '';
@@ -71,7 +72,7 @@
   <p class="hint">
     A token reads what the dashboard shows (overview, analytics, Worker pages, findings, timeline) as JSON, for Grafana, scripts or a status board.
     It cannot change anything, read settings or start a scan. Send it as <span class="mono">Authorization: Bearer amb_…</span>.
-    A token expires, and stops working when the passphrase changes. It reads only the accounts you choose for it.
+    A token expires, and stops working when the passphrase or the <span class="mono">ADMIN_PASSPHRASE</span> secret changes. It reads only the accounts you choose for it.
     The dashboard itself always shows every account: one shared passphrase cannot tell people apart.
     See <a href="https://github.com/jntegz/ambersight/blob/main/docs/api.md" target="_blank" rel="noopener noreferrer">docs/api.md</a>.
   </p>
@@ -91,7 +92,7 @@
           <span class="muted">{t.lastUsedAt ? `used ${timeAgo(t.lastUsedAt)}` : 'never used'}</span>
           <span class="muted scope">{reach(t)} · {t.people ? 'with person-linked data' : 'no person-linked data'}{t.olderScope ? ' · from before token scopes' : ''}</span>
           {#if t.invalidated}
-            <span class="stopped">Stopped: the passphrase changed</span>
+            <span class="stopped">Stopped: the passphrase or secret changed</span>
           {:else if t.expired}
             <span class="stopped">Expired</span>
           {:else if t.expiresAt}
@@ -128,8 +129,10 @@
         <option value={90}>90 days</option>
         <option value={365}>365 days</option>
       </select>
-      <input class="input" type="password" autocomplete="current-password" placeholder="Your passphrase" aria-label="Your passphrase, to confirm" bind:value={passphrase} />
-      <button type="submit" disabled={busy || !name.trim() || !passphrase || !chosen}><Icon name="plus" size={16} /> Create token</button>
+      {#if !auth.passkeys}
+        <input class="input" type="password" autocomplete="current-password" placeholder="Your passphrase" aria-label="Your passphrase, to confirm" bind:value={passphrase} />
+      {/if}
+      <button type="submit" disabled={busy || !name.trim() || (!auth.passkeys && !passphrase) || !chosen}><Icon name={auth.passkeys ? 'key' : 'plus'} size={16} /> {auth.passkeys ? 'Confirm with passkey and create' : 'Create token'}</button>
     </div>
   </form>
   {#if error}<p class="error-text" role="alert">{error}</p>{/if}

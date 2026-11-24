@@ -255,10 +255,24 @@ describe('the notice', () => {
   });
 
   it('still reaches an operator the same save turns into a client recipient', async () => {
+    const { env, sent } = setup({ DIGEST_TO: `${ME},other@example.com` });
+    const cookie = await session(env);
+    // Nothing else in the save reduces detection: taking an operator off alerts is enough for a notice.
+    expect((await save(env, cookie, (c) => { c.digest.groupRecipients = { g: [ME] }; })).status).toBe(200);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].to).toContain(ME);
+    expect(sent[0].text).toContain('1 operator address made a client or group recipient');
+  });
+
+  it('refuses a save that would leave no operator to hear about anything', async () => {
     const { env, sent } = setup({ DIGEST_TO: ME });
     const cookie = await session(env);
-    await save(env, cookie, (c) => { c.digest.groupRecipients = { g: [ME] }; });
-    expect(sent.map((m) => m.to)).toEqual([[ME]]);
+    const before = await env.DB.prepare(`SELECT value FROM settings WHERE key = 'config'`).first<string>('value');
+    const res = await save(env, cookie, (c) => { c.digest.groupRecipients = { g: [ME] }; });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/must stay an operator/);
+    expect(sent).toHaveLength(0);
+    expect(await env.DB.prepare(`SELECT value FROM settings WHERE key = 'config'`).first<string>('value')).toBe(before);
   });
 
   it('is sent once for a burst of changes, and the rest follow together', async () => {

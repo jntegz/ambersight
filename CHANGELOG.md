@@ -2,21 +2,40 @@
 
 All notable changes to Ambersight. Each version here has a matching [GitHub release](https://github.com/jntegz/ambersight/releases), which is what the update notice in the dashboard reads.
 
-## Unreleased
+## 1.1.5 (2026-11-24)
 
-Fixes Workers mapped to the wrong GitHub repository in the Packages check.
+Passkeys and e-mailed sign-in links, repository suggestions for the Packages check taken from Workers Builds, clearer client digests and reports, and security updates and improvements.
 
-**What was wrong.** **Settings › npm Packages** suggested a repository from the Worker's name, and **Auto-map** saved it. A Worker `shop-web` built from a monorepo was mapped to an unrelated repository `shop` because one name contained the other, and the Packages page then listed that project's dependencies. With a single readable repository, every Worker was matched to it.
+### Upgrading
 
-**If you used Auto-map, check your mappings.** Open **Settings › npm Packages**. Saved mappings are not changed by this release.
+- `npm run deploy` applies migration 0020. Nothing changes until you add a passkey: until then you sign in with the passphrase as before.
+- **Set a label for each client account** in **Settings › Accounts**. Client digests, group digests and the printable client report now name an account by that label, never by its name in Cloudflare (often `<email>'s Account`). Without a label it reads `Account <first 8 characters of the id>`.
+- **If you used Auto-map in Settings › npm Packages, check your mappings.** Saved mappings are not changed by this release.
+
+### Passkeys and e-mailed sign-in links
+
+- **Passkeys.** Add one in the setup wizard or **Settings › Security**. Ambersight checks them itself, with no new dependency: same origin and host, user verified (fingerprint, face or PIN), signature by the stored public key (Ed25519, ES256, RS256), one use per challenge, and a counter that may not go backwards.
+- **The first passkey turns passphrase sign-in off** and signs out every other session. The passphrase is kept for recovery: replace the `ADMIN_PASSPHRASE` secret and sign in with the new value under **Lost every passkey?**. That works once, ends every session and API token, and notifies the operators.
+- **E-mailed sign-in links**, when e-mail is set up: sent only to the operators, valid once for 10 minutes, and only in the browser that asked. A link session lasts a day.
+- **Sensitive steps need a passkey** while any exist: creating API tokens, removing a person's data, adding or removing passkeys, signing out other sessions. A link session can view and triage, but cannot add a way back in.
+- **Sign out every other session**, in **Settings › Security**. Removing a passkey ends the sessions it signed in on other devices.
+- The admin log records how each sign-in happened. Adding or removing a passkey, signing out other sessions and a recovery sign-in notify the operators.
+- Passkeys are tied to the host. One added on `workers.dev` does not work on a custom domain; add one on each address you use.
+
+### Packages: the repository comes from Cloudflare
+
+**Settings › npm Packages** used to suggest a repository from the Worker's name, and **Auto-map** saved it, so a Worker built from a monorepo could be mapped to an unrelated repository whose name was part of its own.
 
 - **The repository comes from Cloudflare when it can.** With the new optional *Workers CI Read* permission on `CF_API_TOKEN`, Settings reads the repository and root directory Workers Builds uses for each Worker and suggests that, with the lockfile format and the folder or monorepo workspace filled in. Add it under **My Profile › API Tokens › Edit › Account › Workers CI › Read**. It is not in the pre-filled token link and works only on a user-owned token. Without it everything else works as before.
 - **Wrong saved mappings are shown, not rewritten.** A mapping that points at a different repository or folder than Cloudflare builds from gets a warning on its row and a **Use Cloudflare's repository** button. Nothing is stored until you press **Save**.
-- **Name matches are guesses, and say so.** A repository is suggested by name only when it has the Worker's full name (ignoring case, punctuation and a suffix such as `-production`). Partial matches and the single-repository match are gone. Guesses are mapped by their own button, which lists every pair.
+- **Name matches are guesses, and say so.** A repository is suggested by name only when it has the Worker's full name (ignoring case, punctuation and a suffix such as `-production`). Guesses are mapped by their own button, which lists every pair.
 - **Add needs a repository.** An empty field no longer saves an invented `owner/<Worker name>`.
-- **What is read.** Two new reads, only when a signed-in session opens that Settings tab, never by a scan, and neither is stored: the Workers Builds connection from Cloudflare (provider, repository and root directory are kept; commands, token names and commit details are dropped), and from GitHub which lockfile names exist in the repository root and the build folder. No new host is contacted. See [SECURITY.md](SECURITY.md).
+- **What is read.** Two new reads, only when a signed-in session opens that Settings tab, never by a scan, and neither is stored: the Workers Builds connection from Cloudflare, and from GitHub which lockfile names exist in the repository root and the build folder. No new host is contacted. See [SECURITY.md](SECURITY.md).
 - **Docs.** `docs/checks.md` said the Workers Builds API needs an Edit permission; a Read level exists and is what this uses.
-- A test that read the current date against fixtures fixed to 2026-11-09 now sets the clock, as the others do.
+
+### Security
+
+- Security updates and improvements.
 
 ## 1.1.4 (2026-11-23)
 

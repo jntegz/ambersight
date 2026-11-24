@@ -31,11 +31,14 @@ It runs as **one Worker in your own Cloudflare account**. Every hour it reads yo
 - **On the Free plan**, the risk is an outage. Past 100,000 requests in a day, your Workers answer with Error 1027 until midnight UTC (only a route set to fail open skips its Worker instead), and the same goes for 1,000 KV writes, 5 million D1 rows read and the other daily limits. Ambersight warns you at 70% and again at 90% of each one, with the time you will hit it at today's pace.
 - **On Workers Paid**, the risk is the bill. Cloudflare's spending limit covers only requests and CPU time, and it is not an exact maximum: usage goes on while the block catches up, and when it lands, every Worker in the account stops. Until then, a loop, a retry storm or a crawler is billed for every hour it runs. Ambersight compares each Worker's last hour with its usual hour and alerts you at 5x, for requests, CPU time, subrequests and D1, KV, R2, Queues and Durable Object operations. It also catches Durable Object or Queue work that runs while nobody uses the app, and shows the estimated bill in dollars.
 
-> **New in 1.1.4**
-> - **Multi-lockfile & monorepo Packages**: track direct npm dependencies across `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock` (v1 & Berry) and `bun.lock`, including monorepo workspaces.
-> - **Vulnerability alerts (opt-in, OSV.dev)**: flag known CVEs/GHSAs in public npm dependencies with severity badges, advisory links and fixed versions — no API key required.
-> - **Redesigned Packages & Settings UX**: **By Worker** / **By Package** views, filter explanations, CSV/Markdown exports, a per-Worker Packages card, grouped navigation with live count badges, and a tabbed Settings page with a GitHub repo picker, one-click **Auto-map**, and a compact table built for 50+ Workers.
-> - **Updated Cloudflare limits & security updates**: aligned Paid plan limits (Cron Triggers, variables/secrets, Cron CPU) and included security updates. See the [changelog](CHANGELOG.md#114-2026-11-23).
+> **New in 1.1.5**
+> - **Passkeys**: sign in with a fingerprint, face or PIN. The first passkey turns passphrase sign-in off; the passphrase stays for recovery.
+> - **E-mailed sign-in links**: a one-time link to the operators when no passkey is at hand.
+> - **Packages repositories from Workers Builds**: Settings suggests the repository and folder Cloudflare builds each Worker from.
+> - **Clearer client mail**: client digests and reports name each account by its label from Settings. Set one for each client account.
+> - **Security updates and improvements.** See the [changelog](CHANGELOG.md#115-2026-11-24).
+>
+> **New in 1.1.4:** multi-lockfile and monorepo Packages, opt-in OSV.dev vulnerability alerts, and a tabbed Settings page. See the [changelog](CHANGELOG.md#114-2026-11-23).
 >
 > **New in 1.1.3: a security and privacy release.** Tokens limited to chosen accounts, safer sign-in, client digests that hold only that client's data, and tools to stop recording or remove people's names. Read the [upgrade notes](CHANGELOG.md#113-2026-11-18) before you deploy.
 
@@ -189,7 +192,7 @@ Do not add any **Edit** permission. If the token can see several accounts, the s
    | Field | What to enter |
    | --- | --- |
    | `CF_API_TOKEN` | The read-only token from step 1 |
-   | `ADMIN_PASSPHRASE` | A passphrase of at least 12 characters. You sign in with it, so put it in your password manager. |
+   | `ADMIN_PASSPHRASE` | A passphrase of at least 12 characters. You sign in with it the first time; once you add a passkey it is only for recovery. Put it in your password manager. |
 
 4. Click **Deploy**. Cloudflare copies the repository into your account, creates the D1 database, applies the migrations and deploys the Worker.
 5. When it finishes, open the link on the deploy page (`https://ambersight.<your-subdomain>.workers.dev`), sign in, and follow the three setup steps. The first scan starts on its own and then runs every hour.
@@ -249,7 +252,7 @@ Protect the branch you deploy from: require a review and block force pushes (on 
 
 ## Lock it down with Cloudflare Access
 
-The dashboard has its own passphrase login, with hashed sessions, strict cookies and a lockout after wrong attempts ([details in SECURITY.md](SECURITY.md)). That is a good lock. **Cloudflare Access is a better door**: nobody reaches the sign-in page at all unless they first prove who they are with your e-mail, Google, GitHub or another identity provider. It also stops strangers from triggering the sign-in pause, which can keep a browser that has never signed in out for up to 15 minutes. Zero Trust is free for small teams.
+The dashboard has its own sign-in: passkeys, with an e-mailed link to the operators as the fallback and the passphrase kept for recovery, plus hashed sessions, strict cookies and a lockout after wrong passphrases ([details in SECURITY.md](SECURITY.md)). That is a good lock. **Cloudflare Access is a better door**: nobody reaches the sign-in page at all unless they first prove who they are with your e-mail, Google, GitHub or another identity provider. It also stops strangers from triggering the sign-in pause, which can keep a browser that has never signed in out for up to 15 minutes. Zero Trust is free for small teams.
 
 Use both. It takes two minutes.
 
@@ -262,7 +265,7 @@ This covers every way to reach Ambersight: the `workers.dev` address, custom dom
 3. Choose **All traffic** (not only previews) and click **Apply Access**.
 4. Edit the policy so it allows only you: for example **Include › Emails ›** `you@example.com`. With the one-time PIN login method, Cloudflare e-mails you a code. No extra setup is needed.
 
-Open your dashboard URL in a private window. You should see the Cloudflare Access login first, then the Ambersight passphrase.
+Open your dashboard URL in a private window. You should see the Cloudflare Access login first, then the Ambersight sign-in.
 
 ### Option 2: Custom domain with a self-hosted application
 
@@ -381,6 +384,14 @@ This also works if you changed the passphrase in **Settings › Security**: the 
 ```bash
 npx wrangler d1 execute ambersight --remote --command "DELETE FROM settings WHERE key IN ('passphrase_hash', 'passphrase_binding')"
 ```
+</details>
+
+<details>
+<summary><b>I lost my passkeys.</b></summary>
+
+Sign in with an e-mailed link if e-mail is set up: it can view everything, but adding a passkey from it needs an existing one. Otherwise replace the secret: `npx wrangler secret put ADMIN_PASSPHRASE` with a new value, then on the sign-in page open **Lost every passkey?** and sign in with it. That recovery works once, ends every session and API token, and tells the operators. For the next 10 minutes **Settings › Security** lets you add a passkey and remove the lost ones without a passkey check.
+
+If the stored Settings passphrase was never bound to the secret (see above), delete it with the `DELETE` command above instead. As a last resort, `npx wrangler d1 execute ambersight --remote --command "DELETE FROM passkeys"` turns passphrase sign-in back on.
 </details>
 
 <details>

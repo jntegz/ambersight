@@ -205,6 +205,15 @@ describe('the preview', () => {
     expect((await one<{ value: string }>(env, `SELECT value FROM account_state WHERE key = 'workers_subdomain'`))!.value).toBe('Ann');
   });
 
+  it('counts passkey names, which may name a person', async () => {
+    const env = newEnv();
+    const cookie = await session(env);
+    await env.DB.prepare(`INSERT INTO passkeys (id, public_key, alg, name, created_at) VALUES ('k1', '{}', -7, ?1, 'x'), ('k2', '{}', -7, 'Office YubiKey', 'x')`)
+      .bind("Ann's MacBook").run();
+    const { counts } = await preview(env, cookie, 'Ann');
+    expect(counts.passkeyNames).toBe(1);
+  });
+
   it('finds a name written in another script, in its exact form', async () => {
     const env = newEnv();
     const cookie = await session(env);

@@ -12,7 +12,13 @@ import { adminEventStatements, buildAdminLog, configEvents, handleOf, type Admin
 import { confirmationValid, CURSOR_REFUSED, cursorValid, personRequest, previewPersonData, removePersonData, type PersonRequest, type PersonStepKind } from './personData';
 import { deliverAdminNotices, noticeAudience } from './adminNotice';
 import { attributionStep, eraseNow } from './attribution';
-import { attemptFailed, attemptKey, attemptSucceeded, checkPassphrase, COOKIE, credentialGeneration, ensureCredSalt, hasSession, login, logout, passphraseChangeStatements, readCookie, reserveAttempt, turnstileOn, verifyTurnstile } from './auth';
+import {
+  attemptFailed, attemptKey, attemptSucceeded, checkPassphrase, COOKIE, credentialGeneration, ensureCredSalt, hasPasskeys, isFresh, login, logout,
+  passphraseChangeStatements, readCookie, readSession, reserveAttempt, turnstileOn, verifyTurnstile, type SessionInfo,
+} from './auth';
+import { addPasskey, assertionOptions, confirmWithPasskey, listPasskeys, passkeySignIn, registrationOptions, removePasskey } from './passkeys';
+import { CLEAR_LINK_COOKIE, confirmLink, requestLink } from './signinLink';
+import { relyingPartyOf } from './webauthn';
 import { buildsRefused, CfClient } from './cf';
 import { claimCooldown, configFrom, getSettings, listAccounts, pinnedAccounts, recordUsage, setSettings, upsertAccount, type AccountRow } from './db';
 import type { Env, ScanMessage } from './env';
@@ -23,7 +29,7 @@ import { buildChangesSince, buildFindingHistory, buildFindingsList } from './fin
 import { hashText } from './scan';
 import { accountChoice, authorizeToken, createToken, DEFAULT_TOKEN_DAYS, listTokens, revokeToken, settleOlderTokens, tokenMayRead, type TokenGrant } from './tokens';
 import { plainFinding, plainPackages, plainTimeline, plainWorker, tokenAccounts, tokenOverview, tokenSelfCost } from './tokenView';
-import { sendTest, watchedAccountIds } from './notify';
+import { emailReady, operatorAddresses, sendTest, watchedAccountIds } from './notify';
 import { buildAccounts, buildOverview, buildSelfCost, buildTimeline, pickAccount } from './overview';
 import { buildPackages, layoutFor, listGithubRepos, lockfilesIn, LockfileError, REPO_NOT_ALLOWED, repoAllowed, repoAllowlist } from './packages';
 import { buildResources } from './resources';
@@ -33,7 +39,7 @@ import { handleQueueMessage, scanAccount, scheduledRun } from './scheduler';
 import { setupStatus } from './setup';
 import { VERSION } from './version';
 
-type AppEnv = { Bindings: Env; Variables: { viaToken?: boolean; grant?: TokenGrant } };
+type AppEnv = { Bindings: Env; Variables: { viaToken?: boolean; grant?: TokenGrant; session?: SessionInfo } };
 
 const app = new Hono<AppEnv>();
 
@@ -62,6 +68,8 @@ app.use('/api/*', async (c, next) => {
   c.header('X-Content-Type-Options', 'nosniff');
   c.header('Referrer-Policy', 'no-referrer');
   c.header('X-Frame-Options', 'DENY');
+  // Browsers ignore it over plain HTTP (wrangler dev); on a custom domain it stops SSL stripping.
+  c.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   // The client report sets its own policy, which also forbids framing.
   if (!c.res.headers.get('Content-Security-Policy')) c.header('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
   const now = Date.now();
@@ -99,24 +107,70 @@ app.use('/api/*', csrf());
 
 app.get('/api/health', (c) => c.json({ ok: true, version: VERSION }));
 
-app.get('/api/session', async (c) =>
-  c.json({
-    authenticated: await hasSession(c.env, c.req.header('Cookie') ?? null),
+/** The relying party for passkeys: this request's own host and origin. */
+const rpOf = (c: Context<AppEnv>) => relyingPartyOf(c.req.url);
+const clientIp = (c: Context<AppEnv>) => c.req.header('CF-Connecting-IP') ?? 'unknown';
+
+app.get('/api/session', async (c) => {
+  const session = await readSession(c.env, c.req.header('Cookie') ?? null);
+  return c.json({
+    authenticated: Boolean(session),
     // Public by design: the site key is meant to be shown to every visitor of the sign-in page.
     turnstileSiteKey: turnstileOn(c.env) ? c.env.TURNSTILE_SITE_KEY : null,
-  }),
-);
+    // Which ways in to offer. Says that passkeys are in use, never which ones or whose.
+    signIn: { passkeys: await hasPasskeys(c.env.DB), link: emailReady(c.env) },
+    ...(session ? { method: session.method, fresh: isFresh(session) } : {}),
+  });
+});
 
 app.post('/api/login', async (c) => {
   const body = await c.req.json<{ passphrase?: unknown; turnstile?: unknown }>().catch(() => ({ passphrase: undefined, turnstile: undefined }));
   if (typeof body.passphrase !== 'string' || body.passphrase.length > 512) return c.json({ error: 'Passphrase required.' }, 400);
-  const ip = c.req.header('CF-Connecting-IP') ?? 'unknown';
+  const ip = clientIp(c);
   if (!(await verifyTurnstile(c.env, body.turnstile, ip))) return c.json({ error: 'The browser check did not pass. Try again.' }, 400);
   // Reaching this line with Turnstile configured means the check above passed.
-  const result = await login(c.env, body.passphrase, ip, Date.now(), { turnstilePassed: turnstileOn(c.env), cookieHeader: c.req.header('Cookie') ?? null });
-  if (!result.ok) return c.json({ error: result.error }, result.status);
+  const result = await login(c.env, body.passphrase, ip, Date.now(), {
+    turnstilePassed: turnstileOn(c.env),
+    cookieHeader: c.req.header('Cookie') ?? null,
+    noticeTo: async () => {
+      const settings = await getSettings(c.env.DB);
+      return noticeAudience(c.env, [configFrom(settings)], settings.admin_notice_to, await watchedAccountIds(c.env));
+    },
+  });
+  if (!result.ok) return c.json({ error: result.error, ...(result.status === 403 ? { code: 'passphrase_locked' } : {}) }, result.status);
   c.header('Set-Cookie', result.cookie);
   if (result.deviceCookie) c.header('Set-Cookie', result.deviceCookie, { append: true });
+  if (result.recovery) await sendNotices(c, [{ action: 'signin', target: '', notice: true }]);
+  return c.json({ ok: true, ...(result.recovery ? { recovery: true } : {}) });
+});
+
+// ---- Passkey sign-in. Asking for a challenge writes nothing; see passkeys.ts.
+app.post('/api/login/passkey/options', async (c) => c.json(await assertionOptions(c.env.DB, rpOf(c), 'signin')));
+app.post('/api/login/passkey', async (c) => {
+  const body = await c.req.json<{ response?: unknown }>().catch(() => ({}) as { response?: unknown });
+  const result = await passkeySignIn(c.env, body.response, rpOf(c));
+  if (!result.ok) return c.json({ error: result.error }, result.status);
+  c.header('Set-Cookie', result.cookie);
+  return c.json({ ok: true });
+});
+
+// ---- Sign-in by e-mailed link, to the operators only; see signinLink.ts.
+app.post('/api/login/link', async (c) => {
+  const body = await c.req.json<{ turnstile?: unknown }>().catch(() => ({}) as { turnstile?: unknown });
+  const ip = clientIp(c);
+  if (!(await verifyTurnstile(c.env, body.turnstile, ip))) return c.json({ error: 'The browser check did not pass. Try again.' }, 400);
+  const result = await requestLink(c.env, new URL(c.req.url).origin, ip);
+  if (!result.ok) return c.json({ error: result.error }, result.status);
+  c.header('Set-Cookie', result.cookie);
+  return c.json({ ok: true });
+});
+app.post('/api/login/link/confirm', async (c) => {
+  const body = await c.req.json<{ token?: unknown }>().catch(() => ({}) as { token?: unknown });
+  const result = await confirmLink(c.env, body.token, c.req.header('Cookie') ?? null);
+  // Whatever happened, the link is spent: the browser's marker for it goes too.
+  c.header('Set-Cookie', CLEAR_LINK_COOKIE);
+  if (!result.ok) return c.json({ error: result.error }, result.status);
+  c.header('Set-Cookie', result.cookie, { append: true });
   return c.json({ ok: true });
 });
 
@@ -127,7 +181,11 @@ app.post('/api/logout', async (c) => {
 
 // Everything below requires a session, or a read-only API token for the GET routes it may read.
 app.use('/api/*', async (c, next) => {
-  if (await hasSession(c.env, c.req.header('Cookie') ?? null)) return next();
+  const session = await readSession(c.env, c.req.header('Cookie') ?? null);
+  if (session) {
+    c.set('session', session);
+    return next();
+  }
   const bearer = c.req.header('Authorization');
   if (bearer) {
     const grant = tokenMayRead(c.req.method, c.req.path) ? await authorizeToken(c.env, bearer) : null;
@@ -292,10 +350,30 @@ app.get('/api/packages', async (c) => {
   const account = await accountOf(c, c.req.query('account'));
   return peopleView(c, 'packages', account, async () => buildPackages(c.env.DB, account, configFrom(await getSettings(c.env.DB)), Boolean(c.env.GITHUB_TOKEN), repoAllowlist(c.env.GITHUB_REPO_ALLOWLIST)), plainPackages);
 });
+/**
+ * Answers of routes that call Cloudflare or GitHub on every request, kept for a minute in this
+ * isolate, so reloading a page (or a script doing so) does not spend CF_API_TOKEN's or
+ * GITHUB_TOKEN's rate limit, which the scheduled scans need.
+ */
+const UPSTREAM_TTL_MS = 60_000;
+const upstreamAnswers = new Map<string, { until: number; value: Promise<unknown> }>();
+function upstreamCached<T>(key: string, build: () => Promise<T>, now = Date.now()): Promise<T> {
+  const hit = upstreamAnswers.get(key);
+  if (hit && hit.until > now) return hit.value as Promise<T>;
+  if (upstreamAnswers.size > 50) for (const [k, v] of upstreamAnswers) if (v.until <= now) upstreamAnswers.delete(k);
+  const value = build();
+  upstreamAnswers.set(key, { until: now + UPSTREAM_TTL_MS, value });
+  value.catch(() => upstreamAnswers.delete(key));
+  return value;
+}
+/** For tests: forget the cached upstream answers. */
+export const clearUpstreamAnswers = () => upstreamAnswers.clear();
+
 app.get('/api/github-repos', async (c) => {
   if (c.get('viaToken')) return c.json({ error: 'Dashboard session required.' }, 403);
   if (!c.env.GITHUB_TOKEN) return c.json({ repos: [], owner: null });
-  const result = await listGithubRepos(c.env.GITHUB_TOKEN, repoAllowlist(c.env.GITHUB_REPO_ALLOWLIST)).catch(() => ({
+  const allowlist = repoAllowlist(c.env.GITHUB_REPO_ALLOWLIST);
+  const result = await upstreamCached(`github-repos|${hashText(c.env.GITHUB_TOKEN)}|${allowlist?.join(',') ?? '*'}`, () => listGithubRepos(c.env.GITHUB_TOKEN!, allowlist)).catch(() => ({
     repos: [] as string[],
     owner: null,
     error: 'Could not reach GitHub to list repositories.',
@@ -313,9 +391,12 @@ app.get('/api/build-sources', async (c) => {
   const cf = new CfClient(c.env.CF_API_TOKEN, account);
   const none = (reason: string): BuildSourcesView => ({ available: false, reason, sources: {}, unchecked: 0 });
   try {
-    const tags = new Map((await cf.listScripts()).filter((s) => s.tag).map((s) => [s.tag!, s.id]));
-    const { sources, unchecked } = await cf.buildSources(tags);
-    return c.json({ available: true, sources: Object.fromEntries(sources), unchecked: unchecked.length } satisfies BuildSourcesView);
+    const view = await upstreamCached(`build-sources|${hashText(c.env.CF_API_TOKEN)}|${account}`, async (): Promise<BuildSourcesView> => {
+      const tags = new Map((await cf.listScripts()).filter((s) => s.tag).map((s) => [s.tag!, s.id]));
+      const { sources, unchecked } = await cf.buildSources(tags);
+      return { available: true, sources: Object.fromEntries(sources), unchecked: unchecked.length };
+    });
+    return c.json(view);
   } catch (e) {
     // Fixed sentences: Cloudflare's own error text is not passed on.
     if (!buildsRefused(e)) return c.json(none('Cloudflare did not answer.'));
@@ -333,10 +414,14 @@ app.get('/api/repo-layout', async (c) => {
   const none = (error: string): RepoLayout => ({ found: false, error });
   if (!c.env.GITHUB_TOKEN) return c.json(none('GITHUB_TOKEN is not set.'));
   if (!repoAllowed(repoAllowlist(c.env.GITHUB_REPO_ALLOWLIST), repo)) return c.json(none(REPO_NOT_ALLOWED));
+  const token = c.env.GITHUB_TOKEN;
   try {
-    const top = await lockfilesIn(c.env.GITHUB_TOKEN, repo, '');
-    if (!top) return c.json(none(`GITHUB_TOKEN cannot read ${repo}.`));
-    return c.json(layoutFor(top, dir ? await lockfilesIn(c.env.GITHUB_TOKEN, repo, dir) : null, dir));
+    const layout = await upstreamCached(`repo-layout|${hashText(token)}|${repo}|${dir}`, async (): Promise<RepoLayout> => {
+      const top = await lockfilesIn(token, repo, '');
+      if (!top) return none(`GITHUB_TOKEN cannot read ${repo}.`);
+      return layoutFor(top, dir ? await lockfilesIn(token, repo, dir) : null, dir);
+    });
+    return c.json(layout);
   } catch (e) {
     return c.json(none(e instanceof LockfileError ? e.message : 'Could not reach GitHub.'));
   }
@@ -360,6 +445,16 @@ app.get('/api/workers/:name', async (c) => {
   const build = () => buildWorkerDetail(c.env, account || undefined, name, range);
   const known = await c.env.DB.prepare('SELECT 1 AS ok FROM workers WHERE account = ?1 AND name = ?2').bind(account, name).first('ok');
   if (known) return peopleView(c, `worker-${range}-${name}`, account, build, plainWorker);
+  // A Worker that is gone keeps its history for a while. For a token, any other name answers at once,
+  // without the uncached build: it would cost a dozen queries per request, and its audit-log lookup
+  // by name could confirm an e-mail address or member id guessed as a "Worker name".
+  if (c.get('viaToken')) {
+    const history = await c.env.DB.prepare(
+      `SELECT 1 AS ok FROM deployments WHERE account = ?1 AND script = ?2
+       UNION ALL SELECT 1 FROM findings WHERE account = ?1 AND script = ?2 LIMIT 1`,
+    ).bind(account, name).first('ok');
+    if (!history) return c.json({ error: 'Unknown Worker.' }, 404);
+  }
   const detail = await build();
   return c.json(withoutPeople(c) ? plainWorker(detail) : detail);
 });
@@ -423,10 +518,14 @@ app.post('/api/scan', async (c) => {
   return 'error' in r ? c.json({ error: `The scan failed: ${r.error}` }, 502) : c.json(r);
 });
 
-/** Client report for one account: printable HTML. */
+/** Client report for one account: printable HTML. Kept in view_cache like the views it is built from. */
 app.get('/api/report', async (c) => {
   const days = c.req.query('days') === '30' ? 30 : 7;
-  const { html } = await reportHtml(c.env, await accountOf(c, c.req.query('account')), days, undefined, withoutPeople(c));
+  const account = await accountOf(c, c.req.query('account'));
+  // One copy for everyone: the report never holds person-linked text (report.ts).
+  const res = await cachedJson(c, `client-report-${days}`, account, async () => ({ html: (await reportHtml(c.env, account, days)).html }));
+  if (res.status === 304) return res;
+  const { html } = (await res.json()) as { html: string };
   // The report is static HTML with inline styles: no scripts at all.
   return c.html(html, 200, { 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" });
 });
@@ -488,21 +587,39 @@ function statusChange(db: D1Database, ids: string[], to: 'acknowledged' | 'snooz
 
 const snoozeUntil = (days: unknown) => new Date(Date.now() + ([7, 30, 90].includes(Number(days)) ? Number(days) : 7) * 86_400_000).toISOString();
 
-/** Log entry for findings taken out of "Needs attention" by a person. */
-function quietedEvents(to: 'acknowledged' | 'snoozed' | 'open', changed: number): AdminEvent[] {
+/** How far back findings taken out of "Needs attention" add up towards BULK_NOTICE_AT. */
+const BULK_NOTICE_WINDOW_MS = 10 * 60_000;
+
+/**
+ * Log entry for findings taken out of "Needs attention" by a person. The operators hear about it
+ * when this request, or the ones in the last few minutes together, quieted BULK_NOTICE_AT or more
+ * findings in the same accounts, so asking in small batches does not stay unnoticed.
+ */
+async function quietedEvents(db: D1Database, ids: string[], to: 'acknowledged' | 'snoozed' | 'open', changed: number): Promise<AdminEvent[]> {
   if (to === 'open' || !changed) return [];
-  return [{ action: `findings.${to}`, target: `${changed} ${changed === 1 ? 'finding' : 'findings'}`, notice: changed >= BULK_NOTICE_AT }];
+  let notice = changed >= BULK_NOTICE_AT;
+  if (!notice) {
+    const recent = await db.prepare(
+      `SELECT COUNT(*) AS n FROM finding_events
+       WHERE account IN (SELECT DISTINCT account FROM findings WHERE id IN (SELECT value FROM json_each(?1)))
+         AND at >= ?2 AND kind IN ('acknowledged', 'snoozed')`,
+    ).bind(JSON.stringify(ids), new Date(Date.now() - BULK_NOTICE_WINDOW_MS).toISOString()).first<number>('n');
+    notice = (recent ?? 0) >= BULK_NOTICE_AT;
+  }
+  return [{ action: `findings.${to}`, target: `${changed} ${changed === 1 ? 'finding' : 'findings'}`, notice }];
 }
 
 app.post('/api/findings/:id/acknowledge', async (c) => {
-  await logAfter(c, quietedEvents('acknowledged', await statusChange(c.env.DB, [c.req.param('id')], 'acknowledged', null)));
+  const ids = [c.req.param('id')];
+  await logAfter(c, await quietedEvents(c.env.DB, ids, 'acknowledged', await statusChange(c.env.DB, ids, 'acknowledged', null)));
   return c.json({ ok: true });
 });
 
 app.post('/api/findings/:id/snooze', async (c) => {
   const { days } = await c.req.json<{ days?: number }>().catch(() => ({ days: 7 }));
   const until = snoozeUntil(days);
-  await logAfter(c, quietedEvents('snoozed', await statusChange(c.env.DB, [c.req.param('id')], 'snoozed', until)));
+  const ids = [c.req.param('id')];
+  await logAfter(c, await quietedEvents(c.env.DB, ids, 'snoozed', await statusChange(c.env.DB, ids, 'snoozed', until)));
   return c.json({ ok: true, until });
 });
 
@@ -520,7 +637,7 @@ app.post('/api/findings/bulk', async (c) => {
   const to = Object.hasOwn(actions, body?.action ?? '') ? actions[body!.action!] : undefined;
   if (!ids.length || !to) return c.json({ error: 'Send ids and an action.' }, 400);
   const changed = await statusChange(c.env.DB, ids, to, to === 'snoozed' ? snoozeUntil(body!.days) : null);
-  await logAfter(c, quietedEvents(to, changed));
+  await logAfter(c, await quietedEvents(c.env.DB, ids, to, changed));
   return c.json({ ok: true, changed });
 });
 
@@ -529,7 +646,7 @@ app.get('/api/findings', async (c) => {
   const account = await accountOf(c, c.req.query('account'));
   const status = c.req.query('status') ?? 'open';
   if (!['open', 'acknowledged', 'snoozed', 'resolved'].includes(status)) return c.json({ error: 'Unknown status.' }, 400);
-  const list = await buildFindingsList(c.env.DB, account, status as 'open');
+  const list = await buildFindingsList(c.env.DB, account, status as 'open', configFrom(await getSettings(c.env.DB)));
   return c.json(withoutPeople(c) ? list.map(plainFinding) : list);
 });
 
@@ -540,7 +657,7 @@ app.get('/api/changes', async (c) => {
   const t = Date.parse(since);
   if (!Number.isFinite(t)) return c.json({ error: 'since must be an ISO time.' }, 400);
   // At most 30 days back; older visits read as "a while ago".
-  return c.json(await buildChangesSince(c.env.DB, account, new Date(Math.max(t, Date.now() - 30 * 86_400_000)).toISOString(), withoutPeople(c)));
+  return c.json(await buildChangesSince(c.env.DB, account, new Date(Math.max(t, Date.now() - 30 * 86_400_000)).toISOString(), configFrom(await getSettings(c.env.DB)), withoutPeople(c)));
 });
 
 /** One finding's history: every open, resolve, acknowledge, snooze and alert. A token reads only its own accounts' findings. */
@@ -584,8 +701,9 @@ app.post('/api/setup/complete', async (c) => {
   // weak deploy-time passphrase cannot stay behind a finished setup.
   const replacement = replacementIn(body.replacePassphrase);
   if (body.replacePassphrase !== undefined && !replacement) return c.json({ error: 'Current and new passphrase required.' }, 400);
+  if (replacement && status.passkeys > 0) return c.json({ error: PASSPHRASE_RECOVERY_ONLY }, 409);
   if (firstSetup && status.passphraseWeak && !replacement) {
-    return c.json({ error: 'The ADMIN_PASSPHRASE secret is too easy to guess. Choose a stronger passphrase in the "Protect the dashboard" step.' }, 400);
+    return c.json({ error: 'The ADMIN_PASSPHRASE secret is too easy to guess. Add a passkey, or choose a stronger passphrase, in the "Protect the dashboard" step.' }, 400);
   }
   if (replacement) {
     const problem = passphraseProblem(replacement.next);
@@ -638,9 +756,24 @@ app.put('/api/config', async (c) => {
     const config = parseConfig(body);
     const settings = await getSettings(c.env.DB);
     const before = configFrom(settings);
+    // Naming every operator as a client or group recipient would leave nobody to get critical
+    // alerts, security notices and sign-in links, with only one notice about the save itself.
+    // Naming some of them is allowed, but those operators hear about it: it takes them off alerts.
+    let demoted = 0;
+    if (emailReady(c.env)) {
+      const watched = await watchedAccountIds(c.env);
+      const [opsBefore, opsAfter] = [operatorAddresses(c.env, before, watched), operatorAddresses(c.env, config, watched)];
+      if (opsBefore.length && !opsAfter.length) {
+        return c.json({ error: 'At least one address in DIGEST_TO must stay an operator (not a client or group digest recipient), or list it in DIGEST_OPERATORS.' }, 400);
+      }
+      demoted = opsBefore.filter((a) => !opsAfter.includes(a)).length;
+    }
     const attribution = await attributionStep(c.env.DB, body, before, config, settings, new Date());
     if (attribution.refused) return c.json(attribution.refused, 409);
-    const events = configEvents(before, config);
+    const events: AdminEvent[] = [
+      ...configEvents(before, config),
+      ...(demoted ? [{ action: 'config.reduced', target: `${demoted} operator ${demoted === 1 ? 'address' : 'addresses'} made a client or group recipient, so no longer getting alerts, security notices or sign-in links`, notice: true }] : []),
+    ];
     await c.env.DB.batch([setSettings(c.env.DB, { config: JSON.stringify(config) }), ...attribution.statements, bumpRevision(c.env.DB), ...(await adminLog(c, events, [before, config]))]);
     await sendNotices(c, events);
     // Erased after the save, so a scan starting now already leaves the names out.
@@ -668,10 +801,44 @@ app.post('/api/notify/test', async (c) => {
 
 // ---- Read-only API tokens (managed with a session only: the token routes are not readable by tokens).
 
+/** Asked for when a step needs a passkey answer, or the passphrase, and the request had none. */
+const PASSKEY_REQUIRED = 'passkey_required';
+const PASSPHRASE_REQUIRED = 'passphrase_required';
+const PASSPHRASE_RECOVERY_ONLY = 'With passkeys, the passphrase is only for recovery and cannot be changed here. To change it, replace the ADMIN_PASSPHRASE secret in Cloudflare; the next sign-in with it is a recovery.';
+
+/** What a request may show to confirm a sensitive step. */
+type Proof = { passphrase?: unknown; passkey?: unknown };
+
 /**
- * Asks a signed-in person for the passphrase again, before something a stolen session should not
- * do alone. Limited per client like sign-in, but outside the install-wide pause: that pause must
- * not stop someone with a session from changing the passphrase during an attack.
+ * Asks a signed-in person to show their credential again, before something a stolen session
+ * should not do alone. While passkeys exist that is a passkey answer made for this session, and
+ * nothing else counts: not the passphrase, and not the e-mailed link a session may have signed in
+ * with, so whoever reads the operators' mail cannot also add a way back in. Without passkeys it is
+ * the passphrase. `fresh` lets a session that signed in a few minutes ago skip the check: for
+ * adding the first passkey right after signing in with the passphrase ('passphrase', which a
+ * recovery sign-in also is), or for a recovery sign-in replacing lost passkeys ('recovery'). A
+ * session from an e-mailed link never skips it: reading the operators' mail must not be enough to
+ * add a passkey, which would also turn the passphrase off and sign everyone else out.
+ */
+async function confirmIdentity(c: Context<AppEnv>, proof: Proof, opts: { fresh?: 'passphrase' | 'recovery'; ask?: string } = {}): Promise<Response | null> {
+  const session = c.get('session');
+  if (!session || c.get('viaToken')) return c.json({ error: 'This needs a signed-in dashboard session.' }, 403);
+  const skips = opts.fresh === 'passphrase' ? session.method === 'passphrase' || session.method === 'recovery' : opts.fresh === 'recovery' && session.method === 'recovery';
+  if (isFresh(session) && skips) return null;
+  if (await hasPasskeys(c.env.DB)) {
+    if (proof.passkey === undefined || proof.passkey === null) return c.json({ error: 'Confirm with one of your passkeys.', code: PASSKEY_REQUIRED }, 400);
+    const result = await confirmWithPasskey(c.env, proof.passkey, rpOf(c), session);
+    return result.ok ? null : c.json({ error: result.error, code: PASSKEY_REQUIRED }, result.status);
+  }
+  if (typeof proof.passphrase !== 'string' || !proof.passphrase || proof.passphrase.length > MAX_PASSPHRASE) {
+    return c.json({ error: opts.ask ?? 'Enter your passphrase to confirm.', code: PASSPHRASE_REQUIRED }, 400);
+  }
+  return reauthenticate(c, proof.passphrase);
+}
+
+/**
+ * Checks the passphrase again. Limited per client like sign-in, but outside the install-wide pause:
+ * that pause must not stop someone with a session from changing the passphrase during an attack.
  */
 async function reauthenticate(c: Context<AppEnv>, passphrase: string): Promise<Response | null> {
   const key = `passphrase:${attemptKey(c.req.header('CF-Connecting-IP') ?? 'unknown')}`;
@@ -690,9 +857,8 @@ app.get('/api/admin-events', async (c) => c.json(await buildAdminLog(c.env.DB)))
 
 app.get('/api/tokens', async (c) => c.json(await listTokens(c.env)));
 app.post('/api/tokens', async (c) => {
-  const body = await c.req.json<{ name?: unknown; days?: unknown; passphrase?: unknown; accounts?: unknown; people?: unknown }>().catch(() => ({}) as Record<string, unknown>);
-  if (typeof body.passphrase !== 'string' || !body.passphrase || body.passphrase.length > MAX_PASSPHRASE) return c.json({ error: 'Enter your passphrase to create a token.' }, 400);
-  const refused = await reauthenticate(c, body.passphrase);
+  const body = await c.req.json<{ name?: unknown; days?: unknown; passkey?: unknown; passphrase?: unknown; accounts?: unknown; people?: unknown }>().catch(() => ({}) as Record<string, unknown>);
+  const refused = await confirmIdentity(c, body, { ask: 'Enter your passphrase to create a token.' });
   if (refused) return refused;
   const generation = await credentialGeneration(c.env, await ensureCredSalt(c.env.DB, await getSettings(c.env.DB)));
   if (!generation) return c.json({ error: 'ADMIN_PASSPHRASE secret is not set.' }, 500);
@@ -717,6 +883,8 @@ app.delete('/api/tokens/:id', async (c) => {
 app.post('/api/passphrase', async (c) => {
   const body = await c.req.json<{ current?: unknown; next?: unknown }>().catch(() => ({}) as Record<string, unknown>);
   if (typeof body.current !== 'string' || typeof body.next !== 'string') return c.json({ error: 'Current and new passphrase required.' }, 400);
+  // A passphrase stored here would change the credential generation, and so open passphrase sign-in again.
+  if (await hasPasskeys(c.env.DB)) return c.json({ error: PASSPHRASE_RECOVERY_ONLY }, 409);
   const problem = passphraseProblem(body.next);
   if (problem) return c.json({ error: problem }, 400);
   // Limited per client, so a stolen session cannot guess the passphrase without limit.
@@ -733,7 +901,7 @@ app.post('/api/passphrase', async (c) => {
 
 // ---- One person's stored data: session only, and the identifier is neither logged nor stored.
 
-type PersonBody = { identifier?: unknown; cursor?: unknown; passphrase?: unknown; confirmation?: unknown };
+type PersonBody = { identifier?: unknown; cursor?: unknown; passphrase?: unknown; passkey?: unknown; confirmation?: unknown };
 
 /** The shared part of both steps. A failure is logged without its message, which could quote the input. */
 async function personDataRoute(c: Context<AppEnv>, kind: PersonStepKind, run: (req: PersonRequest, session: string, body: PersonBody) => Promise<Response>) {
@@ -765,15 +933,72 @@ app.post('/api/personal-data/preview', (c) => personDataRoute(c, 'preview', asyn
  */
 app.post('/api/personal-data/remove', (c) => personDataRoute(c, 'remove', async (req, session, body) => {
   if (req.first) {
-    if (typeof body.passphrase !== 'string' || !body.passphrase || body.passphrase.length > MAX_PASSPHRASE) return c.json({ error: 'Enter your passphrase to confirm.' }, 400);
     if (!(await confirmationValid(session, req.identifier, body.confirmation))) return c.json({ error: 'Preview this identifier first.' }, 400);
-    const refused = await reauthenticate(c, body.passphrase);
+    const refused = await confirmIdentity(c, body);
     if (refused) return refused;
   }
   const { step, events } = await removePersonData(c.env, req, session, (e) => adminLog(c, e));
   await sendNotices(c, events);
   return c.json(step);
 }));
+
+// ---- Passkeys and sessions: dashboard session only (API tokens cannot read these routes).
+
+app.get('/api/passkeys', async (c) => {
+  const session = c.get('session');
+  if (!session) return c.json({ error: 'This needs a signed-in dashboard session.' }, 403);
+  return c.json({ passkeys: await listPasskeys(c.env.DB, session), method: session.method, fresh: isFresh(session) });
+});
+
+/** A challenge bound to this session: for adding a passkey, or for confirming a step with one. */
+app.post('/api/passkeys/options', async (c) => {
+  const session = c.get('session');
+  if (!session) return c.json({ error: 'This needs a signed-in dashboard session.' }, 403);
+  const { purpose } = await c.req.json<{ purpose?: unknown }>().catch(() => ({ purpose: undefined }));
+  if (purpose === 'register') return c.json(await registrationOptions(c.env.DB, rpOf(c), session));
+  if (purpose !== 'confirm') return c.json({ error: 'purpose must be register or confirm.' }, 400);
+  if (!(await hasPasskeys(c.env.DB))) return c.json({ error: 'There is no passkey yet.' }, 409);
+  return c.json(await assertionOptions(c.env.DB, rpOf(c), 'stepup', session));
+});
+
+app.post('/api/passkeys', async (c) => {
+  const body = await c.req.json<Proof & { response?: unknown; name?: unknown }>().catch(() => ({}) as Proof & { response?: unknown; name?: unknown });
+  // The first passkey: a session that signed in with the passphrase minutes ago may add it straight
+  // away; a link session needs the passphrase. Later ones need a passkey answer, except from a
+  // fresh recovery sign-in, which is there to replace them.
+  const refused = await confirmIdentity(c, body, { fresh: (await hasPasskeys(c.env.DB)) ? 'recovery' : 'passphrase', ask: 'Enter your passphrase to add a passkey.' });
+  if (refused) return refused;
+  const result = await addPasskey(c.env, body.response, rpOf(c), c.get('session')!, body.name, (e) => adminLog(c, e));
+  if (!result.ok) return c.json({ error: result.error }, result.status);
+  await sendNotices(c, [{ action: 'passkey.added', target: '', notice: true }]);
+  return c.json({ info: result.info, first: result.first });
+});
+
+app.post('/api/passkeys/:id/remove', async (c) => {
+  const body = await c.req.json<Proof>().catch(() => ({}) as Proof);
+  const refused = await confirmIdentity(c, body, { fresh: 'recovery' });
+  if (refused) return refused;
+  const result = await removePasskey(c.env, c.req.param('id'), c.get('session')!, (e) => adminLog(c, e));
+  if (!result.ok) return c.json({ error: result.error }, result.status);
+  await sendNotices(c, [{ action: 'passkey.removed', target: '', notice: true }]);
+  return c.json({ ok: true, last: result.last });
+});
+
+/** Ends every session but this one. With passkeys there is no passphrase change to do that. */
+app.post('/api/sessions/end-others', async (c) => {
+  const body = await c.req.json<Proof>().catch(() => ({}) as Proof);
+  const refused = await confirmIdentity(c, body, { fresh: 'recovery' });
+  if (refused) return refused;
+  const session = c.get('session')!;
+  const events: AdminEvent[] = [{ action: 'sessions.ended', target: 'every other session', notice: true }];
+  const [ended] = await c.env.DB.batch([
+    c.env.DB.prepare('DELETE FROM sessions WHERE id <> ?1').bind(session.digest),
+    c.env.DB.prepare('DELETE FROM known_devices'),
+    ...(await adminLog(c, events)),
+  ]);
+  await sendNotices(c, events);
+  return c.json({ ok: true, ended: ended.meta.changes ?? 0 });
+});
 
 app.notFound((c) => c.json({ error: 'Not found.' }, 404));
 app.onError((err, c) => {

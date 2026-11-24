@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import type { Config } from '../../../src/shared/config';
 import type { PersonDataStep } from '../../../src/shared/personData';
+import type { SessionMethod } from './auth.svelte';
+import { createPasskey, usePasskey, type CreationOptionsJSON, type RequestOptionsJSON } from './passkey';
 import type { AccountSummary, AdminLogView, AnalyticsView, BuildSourcesView, RepoLayout, FindingEvent, FindingListItem, Overview, PackagesView, Range, ResourcesView, SelfCost, SetupStatus, SinceView, TimelineEntry, WorkerDetail } from '../../../src/shared/types';
 
 export interface ScanResult {
@@ -38,7 +40,7 @@ let signIns = 0;
 export const signInCount = () => signIns;
 
 /** What may still be sent once the session has ended here; the server may not know yet. */
-const OPEN_WITHOUT_SESSION = new Set(['/api/session', '/api/login', '/api/logout']);
+const OPEN_WITHOUT_SESSION = new Set(['/api/session', '/api/login', '/api/logout', '/api/login/passkey/options', '/api/login/passkey', '/api/login/link', '/api/login/link/confirm']);
 let sessionClosed = false;
 /** Until the next sign-in nothing else is asked for, so no late page action refills the offline copies. */
 export const closeSession = () => { sessionClosed = true; };
@@ -87,18 +89,111 @@ export interface TokenInfo {
   olderScope: boolean;
 }
 
+/** The server's codes for a sensitive step that needs proof the request did not carry. */
+export const PASSKEY_REQUIRED = 'passkey_required';
+export const PASSPHRASE_REQUIRED = 'passphrase_required';
+
+/** What confirms a sensitive step: a passkey answer for this session, or (with no passkeys) the passphrase. */
+export type Proof = { passkey?: unknown; passphrase?: string };
+
+export interface PasskeyInfo {
+  id: string;
+  name: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  backedUp: boolean;
+  current: boolean;
+}
+
+export interface SessionState {
+  authenticated: boolean;
+  turnstileSiteKey?: string | null;
+  signIn?: { passkeys: boolean; link: boolean };
+  method?: SessionMethod;
+  fresh?: boolean;
+}
+
+/** Asks this device's passkey to confirm a step. Opens the browser's passkey prompt. */
+async function confirmWithPasskey(): Promise<Proof> {
+  const options = await call<RequestOptionsJSON>('/api/passkeys/options', { method: 'POST', body: JSON.stringify({ purpose: 'confirm' }) });
+  return { passkey: await usePasskey(options) };
+}
+
+/**
+ * Runs a sensitive step with the proof it needs. With passkeys the browser's prompt opens first.
+ * Without, `passphrase` is sent; when the server still asks for a passkey (one was added in another
+ * tab), the prompt opens and the step runs once more.
+ */
+export async function withProof<T>(passkeys: boolean, passphrase: string, run: (proof: Proof) => Promise<T>): Promise<T> {
+  if (passkeys) return run(await confirmWithPasskey());
+  try {
+    return await run(passphrase ? { passphrase } : {});
+  } catch (e) {
+    if (e instanceof ApiError && e.code === PASSKEY_REQUIRED) return run(await confirmWithPasskey());
+    throw e;
+  }
+}
+
+function signedIn<T>(done: T): T {
+  signIns++;
+  sessionClosed = false;
+  return done;
+}
+
 export const api = {
   adminLog: () => call<AdminLogView>('/api/admin-events'),
   tokens: () => call<TokenInfo[]>('/api/tokens'),
-  createToken: (name: string, days: number, passphrase: string, accounts: 'all' | string[], people: boolean) =>
-    call<{ token: string; info: TokenInfo }>('/api/tokens', { method: 'POST', body: JSON.stringify({ name, days, passphrase, accounts, people }) }),
+  createToken: (name: string, days: number, proof: Proof, accounts: 'all' | string[], people: boolean) =>
+    call<{ token: string; info: TokenInfo }>('/api/tokens', { method: 'POST', body: JSON.stringify({ name, days, ...proof, accounts, people }) }),
   revokeToken: (id: string) => call<{ ok: true }>(`/api/tokens/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  session: () => call<{ authenticated: boolean; turnstileSiteKey?: string | null }>('/api/session'),
-  login: async (passphrase: string, turnstile?: string) => {
-    const done = await call<{ ok: true }>('/api/login', { method: 'POST', body: JSON.stringify({ passphrase, ...(turnstile ? { turnstile } : {}) }) });
-    signIns++;
-    sessionClosed = false;
-    return done;
+  session: () => call<SessionState>('/api/session'),
+  login: async (passphrase: string, turnstile?: string) =>
+    signedIn(await call<{ ok: true; recovery?: true }>('/api/login', { method: 'POST', body: JSON.stringify({ passphrase, ...(turnstile ? { turnstile } : {}) }) })),
+  /** Opens the browser's passkey prompt for this site and signs in with the passkey chosen. */
+  loginWithPasskey: async () => {
+    const options = await call<RequestOptionsJSON>('/api/login/passkey/options', { method: 'POST', body: '{}' });
+    const response = await usePasskey(options);
+    return signedIn(await call<{ ok: true }>('/api/login/passkey', { method: 'POST', body: JSON.stringify({ response }) }));
+  },
+  /** E-mails a sign-in link to the operators. It works only in this browser. */
+  requestLink: (turnstile?: string) => call<{ ok: true }>('/api/login/link', { method: 'POST', body: JSON.stringify(turnstile ? { turnstile } : {}) }),
+  confirmLink: async (token: string) => signedIn(await call<{ ok: true }>('/api/login/link/confirm', { method: 'POST', body: JSON.stringify({ token }) })),
+  passkeys: () => call<{ passkeys: PasskeyInfo[]; method: SessionMethod; fresh: boolean }>('/api/passkeys'),
+  /**
+   * Registers a passkey on this device. The browser's prompt opens first; when the server then asks
+   * for proof, `prove` supplies it and the same registration is sent again.
+   */
+  addPasskey: async (name: string, prove: (code: string) => Promise<Proof>) => {
+    const options = await call<CreationOptionsJSON>('/api/passkeys/options', { method: 'POST', body: JSON.stringify({ purpose: 'register' }) });
+    const response = await createPasskey(options);
+    const send = (proof: Proof) => call<{ info: PasskeyInfo; first: boolean }>('/api/passkeys', { method: 'POST', body: JSON.stringify({ response, name, ...proof }) });
+    try {
+      return await send({});
+    } catch (e) {
+      if (e instanceof ApiError && (e.code === PASSKEY_REQUIRED || e.code === PASSPHRASE_REQUIRED)) {
+        return send(e.code === PASSKEY_REQUIRED ? await confirmWithPasskey() : await prove(e.code));
+      }
+      throw e;
+    }
+  },
+  /** Proof is asked for only when the server needs it: a fresh recovery session needs none. */
+  removePasskey: async (id: string) => {
+    const send = (proof: Proof) => call<{ ok: true; last: boolean }>(`/api/passkeys/${encodeURIComponent(id)}/remove`, { method: 'POST', body: JSON.stringify(proof) });
+    try {
+      return await send({});
+    } catch (e) {
+      if (e instanceof ApiError && e.code === PASSKEY_REQUIRED) return send(await confirmWithPasskey());
+      throw e;
+    }
+  },
+  endOtherSessions: async () => {
+    const send = (proof: Proof) => call<{ ok: true; ended: number }>('/api/sessions/end-others', { method: 'POST', body: JSON.stringify(proof) });
+    try {
+      return await send({});
+    } catch (e) {
+      if (e instanceof ApiError && e.code === PASSKEY_REQUIRED) return send(await confirmWithPasskey());
+      throw e;
+    }
   },
   logout: () => {
     const stop = new AbortController();
@@ -142,8 +237,9 @@ export const api = {
   /** One bounded step. POST, so the identifier stays out of URLs. */
   personalDataPreview: (identifier: string, cursor: string | null) =>
     call<PersonDataStep>('/api/personal-data/preview', { method: 'POST', body: JSON.stringify({ identifier, cursor }) }),
-  personalDataRemove: (identifier: string, passphrase: string, confirmation: string, cursor: string | null) =>
-    call<PersonDataStep>('/api/personal-data/remove', { method: 'POST', body: JSON.stringify({ identifier, passphrase, confirmation, cursor }) }),
+  /** `proof` goes with the first step only; the signed cursor carries the later ones. */
+  personalDataRemove: (identifier: string, proof: Proof, confirmation: string, cursor: string | null) =>
+    call<PersonDataStep>('/api/personal-data/remove', { method: 'POST', body: JSON.stringify({ identifier, ...proof, confirmation, cursor }) }),
   acknowledge: (id: string) => call<{ ok: true }>(`/api/findings/${encodeURIComponent(id)}/acknowledge`, { method: 'POST' }),
   snooze: (id: string, days: 7 | 30 | 90) =>
     call<{ ok: true }>(`/api/findings/${encodeURIComponent(id)}/snooze`, { method: 'POST', body: JSON.stringify({ days }) }),

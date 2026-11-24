@@ -11,7 +11,7 @@ import { login } from '../src/worker/auth';
 import { buildsRefused, CfClient } from '../src/worker/cf';
 import { setSettings, upsertAccount } from '../src/worker/db';
 import type { Env } from '../src/worker/env';
-import worker, { usageBuffer } from '../src/worker/index';
+import worker, { clearUpstreamAnswers, usageBuffer } from '../src/worker/index';
 import { fetchLockfile, layoutFor, lockfilesIn, REPO_NOT_ALLOWED } from '../src/worker/packages';
 import { mappingFrom, suggestFor } from '../web/src/lib/repoMatch';
 import { createD1 } from './d1';
@@ -28,6 +28,7 @@ afterEach(async () => {
   await Promise.allSettled(pending.splice(0));
   vi.unstubAllGlobals();
   usageBuffer.reset();
+  clearUpstreamAnswers();
 });
 
 const cfOk = (result: unknown) => new Response(JSON.stringify({ success: true, result }));

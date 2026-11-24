@@ -100,7 +100,7 @@ export async function digestData(env: Env, now: Date, config: Config, days: numb
   return list.map((a) => {
     const plan = planFrom(config, a.detected_plan, env.PLAN, a.id);
     const tags = new Map((W.get(a.id) ?? []).map((w) => [w.name, w.tags ? (JSON.parse(w.tags) as string[]) : []]));
-    const visible = (script: string) => script === '*' || !tags.has(script) || inScope(config, script, groupsFor(config, script, tags.get(script)));
+    const visible = (script: string) => script === '*' || inScope(config, script, groupsFor(config, script, tags.get(script) ?? []));
     const peaks = new Map<QuotaMetric, number>();
     for (const r of Q.get(a.id) ?? []) peaks.set(r.metric, Math.max(peaks.get(r.metric) ?? 0, r.v));
     const headroom = plan === 'free'

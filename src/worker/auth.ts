@@ -6,9 +6,16 @@
 // generation that issued them. Five failed attempts lock a client out for 15 minutes (IPv4 address,
 // or IPv6 /64); past 50 attempts from any mix of clients in a 15-minute window, sign-in needs a
 // known browser or a passed Turnstile check until the window ends, and past 200 a known browser.
+//
+// Passkeys (passkeys.ts) and e-mailed links (signinLink.ts) sign in through the same sessions. Once
+// a passkey exists, the passphrase stops signing in: `passkey_lock` holds the credential generation
+// in force when the first passkey was added, and the passphrase counts again only after that
+// generation changed, that is after someone with access to the Cloudflare account replaced the
+// ADMIN_PASSPHRASE secret (or deleted the stored hash). That sign-in is a recovery: it locks the
+// new generation in turn, and the operators hear about it.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { MIN_PASSPHRASE } from '../shared/passphrase';
+import { MIN_PASSPHRASE, passphraseProblem } from '../shared/passphrase';
 import { adminEventStatements, handleOf } from './adminLog';
 import { getSettings, setSettings } from './db';
 import type { Env } from './env';
@@ -44,6 +51,11 @@ export const COOKIE = '__Host-as_session';
 /** Marks a browser that has signed in here, so it can still sign in during a pause. It grants nothing by itself. */
 export const DEVICE_COOKIE = '__Host-as_device';
 const SESSION_DAYS = 7;
+/** How the session was signed in. A link or a recovery passphrase is a weaker proof, so its session is shorter. */
+export type SessionMethod = 'passphrase' | 'passkey' | 'link' | 'recovery';
+const DAYS_FOR: Record<SessionMethod, number> = { passphrase: SESSION_DAYS, passkey: SESSION_DAYS, link: 1, recovery: 1 };
+/** A session this young counts as having just shown its credential, for the steps that allow it (index.ts). */
+export const FRESH_MS = 10 * 60_000;
 const DEVICE_DAYS = 90;
 const MAX_DEVICES = 10;
 const MAX_FAILS = 5;
@@ -208,17 +220,75 @@ export async function credentialGeneration(env: Env, s: CredentialSettings): Pro
   return `secret$${await secretDigest(env.ADMIN_PASSPHRASE, s.cred_salt)}`;
 }
 
-export async function hasSession(env: Env, cookieHeader: string | null): Promise<boolean> {
-  const id = readCookie(cookieHeader, COOKIE);
-  if (!id || !/^[a-f0-9]{64}$/.test(id)) return false;
-  const row = await env.DB.prepare(`SELECT cred, ${CREDENTIAL_COLUMNS} FROM sessions WHERE id = ?1 AND expires_at > ?2`)
-    .bind(await sessionKey(id), new Date().toISOString())
-    .first<CredentialSettings & { cred: string }>();
-  return row != null && row.cred === (await credentialGeneration(env, row));
+/** A signed-in dashboard session. `id` is the cookie value, `digest` what D1 stores for it. */
+export interface SessionInfo {
+  id: string;
+  digest: string;
+  method: SessionMethod;
+  /** The passkey that signed it in, if one did. */
+  passkey: string | null;
+  /** ms since epoch; 0 for a session from before this was recorded. */
+  createdAt: number;
 }
 
-type Refusal = { ok: false; status: 401 | 429 | 500; error: string };
-export type LoginResult = { ok: true; cookie: string; deviceCookie?: string } | Refusal;
+export async function readSession(env: Env, cookieHeader: string | null): Promise<SessionInfo | null> {
+  const id = readCookie(cookieHeader, COOKIE);
+  if (!id || !/^[a-f0-9]{64}$/.test(id)) return null;
+  const digest = await sessionKey(id);
+  const row = await env.DB.prepare(`SELECT cred, method, passkey, created_at, ${CREDENTIAL_COLUMNS} FROM sessions WHERE id = ?1 AND expires_at > ?2`)
+    .bind(digest, new Date().toISOString())
+    .first<CredentialSettings & { cred: string; method: SessionMethod; passkey: string | null; created_at: number }>();
+  if (!row || row.cred !== (await credentialGeneration(env, row))) return null;
+  return { id, digest, method: row.method, passkey: row.passkey, createdAt: row.created_at };
+}
+
+export const hasSession = async (env: Env, cookieHeader: string | null): Promise<boolean> => (await readSession(env, cookieHeader)) !== null;
+
+/** Whether the session signed in recently enough to count as fresh proof (FRESH_MS). */
+export const isFresh = (s: SessionInfo, now = Date.now()) => s.createdAt > 0 && now - s.createdAt < FRESH_MS;
+
+/** What D1 stores for a session cookie, for code that has the cookie value. */
+export const sessionDigest = sessionKey;
+
+/** A new session: its cookie and the statements that store it, for the batch that signs in. */
+export async function newSession(db: D1Database, opts: { generation: string; method: SessionMethod; passkey?: string | null; now: number }) {
+  const id = hex(crypto.getRandomValues(new Uint8Array(32)));
+  const days = DAYS_FOR[opts.method];
+  return {
+    id,
+    cookie: `${COOKIE}=${id}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${days * 86_400}`,
+    statements: [
+      db.prepare('INSERT INTO sessions (id, expires_at, cred, method, passkey, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)')
+        .bind(await sessionKey(id), new Date(opts.now + days * 86_400_000).toISOString(), opts.generation, opts.method, opts.passkey ?? null, opts.now),
+      db.prepare('DELETE FROM sessions WHERE expires_at < ?1').bind(new Date(opts.now).toISOString()),
+      markOlderTokens(db, opts.generation),
+    ],
+  };
+}
+
+/** Whether any passkey exists. Any at all turns passphrase sign-in off (see the top of this file). One row at most is read. */
+export const hasPasskeys = async (db: D1Database): Promise<boolean> => Boolean(await db.prepare('SELECT 1 AS found FROM passkeys LIMIT 1').first('found'));
+
+/** How many passkeys exist (at most MAX_PASSKEYS), for adding and removing them. */
+export const passkeyCount = async (db: D1Database): Promise<number> =>
+  Number((await db.prepare('SELECT COUNT(*) AS n FROM passkeys').first<{ n: number }>())?.n ?? 0);
+
+/**
+ * Whether the passphrase may sign in now. It may while no passkey exists, and after the
+ * credential generation has changed since passkeys were turned on (a recovery). A missing lock
+ * with passkeys present counts as locked to the generation in force.
+ */
+export async function passphraseState(env: Env, s: CredentialSettings & { passkey_lock?: string | null }): Promise<'open' | 'locked' | 'recovery'> {
+  if (!(await hasPasskeys(env.DB))) return 'open';
+  const generation = await credentialGeneration(env, s);
+  return generation && s.passkey_lock && generation !== s.passkey_lock ? 'recovery' : 'locked';
+}
+
+export const PASSPHRASE_LOCKED =
+  'This dashboard signs in with passkeys, so the passphrase no longer works here. Use a passkey or an e-mailed link. Lost every passkey? Replace the ADMIN_PASSPHRASE secret in Cloudflare, then sign in with the new one.';
+
+type Refusal = { ok: false; status: 401 | 403 | 409 | 429 | 500 | 502; error: string };
+export type LoginResult = { ok: true; cookie: string; deviceCookie?: string; recovery?: boolean } | Refusal;
 /** What a sign-in can show during a pause, besides the passphrase. */
 export type SignInProof = 'none' | 'turnstile' | 'device';
 
@@ -321,8 +391,12 @@ export async function attemptSucceeded(env: Env, key: string, now = Date.now(), 
 /** Removes what sign-in no longer needs. Run by the cron, so it happens with no sign-in at all. */
 export function sweepSignInState(db: D1Database, now = Date.now()) {
   return db.batch([
-    db.prepare('DELETE FROM login_attempts WHERE window_start <= ?1 AND locked_until <= ?2').bind(now - LOCK_MS, now),
+    // The sign-in link counters (signinLink.ts: install-wide, and '#link:' per client) have an hour's window, not LOCK_MS.
+    db.prepare(`DELETE FROM login_attempts WHERE window_start <= ?1 AND locked_until <= ?2 AND ip <> '#signin-link' AND ip NOT LIKE '#link:%'`).bind(now - LOCK_MS, now),
+    db.prepare(`DELETE FROM login_attempts WHERE (ip = '#signin-link' OR ip LIKE '#link:%') AND window_start <= ?1`).bind(now - 3_600_000),
     db.prepare('DELETE FROM known_devices WHERE expires_at <= ?1').bind(now),
+    db.prepare('DELETE FROM webauthn_used WHERE expires_at <= ?1').bind(now),
+    db.prepare('DELETE FROM signin_links WHERE expires_at <= ?1').bind(now),
   ]);
 }
 
@@ -352,6 +426,8 @@ export interface LoginOptions {
   turnstilePassed?: boolean;
   /** The request's Cookie header, for the known-device marker. */
   cookieHeader?: string | null;
+  /** Who hears about a recovery sign-in (adminNotice.ts). Only worked out for one. */
+  noticeTo?: () => Promise<string[]>;
 }
 
 /** `ip` is CF-Connecting-IP, which Cloudflare sets and clients cannot override. */
@@ -363,6 +439,19 @@ export async function login(env: Env, passphrase: string, ip: string, now = Date
     return {
       ok: false, status: 500,
       error: `The ADMIN_PASSPHRASE secret is shorter than ${MIN_PASSPHRASE} characters, so sign-in is off. Set a longer one with "npx wrangler secret put ADMIN_PASSPHRASE", or in the Cloudflare dashboard under your Worker › Settings › Variables and Secrets.`,
+    };
+  }
+  // Refused before the passphrase is looked at: with passkeys on, the passphrase proves nothing,
+  // so a guess costs no hashing, counts no attempt and learns nothing.
+  const state = await passphraseState(env, await ensureCredSalt(db, s));
+  if (state === 'locked') return { ok: false, status: 403, error: PASSPHRASE_LOCKED };
+  // A recovery ends every session and replaces the passkeys' protection with this secret, so an
+  // easy one is refused here as the setup wizard refuses it, before any guess is checked.
+  const weak = state === 'recovery' && env.ADMIN_PASSPHRASE && !(await hashHonored(env, s)) ? passphraseProblem(env.ADMIN_PASSPHRASE) : null;
+  if (weak) {
+    return {
+      ok: false, status: 500,
+      error: `The new ADMIN_PASSPHRASE secret is too easy to guess, so recovery is off. ${weak.replace('This passphrase', 'It').replace('The new passphrase', 'It')} Set a stronger one with "npx wrangler secret put ADMIN_PASSPHRASE", or in the Cloudflare dashboard under your Worker › Settings › Variables and Secrets.`,
     };
   }
   const key = attemptKey(ip);
@@ -379,14 +468,14 @@ export async function login(env: Env, passphrase: string, ip: string, now = Date
   const generation = await credentialGeneration(env, salted);
   if (!generation) return { ok: false, status: 500, error: 'ADMIN_PASSPHRASE secret is not set.' };
   const honored = await hashHonored(env, salted);
-  const id = hex(crypto.getRandomValues(new Uint8Array(32)));
-  const expires = new Date(now + SESSION_DAYS * 86_400_000);
+  const recovery = state === 'recovery';
+  const session = await newSession(db, { generation, method: recovery ? 'recovery' : 'passphrase', now });
   const issued = device ? null : await issueDevice(db, generation, now);
   await db.batch([
-    db.prepare('INSERT INTO sessions (id, expires_at, cred) VALUES (?1, ?2, ?3)').bind(await sessionKey(id), expires.toISOString(), generation),
-    db.prepare('DELETE FROM sessions WHERE expires_at < ?1').bind(new Date(now).toISOString()),
+    ...session.statements,
     ...successStatements(db, key, now, true),
-    markOlderTokens(db, generation),
+    // A recovery counts once: the generation it signed in under is locked in turn.
+    ...(recovery ? [setSettings(db, { passkey_lock: generation })] : []),
     // A hash from before bindings existed is bound now that it has been used.
     ...(honored && env.ADMIN_PASSPHRASE && !salted.passphrase_binding
       ? [setSettings(db, { passphrase_binding: await secretDigest(env.ADMIN_PASSPHRASE, salted.cred_salt!) })]
@@ -396,13 +485,13 @@ export async function login(env: Env, passphrase: string, ip: string, now = Date
     ...(salted.passphrase_hash && !honored ? [db.prepare(`DELETE FROM settings WHERE key IN ('passphrase_hash', 'passphrase_binding')`)] : []),
     ...(issued?.statements ?? []),
     // Only here, past the passphrase: a refused sign-in writes nothing to this log.
-    ...adminEventStatements(db, [{ action: 'signin', target: '' }], await handleOf(id), new Date(now)),
+    ...adminEventStatements(
+      db,
+      [recovery ? { action: 'signin', target: 'recovery passphrase', notice: true } : { action: 'signin', target: 'passphrase' }],
+      await handleOf(session.id), new Date(now), recovery ? ((await opts.noticeTo?.()) ?? []) : [],
+    ),
   ]);
-  return {
-    ok: true,
-    cookie: `${COOKIE}=${id}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${SESSION_DAYS * 86_400}`,
-    ...(issued ? { deviceCookie: issued.cookie } : {}),
-  };
+  return { ok: true, cookie: session.cookie, ...(issued ? { deviceCookie: issued.cookie } : {}), ...(recovery ? { recovery } : {}) };
 }
 
 export async function logout(env: Env, cookieHeader: string | null): Promise<string> {

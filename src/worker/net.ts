@@ -20,5 +20,6 @@ export function allowedFetch(url: string, init: RequestInit, webhookUrl?: string
   if (!allowed.includes(host) || !url.startsWith('https://')) {
     return Promise.reject(new Error(`Blocked outbound request to ${host}: not on the allowlist.`));
   }
-  return fetch(url, init);
+  // A redirect could lead anywhere, past the allowlist above: callers see the 3xx answer instead.
+  return fetch(url, { redirect: 'manual', ...init });
 }

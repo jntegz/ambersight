@@ -13,6 +13,7 @@ import { aiSummary, digestData, renderDigest, subjectFor, type AccountDigest } f
 import { fetchIncidents } from './incidents';
 import { allowedFetch } from './net';
 import { safeError } from './redact';
+import { plainDigest } from './tokenView';
 import { activeAccounts } from './scheduler';
 import { digestDue, inQuietHours, localTime } from './time';
 
@@ -482,8 +483,9 @@ async function sendDigests(env: Env, now: Date, config: Config, active: AccountR
   for (const a of active) {
     const name = config.accounts[a.id]?.label ?? a.name ?? a.id;
     const mail = once((digests) => {
-      const dg = digests.find((x) => x.id === a.id);
-      if (!dg) return null;
+      const found = digests.find((x) => x.id === a.id);
+      if (!found) return null;
+      const dg = plainDigest(found, config);
       const title = `${quoted(dg.label)}: ${subjectFor(dg.rows)}`;
       return { subject: `Ambersight · ${title}`, body: renderDigest(title, `Your ${d.frequency} Ambersight digest for ${quoted(dg.label)}.`, [dg], { periodLabel }) };
     });
@@ -491,7 +493,7 @@ async function sendDigests(env: Env, now: Date, config: Config, active: AccountR
   }
   for (const [group, list] of Object.entries(d.groupRecipients)) {
     const mail = once((digests) => {
-      const { rows, ambiguous } = groupRows(config, group, digests);
+      const { rows, ambiguous } = groupRows(config, group, digests.map((x) => plainDigest(x, config)));
       if (ambiguous) warnings.push(`The group ${quoted(group)} reaches more than one account through its Cloudflare tag or Worker patterns, so the tag was ignored for its digest. Add Worker patterns to the group in Settings to include those Workers.`);
       const title = `${quoted(group)}: ${subjectFor(rows)}`;
       return { subject: `Ambersight · ${title}`, body: render(title, `Your ${d.frequency} Ambersight digest for ${quoted(group)}.`, rows.slice(0, MAX_DIGEST_ROWS)) };

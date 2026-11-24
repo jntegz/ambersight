@@ -318,7 +318,7 @@ export async function buildTimeline(env: Env, account: string, days = 14): Promi
   }
   const deploys: TimelineEntry[] = (deps.results as { script: string; id: string; created_on: string; author: string | null; message: string | null; source: string | null }[])
     .map((d) => ({ d, groups: groupsFor(config, d.script, tags.get(d.script) ?? []) }))
-    .filter(({ d, groups }) => !tags.has(d.script) || inScope(config, d.script, groups))
+    .filter(({ d, groups }) => inScope(config, d.script, groups))
     .map(({ d, groups }) => ({
       kind: 'deploy' as const,
       script: d.script,

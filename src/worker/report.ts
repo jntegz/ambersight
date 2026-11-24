@@ -5,14 +5,14 @@ import { quoted } from '../shared/findings';
 import { configFrom, getSettings } from './db';
 import { digestData, renderDigest, subjectFor } from './digest';
 import type { Env } from './env';
-import { plainLabel, plainRow } from './tokenView';
+import { plainDigest } from './tokenView';
 
-/** `plain` leaves person-linked text out, for an API token without that grant. */
-export async function reportHtml(env: Env, account: string, days: 7 | 30, now = new Date(), plain = false): Promise<{ html: string; title: string }> {
+/** It is handed to the client, so person-linked text is always left out, as in the client digest. */
+export async function reportHtml(env: Env, account: string, days: 7 | 30, now = new Date()): Promise<{ html: string; title: string }> {
   const config = configFrom(await getSettings(env.DB));
   const [found] = await digestData(env, now, config, days, [account]);
   if (!found) throw new Error('No such account.');
-  const d = plain ? { ...found, label: plainLabel(found.id, config), rows: found.rows.map(plainRow) } : found;
+  const d = plainDigest(found, config);
   const from = new Date(now.getTime() - days * 86_400_000).toISOString().slice(0, 10);
   const title = `${quoted(d.label)}: ${subjectFor(d.rows)}`;
   const { html } = renderDigest(title, `Report for ${from} to ${now.toISOString().slice(0, 10)}.`, [d], {

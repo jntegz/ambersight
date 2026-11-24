@@ -5,7 +5,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { timingSafeEqual } from 'node:crypto';
 import { login } from '../src/worker/auth';
-import { getAccountState, setAccountState, upsertAccount } from '../src/worker/db';
+import { getAccountState, setAccountState, setSettings, upsertAccount } from '../src/worker/db';
+import { defaultConfig } from '../src/shared/config';
 import type { Env } from '../src/worker/env';
 import { rollupDays } from '../src/worker/history';
 import worker, { usageBuffer } from '../src/worker/index';
@@ -250,6 +251,32 @@ describe('the findings inbox', () => {
     const restored = (await (await post(e, cookie, '/api/findings/bulk', { ids, action: 'restore' })).json()) as { changed: number };
     expect(restored.changed).toBe(2);
     expect((await post(e, cookie, '/api/findings/bulk', { ids, action: 'delete' })).status).toBe(400);
+  });
+
+  it('leaves out Workers excluded from scope, also once they are gone from Cloudflare', async () => {
+    const e = env();
+    await upsertAccount(e.DB, { id: 'acc1', name: 'Test account' }, new Date('2026-11-01T00:00:00Z')).run();
+    const at = '2026-11-09T10:00:00.000Z';
+    const finding = (id: string, script: string, status: string) => e.DB.prepare(
+      `INSERT INTO findings (id, account, script, module, severity, code, message, evidence, action, first_seen, last_seen, status)
+       VALUES (?1, 'acc1', ?2, 'errors', 'critical', 'e', 'm', '{}', 'a', ?3, ?3, ?4)`).bind(id, script, at, status);
+    const opened = (id: string, script: string) => e.DB.prepare(
+      `INSERT INTO finding_events (finding_id, account, script, at, kind, severity) VALUES (?1, 'acc1', ?2, ?3, 'opened', 'critical')`).bind(id, script, at);
+    await e.DB.batch([
+      // internal-billing is still in Cloudflare; internal-old was deleted, so it has no workers row.
+      e.DB.prepare(`INSERT INTO workers (account, name, tags, last_seen) VALUES ('acc1', 'internal-billing', NULL, '2026-11-09'), ('acc1', 'shop', NULL, '2026-11-09')`),
+      finding('f1', 'internal-billing', 'acknowledged'), finding('f2', 'internal-old', 'acknowledged'), finding('f3', 'shop', 'acknowledged'), finding('f4', '*', 'acknowledged'),
+      finding('f5', 'internal-old', 'resolved'),
+      opened('f1', 'internal-billing'), opened('f2', 'internal-old'), opened('f3', 'shop'),
+      setSettings(e.DB, { config: JSON.stringify({ ...defaultConfig(), scope: { include: [], exclude: ['internal-*'] } }) }),
+    ]);
+    const cookie = await signedIn(e);
+    const list = async (status: string) => ((await (await get(e, cookie, `/api/findings?status=${status}`)).json()) as { id: string }[]).map((f) => f.id).sort();
+    expect(await list('acknowledged')).toEqual(['f3', 'f4']);
+    expect(await list('resolved')).toEqual([]);
+    const since = (await (await get(e, cookie, '/api/changes?since=2026-11-09T00:00:00.000Z')).json()) as { opened: number; items: { script: string }[] };
+    expect(since.opened).toBe(1);
+    expect(since.items.map((i) => i.script)).toEqual(['shop']);
   });
 });
 

@@ -9,6 +9,7 @@
 import type { Config } from '../shared/config';
 import { DASHBOARD_ONLY_EVIDENCE } from '../shared/findings';
 import type { AccountSummary, Finding, Overview, PackagesView, SelfCost, TimelineEntry, WorkerDetail } from '../shared/types';
+import type { AccountDigest } from './digest';
 import type { Row } from './notify';
 import { coarseAccounts, coarseOverview, coarseSelfCost } from './overview';
 import type { TokenGrant } from './tokens';
@@ -92,6 +93,14 @@ export function plainRow(r: Row): Row {
   return { ...r, message: plainSentence(r.message, evidence), action: plainSentence(r.action, evidence), evidence: JSON.stringify(plainEvidence(evidence)) };
 }
 
+/**
+ * An account's digest as a client may read it: the client digest, a group digest and the client
+ * report. They leave the operators, so they get what an API token without person-linked data
+ * gets: the label from Settings instead of Cloudflare's account name, and findings without audit
+ * text, repository names or addresses.
+ */
+export const plainDigest = (d: AccountDigest, config: Pick<Config, 'accounts'>): AccountDigest => ({ ...d, label: plainLabel(d.id, config), rows: d.rows.map(plainRow) });
+
 const plainOverview = (o: Overview, config: Pick<Config, 'accounts'>): Overview => ({
   ...o,
   account: o.account && { ...o.account, label: plainLabel(o.account.id, config) },
@@ -132,7 +141,9 @@ export const plainWorker = (w: WorkerDetail): WorkerDetail => ({
   ...w,
   deploys: w.deploys.map((d) => without(without(d, 'author'), 'message')),
   findings: w.findings.map(plainFinding),
-  changes: w.changes.map((c) => (c.kind === 'audit' ? without(c, 'detail') : c)),
+  // For a Worker that does not exist, audit rows were matched by its name alone, and that name may
+  // be a guessed e-mail address or member id: even their times would confirm it.
+  changes: w.changes.filter((c) => c.kind !== 'audit' || w.exists).map((c) => (c.kind === 'audit' ? without(c, 'detail') : c)),
   ...(w.packages ? { packages: { ...without(w.packages, 'repo'), error: w.packages.error && PACKAGES_UNREADABLE } } : {}),
 });
 

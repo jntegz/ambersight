@@ -128,7 +128,9 @@ describe('client report', () => {
     await upsertAccount(e.DB, { id: 'acc1', name: 'Test account' }, NOW).run();
     await runScan(e, NOW, { account: 'acc1' });
     const { html, title } = await reportHtml(e, 'acc1', 30, NOW);
-    expect(title).toBe('Test account 2026-11-09');
+    // Handed to the client: the label from Settings, or a neutral one, never Cloudflare's account name.
+    expect(title).toBe('Account acc1 2026-11-09');
+    expect(html).not.toContain('Test account');
     expect(html).toContain('Report for 2026-10-10 to 2026-11-09.');
     expect(html).toContain('Last 30 days');
     expect(html).not.toContain('<script');

@@ -15,6 +15,21 @@ import { allowedFetch, OPTIONAL_HOSTS } from './net';
 export const MAX_LOCKFILE_BYTES = 8_000_000;
 /** Direct dependencies kept per Worker. */
 const MAX_DEPS = 300;
+/**
+ * The root package entry (its dependency lists) is parsed whole, so it has its own limit: far above
+ * any real project's, and small enough that a hostile lockfile cannot spend a scan's CPU on it.
+ */
+const MAX_ROOT_ENTRY_BYTES = 512_000;
+
+/** The first `max` keys of an object, without building the whole list first. */
+function firstKeys(obj: Record<string, unknown>, max: number, skip?: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const k in obj) {
+    if (out.length >= max) break;
+    if (Object.hasOwn(obj, k) && !(skip && k in skip)) out.push(k);
+  }
+  return out;
+}
 /** Maximum unique OSV advisories hydrated per scan to preserve the Free plan subrequest budget. */
 const MAX_OSV_HYDRATE = 8;
 /** npm package names: optional @scope/, lower case, no path tricks. */
@@ -106,7 +121,7 @@ export function parseLockfile(text: string, workspace?: string): LockedDep[] {
   const deps = (root.dependencies ?? {}) as Record<string, unknown>;
   const dev = (root.devDependencies ?? {}) as Record<string, unknown>;
   const candidates: { name: string; dev: boolean }[] = [];
-  for (const [name, isDev] of [...Object.keys(deps).map((n) => [n, false] as const), ...Object.keys(dev).filter((n) => !(n in deps)).map((n) => [n, true] as const)]) {
+  for (const [name, isDev] of [...firstKeys(deps, MAX_DEPS * 4).map((n) => [n, false] as const), ...firstKeys(dev, MAX_DEPS * 4, deps).map((n) => [n, true] as const)]) {
     if (candidates.length >= MAX_DEPS) break;
     if (!NPM_NAME.test(name)) continue;
     candidates.push({ name, dev: isDev });
@@ -243,6 +258,7 @@ function findDirectChildrenRaw(text: string, objOpen: number, targetKeys: Iterab
 function findDirectChildObject(text: string, objOpen: number, targetKey: string): Record<string, unknown> | null {
   const raw = findDirectChildrenRaw(text, objOpen, [targetKey]).get(targetKey);
   if (!raw || raw[0] !== '{') return null;
+  if (raw.length > MAX_ROOT_ENTRY_BYTES) throw new LockfileError('The root package entry of the lockfile is too large to read.');
   try {
     const v = JSON.parse(raw) as unknown;
     return typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
@@ -490,7 +506,7 @@ export function parseBunLock(text: string, workspace?: string): LockedDep[] {
   if (pkgsOpen < 0) throw new LockfileError('bun.lock has no packages section.');
 
   const candidates: { name: string; dev: boolean }[] = [];
-  for (const [name, isDev] of [...Object.keys(deps).map((n) => [n, false] as const), ...Object.keys(dev).filter((n) => !(n in deps)).map((n) => [n, true] as const)]) {
+  for (const [name, isDev] of [...firstKeys(deps, MAX_DEPS * 4).map((n) => [n, false] as const), ...firstKeys(dev, MAX_DEPS * 4, deps).map((n) => [n, true] as const)]) {
     if (candidates.length >= MAX_DEPS) break;
     if (!NPM_NAME.test(name)) continue;
     candidates.push({ name, dev: isDev });
@@ -645,6 +661,31 @@ export function lockfileUrl(repo: PackageRepo): string {
   return githubFileUrl(repo, repo.dir, LOCKFILE_FILES[kind]);
 }
 
+/** A response body as text, or null (and the rest left unread) once it passes `max` bytes. */
+async function readCapped(res: Response, max: number): Promise<string | null> {
+  if (!res.body) return '';
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const all = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) {
+    all.set(c, at);
+    at += c.byteLength;
+  }
+  return new TextDecoder().decode(all);
+}
+
 async function fetchGithubRaw(token: string, url: string, repo: PackageRepo, filename: string, fileCache?: Map<string, string>, onFetch?: () => void): Promise<string> {
   if (fileCache?.has(url)) return fileCache.get(url)!;
   onFetch?.();
@@ -667,8 +708,9 @@ async function fetchGithubRaw(token: string, url: string, repo: PackageRepo, fil
     await res.body?.cancel();
     throw new LockfileError(`${filename} is too large to read.`);
   }
-  const text = await res.text();
-  if (text.length > MAX_LOCKFILE_BYTES) throw new LockfileError(`${filename} is too large to read.`);
+  // Content-Length can be missing or wrong, so the body itself is read with a hard limit.
+  const text = await readCapped(res, MAX_LOCKFILE_BYTES);
+  if (text === null) throw new LockfileError(`${filename} is too large to read.`);
   fileCache?.set(url, text);
   return text;
 }

@@ -10,7 +10,7 @@ export const MAX_IDENTIFIER = 254;
 
 export type PersonDataClass =
   | 'deployments' | 'auditEvents' | 'findings' | 'adminLog' | 'cloudflareAlerts'
-  | 'accountNames' | 'apiTokenNames' | 'scanNotes' | 'digestDelivery' | 'infrastructure';
+  | 'accountNames' | 'apiTokenNames' | 'passkeyNames' | 'scanNotes' | 'digestDelivery' | 'infrastructure';
 
 /** `replaced: false` is only counted: those names identify things in Cloudflare and come back with each scan. */
 export const PERSON_DATA_CLASSES: { id: PersonDataClass; label: string; replaced: boolean }[] = [
@@ -21,6 +21,7 @@ export const PERSON_DATA_CLASSES: { id: PersonDataClass; label: string; replaced
   { id: 'cloudflareAlerts', label: 'Cloudflare notifications', replaced: true },
   { id: 'accountNames', label: 'Account names', replaced: true },
   { id: 'apiTokenNames', label: 'API token names', replaced: true },
+  { id: 'passkeyNames', label: 'Passkey names', replaced: true },
   { id: 'scanNotes', label: 'Last scan error and warnings', replaced: true },
   { id: 'digestDelivery', label: 'Digest delivery records in the older format (the recipient becomes a keyed hash)', replaced: true },
   { id: 'infrastructure', label: 'Names of Workers, zones, resources and bindings, audit log resource IDs and the workers.dev subdomain (change them in Cloudflare)', replaced: false },

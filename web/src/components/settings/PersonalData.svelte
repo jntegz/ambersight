@@ -2,7 +2,8 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 <script lang="ts">
   import { cleanIdentifier, identifierProblem, mayBeOrdinaryWord, PERSON_DATA_CLASSES, REMOVED_MARKER, type PersonDataCounts, type PersonDataEntry, type PersonDataStep } from '../../../../src/shared/personData';
-  import { api, num } from '../../lib/api';
+  import { api, num, withProof } from '../../lib/api';
+  import { auth } from '../../lib/auth.svelte';
   import { clearOfflineCopies } from '../../lib/offline';
 
   interface Totals {
@@ -105,8 +106,15 @@
     error = '';
     const totals = empty();
     try {
-      // The passphrase goes with the first step only. Its signed cursor carries the later ones.
-      await collect(totals, (cursor) => api.personalDataRemove(id, cursor ? '' : passphrase, confirmation, cursor));
+      // The proof goes with the first step only. Its signed cursor carries the later ones.
+      await withProof(auth.passkeys, passphrase, (proof) => {
+        let first = true;
+        return collect(totals, (cursor) => {
+          const step = api.personalDataRemove(id, first ? proof : {}, confirmation, cursor);
+          first = false;
+          return step;
+        });
+      });
       if (totals.done) {
         identifier = '';
         preview = null;
@@ -173,8 +181,10 @@
         <p><strong>This cannot be undone.</strong> Every match above, except names that are only counted, is replaced for good.</p>
         <label class="check"><input type="checkbox" bind:checked={understood} /> I understand that this cannot be undone</label>
         <div class="row">
-          <input class="input" type="password" autocomplete="current-password" placeholder="Your passphrase" aria-label="Your passphrase, to confirm" bind:value={passphrase} />
-          <button type="submit" class="danger" disabled={busy || !understood || !passphrase}>{busy ? 'Replacing…' : 'Replace permanently'}</button>
+          {#if !auth.passkeys}
+            <input class="input" type="password" autocomplete="current-password" placeholder="Your passphrase" aria-label="Your passphrase, to confirm" bind:value={passphrase} />
+          {/if}
+          <button type="submit" class="danger" disabled={busy || !understood || (!auth.passkeys && !passphrase)}>{busy ? 'Replacing…' : auth.passkeys ? 'Confirm with passkey and replace' : 'Replace permanently'}</button>
         </div>
       </form>
     {/if}

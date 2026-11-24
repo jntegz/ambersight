@@ -6,7 +6,7 @@ The API reads Ambersight's own D1 database. A request never calls the Cloudflare
 
 ## Tokens
 
-Create a token in **Settings › Security › Read-only API tokens**. Choose the accounts it may read, whether it may read person-linked data, and how long it lasts (30, 90 or 365 days), then enter your passphrase to confirm. The token is shown once. Copy it then.
+Create a token in **Settings › Security › Read-only API tokens**. Choose the accounts it may read, whether it may read person-linked data, and how long it lasts (30, 90 or 365 days), then confirm with one of your passkeys (or, before any passkey exists, your passphrase). The token is shown once. Copy it then.
 
 Send it in the `Authorization` header:
 
@@ -22,7 +22,7 @@ A token is read-only:
 
 Ambersight stores only a SHA-256 digest of each token. The token list shows when each one was last used and when it expires. **Revoke** stops a token at once.
 
-A token stops working when it expires, and when the dashboard passphrase changes: in Settings, by replacing the `ADMIN_PASSPHRASE` secret, or by deleting the stored passphrase. The list marks those tokens. Create a new one to replace them. A stopped token gets `401`. A token created before this rule existed is tied to the credential at the first sign-in, token use or scheduled run after the upgrade; see [SECURITY.md](../SECURITY.md) if you replaced the secret before that.
+A token stops working when it expires, after a recovery sign-in, and when the dashboard passphrase changes: in Settings, by replacing the `ADMIN_PASSPHRASE` secret, or by deleting the stored passphrase. The list marks those tokens. Create a new one to replace them. A stopped token gets `401`. A token created before this rule existed is tied to the credential at the first sign-in, token use or scheduled run after the upgrade; see [SECURITY.md](../SECURITY.md) if you replaced the secret before that.
 
 A token sees that a scan failed, not the error text: `lastError` reads "The last scan failed." and scan warnings are reduced to one general line. The dashboard shows the detail.
 
@@ -56,7 +56,7 @@ A token reads person-linked data only if you tick **Include person-linked data**
 | Findings, everywhere they appear | Evidence `actor`, `member`, `changedBy`, `branch`, `repo`, and `change` when it quotes the audit log. Evidence is limited to the fields Ambersight's checks are known to report, so anything else is left out too. The sentence says "A change was recorded shortly before." instead of quoting it, and "the repository" instead of its name. A lockfile that could not be read gets one fixed sentence |
 | Overview | `branch` of the latest Pages deploy |
 | Packages | `repo`. `error` is one fixed sentence, because a stored error can name a repository the Worker used before |
-| Client report | The same finding text |
+| Client report | Always, also for a token with person-linked data or a dashboard session: it is meant for the client |
 
 Account names from Cloudflare are left out as well, because they are often a person's name. Wherever an account is named, you get the label set in **Settings › Accounts**, or `Account <first 8 characters of the id>` if there is none. E-mail addresses in the remaining text become `[email]`. Names chosen for Workers, resources and tags stay: they are what the API reports on, and Ambersight cannot tell whether someone used a personal name for one.
 

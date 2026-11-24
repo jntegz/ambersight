@@ -86,10 +86,13 @@ Everything lives in your own D1 database:
 | `d1_queries` | The most expensive D1 queries of the last day, as their shape only: strings, numbers, blobs and value lists become `?`, and comments are dropped |
 | `digest_parts` | Which messages of the current digest went out, one row per message, with each client or group recipient only as a keyed hash; older digests' rows are deleted when the next one starts |
 | `cf_incidents` | Recent Cloudflare status incidents, only when that check is on |
-| `settings` | Your configuration, the setup state, a passphrase set in Settings (as a PBKDF2 hash) and its binding to the `ADMIN_PASSPHRASE` secret |
-| `sessions` | Dashboard sign-ins, stored only as SHA-256 hashes |
+| `settings` | Your configuration, the setup state, a passphrase set in Settings (as a PBKDF2 hash) and its binding to the `ADMIN_PASSPHRASE` secret, the credential locked when passkeys were turned on, and the install's passkey challenge key and user handle |
+| `sessions` | Dashboard sign-ins, stored only as SHA-256 hashes, with how each signed in (passkey, link, passphrase or recovery) and which passkey |
+| `passkeys` | Registered passkeys: their public keys, names, counters and last use. A public key signs nobody in |
+| `webauthn_used` | Digests of passkey challenges already answered, so an answer works once; deleted when they expire, after 5 minutes |
+| `signin_links` | Open e-mailed sign-in links, each as a digest of its token and of the asking browser's cookie; deleted when used or expired (10 minutes) |
 | `known_devices` | Browsers that have signed in (at most 10, for 90 days), stored only as SHA-256 hashes, so they can still sign in during a pause |
-| `login_attempts` | Passphrase attempts per client and per 15-minute window, for the sign-in limits; every cron run deletes the expired ones |
+| `login_attempts` | Passphrase attempts per client and per 15-minute window, for the sign-in limits, and the count of sign-in links sent this hour, in all and per client; every cron run deletes the expired ones |
 
 ### How long data is kept
 
@@ -102,7 +105,7 @@ Everything lives in your own D1 database:
 | `metrics_daily`, `resource_daily`, `quota_daily`, `cron_daily`, `storage_daily`, `finding_events` | 400 days, whatever `retentionDays` says. They hold counts and check names, no deploy authors or actors |
 | `scan_runs`, `admin_events` | 90 days |
 | Open, acknowledged and snoozed findings, inventory (`workers`, `resources`, `schedules`, `zones` and the like) | Replaced by each scan, for as long as the account is watched |
-| `sessions` | 7 days after sign-in |
+| `sessions` | 7 days after sign-in; 1 day for an e-mailed link or a recovery |
 
 These deletes run with each account's daily inventory refresh. For **an account no longer scanned** (unticked in Settings, or left out of `CF_ACCOUNT_ID`) the scheduled run does the same once a day, with no Cloudflare calls: history ages out by the rules above, and once the last scan is older than `retentionDays`, its findings of any status, inventory, scan state and account name go too. The 400-day tables last their full 400 days. One row remains, the account ID with its last scan time, so that an account you switched off stays off. A label or client digest addresses you set for it stay in the configuration until you remove them.
 
@@ -127,7 +130,7 @@ The switch recognises people by the address or token name Cloudflare reports, an
 **Settings › Security › Remove one person from stored data** finds one e-mail address or name and replaces it with `[removed]`. The rows stay, so history, counts and finding identity keep working. It needs a dashboard session and cannot be used with an API token.
 
 1. **Preview.** Enter the exact address or name, with at least three letters or digits. You get a count per kind of data, never the records. A long search can stop before the end: the page says so and lets you continue, and nothing can be replaced until it has finished.
-2. **Replace.** Confirm with your passphrase. The step only accepts an identifier this session finished previewing in the last hour or two. It cannot be undone.
+2. **Replace.** Confirm with a passkey (or, before any passkey exists, your passphrase). The step only accepts an identifier this session finished previewing in the last hour or two. It cannot be undone.
 
 Matching takes the input literally, including `%` and `_`. An address matches in any case, and only as a whole address: `ann@example.com` leaves `joann@example.com` and `ann@example.com.au` alone. A name matches only as typed, capitals included, and only as a whole name: `Ann` leaves `ann`, `Channel`, `Ann-Marie`, `Ann.Lee` and `Ann@example.com` alone, so search for each form, and for a name and an address, separately. A single word can still be an ordinary word in text people wrote, and the preview warns about that. JSON is parsed and its values are rewritten one by one, so it stays valid. Its keys never change.
 
@@ -141,7 +144,7 @@ Matching takes the input literally, including `%` and `_`. An address matches in
 
 `finding_events`, the daily tables and `d1_queries` are not searched: they hold counts, check names and query shapes, with no free text about people. Finding IDs stay as they are.
 
-The work runs in small steps, and the page continues until it is done. One request looks closely at no more than 100 candidate rows and reads at most 20,000. Each step returns a signed position that only this session can use, for this identifier, and only for a limited time (an hour in a preview, 15 minutes in a removal). In a removal it also stands in for the passphrase, which is checked once, on the first step. Repeating a step or the whole run is safe, because a replaced value no longer matches. A value that a scan changes in the meantime is read again.
+The work runs in small steps, and the page continues until it is done. One request looks closely at no more than 100 candidate rows and reads at most 20,000. Each step returns a signed position that only this session can use, for this identifier, and only for a limited time (an hour in a preview, 15 minutes in a removal). In a removal it also stands in for the passkey or passphrase, which is checked once, on the first step. Repeating a step or the whole run is safe, because a replaced value no longer matches. A value that a scan changes in the meantime is read again.
 
 The identifier is not stored or logged. The admin log records that a search finished or a removal ran and, for a removal, how many records changed. A removal also sends the operators a notice.
 

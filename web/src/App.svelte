@@ -5,6 +5,7 @@
   import type { Config } from '../../src/shared/config';
   import type { AccountSummary, Overview as OverviewData } from '../../src/shared/types';
   import Icon, { type IconName } from './components/Icon.svelte';
+  import LinkSignIn from './components/LinkSignIn.svelte';
   import Login from './components/Login.svelte';
   import Logo from './components/Logo.svelte';
   import SinceLastVisit from './components/SinceLastVisit.svelte';
@@ -19,6 +20,7 @@
   import Settings from './pages/Settings.svelte';
   import Setup from './pages/Setup.svelte';
   import Timeline from './pages/Timeline.svelte';
+  import { auth } from './lib/auth.svelte';
   import { api, ApiError, closeSession, num, onAccountRefused, onSessionEnded, signInCount, timeAgo, UNKNOWN_ACCOUNT, workerHref } from './lib/api';
   import { forgetFleetData, SIGN_OUT_PENDING } from './lib/browserData';
   import { httpUrl } from './lib/links';
@@ -26,8 +28,25 @@
   import { parseHash, safeDecode, type Route } from './lib/route';
   import { currentTheme, setTheme, type Theme } from './lib/theme';
 
-  type View = 'loading' | 'login' | 'ready' | 'error';
+  type View = 'loading' | 'login' | 'link' | 'ready' | 'error';
   let view = $state<View>('loading');
+
+  // ---- An e-mailed sign-in link: "#/link/<token>". The token leaves the address bar and history at
+  // once; it lives only in this page until it is used or the page closes.
+  function takeLinkToken(): string | null {
+    const m = /^#\/link\/([a-f0-9]{64})$/.exec(location.hash);
+    if (!m) return null;
+    history.replaceState(history.state, '', `${location.pathname}${location.search}#/`);
+    return m[1];
+  }
+  let linkToken = $state<string | null>(takeLinkToken());
+  function linkDone(signed: boolean) {
+    linkToken = null;
+    if (signed) void signedIn();
+    // Opened while already signed in: carry on with this session.
+    else if (auth.method) void load();
+    else view = 'login';
+  }
   let data = $state<OverviewData | null>(null);
   let config = $state<Config | null>(null);
   let error = $state('');
@@ -81,6 +100,11 @@
   let routeArg = $state<string | null>(initial.arg);
   let routeParams = $state<URLSearchParams>(initial.params);
   async function onHash() {
+    if (location.hash.startsWith('#/link/')) {
+      linkToken = takeLinkToken();
+      if (linkToken) view = 'link';
+      return;
+    }
     if (location.hash.startsWith('#w-')) {
       location.replace(workerHref(safeDecode(location.hash.slice(3))));
       return;
@@ -270,7 +294,7 @@
 
   // ---- Signing out. The cookie is HttpOnly, so only the server can end the session: until it has
   // confirmed, the sign-in page says so, and the attempt is repeated (also after a reload).
-  const SIGN_OUT_UNCONFIRMED = "This browser's copy of your data is gone, but the server did not confirm the sign-out, so your session may still be active. Anyone using this browser could be signed in. Try again, or change the passphrase in Settings to end every session.";
+  const SIGN_OUT_UNCONFIRMED = "This browser's copy of your data is gone, but the server did not confirm the sign-out, so your session may still be active. Anyone using this browser could be signed in. Try again, or sign out every other session from another device in Settings › Security.";
   let signOutPending = $state((() => { try { return localStorage.getItem(SIGN_OUT_PENDING) === '1'; } catch { return false; } })());
   let signingOut = $state(false);
   function markSignOutPending(pending: boolean) {
@@ -300,7 +324,16 @@
   function signedIn() {
     session++;
     markSignOutPending(false);
+    void api.session().then(applySession, () => {});
     return readOverview();
+  }
+  /** Keeps what the pages need to know about signing in current. */
+  function applySession(s: Awaited<ReturnType<typeof api.session>> | null) {
+    turnstileSiteKey = s?.turnstileSiteKey ?? null;
+    signInWays = s?.signIn ?? { passkeys: false, link: false };
+    auth.passkeys = signInWays.passkeys;
+    auth.link = signInWays.link;
+    auth.method = s?.method ?? null;
   }
 
   // ---- Update notice, dismissable per version.
@@ -359,9 +392,14 @@
 
   let offline = $state(typeof navigator !== 'undefined' && navigator.onLine === false);
   let turnstileSiteKey = $state<string | null>(null);
+  let signInWays = $state({ passkeys: false, link: false });
   onMount(async () => {
     const s = await api.session().catch(() => null);
-    turnstileSiteKey = s?.turnstileSiteKey ?? null;
+    applySession(s);
+    if (linkToken) {
+      view = 'link';
+      return;
+    }
     // A sign-out the server never confirmed comes first: this browser does not reopen the session.
     if (signOutPending) {
       signedOut(SIGN_OUT_UNCONFIRMED);
@@ -392,7 +430,9 @@
 <svelte:window onkeydown={onKey} onhashchange={onHash} ononline={() => { offline = false; if (signOutPending) finishSignOut(); else if (view === 'ready') load(); }} onoffline={() => (offline = true)} />
 
 {#if view === 'login'}
-  <Login onSignedIn={signedIn} message={loginMessage} {turnstileSiteKey} onRetrySignOut={signOutPending ? finishSignOut : null} retrying={signingOut} />
+  <Login onSignedIn={signedIn} message={loginMessage} {turnstileSiteKey} signIn={signInWays} onRetrySignOut={signOutPending ? finishSignOut : null} retrying={signingOut} />
+{:else if view === 'link' && linkToken}
+  <LinkSignIn token={linkToken} onSignedIn={() => linkDone(true)} onCancel={() => linkDone(false)} />
 {:else if view === 'loading'}
   <main class="center muted"><span class="draw"><Logo size={64} /></span><p>Reading your Workers…</p></main>
 {:else if view === 'error' && route === 'settings'}
